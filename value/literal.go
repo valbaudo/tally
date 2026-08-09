@@ -427,8 +427,17 @@ func checkAssignable(from, to Type) (Assignment, error) {
 
 func ordinaryType(t Type) bool {
 	switch t.kind {
-	case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, EnumKind, ObjectKind, MapKind, ListKind, AnyKind:
+	case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, EnumKind, AnyKind:
 		return true
+	case ObjectKind:
+		for _, field := range t.fields {
+			if !ordinaryType(field.typ) {
+				return false
+			}
+		}
+		return true
+	case MapKind, ListKind:
+		return ordinaryType(*t.elem)
 	default:
 		return false
 	}
