@@ -1,0 +1,298 @@
+package workflow
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/valbaudo/dawn/value"
+)
+
+// This catches a compiler regression that leaves author-facing call or parallel
+// nodes in the compiled definition instead of turning them into graph scopes.
+func TestCompileLowersCallAndParallelToGraphs(t *testing.T) {
+	def, err := Compile(loweringFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	call := mustNode(t, def.Root(), "analysis")
+	if call.ScopeKind() != GraphScope || call.Provenance().Origin != OriginCall {
+		t.Fatalf("call = kind %q provenance %#v", call.ScopeKind(), call.Provenance())
+	}
+	parallel := mustNode(t, def.Root(), "reviewers")
+	if parallel.ScopeKind() != GraphScope || parallel.Provenance().Origin != OriginParallel {
+		t.Fatalf("parallel = kind %q provenance %#v", parallel.ScopeKind(), parallel.Provenance())
+	}
+}
+
+// This catches a compiler regression that flattens a called module's descendants
+// into its caller or exposes contracts other than the module boundary.
+func TestCompileCallKeepsModuleBoundary(t *testing.T) {
+	def, err := Compile(loweringFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(def.Root().Nodes()) != 2 {
+		t.Fatalf("root nodes = %d, want only its two immediate children", len(def.Root().Nodes()))
+	}
+	if _, found := findNode(def.Root(), "write"); found {
+		t.Fatal("called module descendant is addressable in its caller")
+	}
+	call, ok := mustNode(t, def.Root(), "analysis").Scope()
+	if !ok {
+		t.Fatal("analysis is not a scope")
+	}
+	graph, ok := call.Graph()
+	if !ok {
+		t.Fatal("analysis is not a graph scope")
+	}
+	if got := graph.Inputs().Ports()[0].Name(); got != "request" {
+		t.Fatalf("call input = %q, want module boundary request", got)
+	}
+	if got := graph.Outputs().Ports()[0].Name(); got != "report" {
+		t.Fatalf("call output = %q, want module boundary report", got)
+	}
+	if _, found := findNode(graph, "write"); !found {
+		t.Fatal("called module graph is missing its declared child")
+	}
+}
+
+// This catches a compiler regression that resolves only the first call level.
+func TestCompileLowersNestedCall(t *testing.T) {
+	def, err := Compile(ProgramDraft{
+		Root: "root",
+		Modules: []ModuleDraft{
+			module("root", GraphDraft{Nodes: []NodeDraft{{Name: "first", Call: &CallDraft{Module: "middle"}}}}),
+			module("middle", GraphDraft{Nodes: []NodeDraft{{Name: "second", Call: &CallDraft{Module: "leaf"}}}}),
+			module("leaf", GraphDraft{Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := mustNode(t, def.Root(), "first").Scope()
+	firstGraph, _ := first.Graph()
+	second := mustNode(t, firstGraph, "second")
+	if second.ScopeKind() != GraphScope || second.Provenance().Origin != OriginCall {
+		t.Fatalf("nested call = kind %q provenance %#v", second.ScopeKind(), second.Provenance())
+	}
+}
+
+// This catches accepting a program whose entry module cannot be resolved.
+func TestCompileRejectsAbsentRootModule(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "missing", Modules: []ModuleDraft{module("other", GraphDraft{})}})
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("Compile() error = %v, want missing root module", err)
+	}
+}
+
+// This catches ambiguous static module resolution.
+func TestCompileRejectsDuplicateModuleNames(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{}),
+		module("root", GraphDraft{}),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "duplicate module") {
+		t.Fatalf("Compile() error = %v, want duplicate module rejection", err)
+	}
+}
+
+// This catches nameless module and child declarations, which cannot form stable
+// lexical module or graph scopes.
+func TestCompileRejectsEmptyModuleAndNodeNames(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		draft ProgramDraft
+	}{
+		{
+			name:  "module",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{module("", GraphDraft{})}},
+		},
+		{
+			name: "node",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{
+				module("root", GraphDraft{Nodes: []NodeDraft{{Leaf: scriptLeaf()}}}),
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Compile(tc.draft); err == nil {
+				t.Fatal("Compile() accepted an empty name")
+			}
+		})
+	}
+}
+
+// This catches calls that remain unresolved until a scheduler attempts execution.
+func TestCompileRejectsUnknownCall(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{Nodes: []NodeDraft{{Name: "missing", Call: &CallDraft{Module: "nope"}}}}),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("Compile() error = %v, want unknown call rejection", err)
+	}
+}
+
+// This catches a direct recursive module call, which cannot lower to a finite
+// static graph.
+func TestCompileRejectsDirectRecursiveCall(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{Nodes: []NodeDraft{{Name: "again", Call: &CallDraft{Module: "root"}}}}),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "root -> root") {
+		t.Fatalf("Compile() error = %v, want direct call chain", err)
+	}
+}
+
+// This catches cycle detection that checks only a call's immediate parent.
+func TestCompileRejectsIndirectRecursiveCall(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{Nodes: []NodeDraft{{Name: "alpha", Call: &CallDraft{Module: "alpha"}}}}),
+		module("alpha", GraphDraft{Nodes: []NodeDraft{{Name: "beta", Call: &CallDraft{Module: "beta"}}}}),
+		module("beta", GraphDraft{Nodes: []NodeDraft{{Name: "again", Call: &CallDraft{Module: "alpha"}}}}),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "root -> alpha -> beta -> alpha") {
+		t.Fatalf("Compile() error = %v, want complete indirect call chain", err)
+	}
+}
+
+// This catches lowering a one-child author parallel into a graph, where it
+// would silently erase the requirement for actual parallel grouping.
+func TestCompileRejectsParallelWithFewerThanTwoChildren(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{Nodes: []NodeDraft{{
+			Name: "parallel",
+			Parallel: &ParallelDraft{Graph: GraphDraft{Nodes: []NodeDraft{{
+				Name: "only", Leaf: scriptLeaf(),
+			}}}},
+		}}}),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "at least two") {
+		t.Fatalf("Compile() error = %v, want parallel child count rejection", err)
+	}
+}
+
+// This catches an invalid draft node being arbitrarily lowered according to one
+// of its variants.
+func TestCompileRejectsNodeWithMultipleVariants(t *testing.T) {
+	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{Nodes: []NodeDraft{{
+			Name: "ambiguous", Leaf: scriptLeaf(), Graph: &GraphDraft{},
+		}}}),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("Compile() error = %v, want node variant rejection", err)
+	}
+}
+
+// This catches retaining any draft-owned graph, node, edge, binding, or literal
+// slice in the compiled definition.
+func TestCompileCopiesDraftOwnedState(t *testing.T) {
+	nested := GraphDraft{Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
+	cleanup := GraphDraft{Nodes: []NodeDraft{{Name: "clean", Leaf: scriptLeaf()}}}
+	draft := ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{
+			Nodes: []NodeDraft{{
+				Name: "group", Graph: &nested,
+				Literals: []LiteralBindingDraft{{Input: "fixed", Value: mustLiteral(t, `"value"`)}},
+			}},
+			Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "group"},
+				Bindings: []BindingDraft{{From: []string{"input"}, To: "fixed"}},
+			}},
+			Finally: &cleanup,
+		}),
+	}}
+	def, err := Compile(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	draft.Modules[0].Graph.Nodes[0].Name = "changed"
+	draft.Modules[0].Graph.Nodes[0].Literals[0].Input = "changed"
+	draft.Modules[0].Graph.Edges[0].Bindings[0].From[0] = "changed"
+	nested.Nodes[0].Name = "changed"
+	cleanup.Nodes[0].Name = "changed"
+
+	root := def.Root()
+	group := mustNode(t, root, "group")
+	if group.Literals()[0].Input() != "fixed" {
+		t.Fatalf("literal input = %q, want fixed", group.Literals()[0].Input())
+	}
+	if root.Edges()[0].Bindings()[0].From()[0] != "input" {
+		t.Fatalf("binding source = %q, want input", root.Edges()[0].Bindings()[0].From()[0])
+	}
+	scope, _ := group.Scope()
+	graph, _ := scope.Graph()
+	if mustNode(t, graph, "work").Name() != "work" {
+		t.Fatal("nested graph changed through its draft")
+	}
+	finally, ok := root.Finally()
+	if !ok || mustNode(t, finally.Graph(), "clean").Name() != "clean" {
+		t.Fatal("finally graph changed through its draft")
+	}
+}
+
+func loweringFixture(t *testing.T) ProgramDraft {
+	t.Helper()
+	request := contract(t, "request")
+	report := contract(t, "report")
+	return ProgramDraft{
+		Root: "root",
+		Modules: []ModuleDraft{
+			module("root", GraphDraft{Nodes: []NodeDraft{
+				{Name: "analysis", Call: &CallDraft{Module: "analyze"}},
+				{Name: "reviewers", Parallel: &ParallelDraft{Graph: GraphDraft{Nodes: []NodeDraft{
+					{Name: "first", Leaf: scriptLeaf()},
+					{Name: "second", Leaf: scriptLeaf()},
+				}}}},
+			}}),
+			module("analyze", GraphDraft{Inputs: request, Outputs: report, Nodes: []NodeDraft{
+				{Name: "write", Call: &CallDraft{Module: "report"}},
+			}}),
+			module("report", GraphDraft{Inputs: request, Outputs: report, Nodes: []NodeDraft{
+				{Name: "render", Leaf: &LeafDraft{Kind: Script, Inputs: request, Outputs: report}},
+			}}),
+		},
+	}
+}
+
+func module(name string, graph GraphDraft) ModuleDraft {
+	return ModuleDraft{Name: name, Graph: graph, Provenance: Provenance{Source: name + ".dawn"}}
+}
+
+func scriptLeaf() *LeafDraft {
+	return &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}
+}
+
+func contract(t *testing.T, name string) value.Contract {
+	t.Helper()
+	port, err := value.Required(name, value.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := value.NewContract(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contract
+}
+
+func mustNode(t *testing.T, graph Graph, name string) Node {
+	t.Helper()
+	node, ok := findNode(graph, name)
+	if !ok {
+		t.Fatalf("node %q not found", name)
+	}
+	return node
+}
+
+func findNode(graph Graph, name string) (Node, bool) {
+	for _, node := range graph.Nodes() {
+		if node.Name() == name {
+			return node, true
+		}
+	}
+	return Node{}, false
+}
