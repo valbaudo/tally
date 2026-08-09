@@ -8,7 +8,7 @@
 - `2026-08-09-values-contracts-workspaces-files-design.md`
 - `2026-08-09-structured-control-flow-propagation-design.md`
 
-**Status:** Design approved in sections on 2026-08-09; written-spec review pending
+**Status:** Design approved on 2026-08-09
 
 **Goal:** Let Dawn resume, derive, and replay arbitrary structured agent workflows without repeating committed work, confusing a run with a global cache, silently changing prior decisions, or exposing journal, identity, provider-recovery, and persistence machinery as workflow-language knobs.
 
