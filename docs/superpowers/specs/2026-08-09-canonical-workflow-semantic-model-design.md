@@ -415,6 +415,7 @@ The implemented kernel is recorded in these commits:
 - Closed structured-scope validation: `44277c0` and `bb845ac`.
 - Canonical immutable encoding: `ca064c2` and `08aed3d`.
 - Prestige-shaped structural tracer: `12baebc2e9ea95081e1fb2960fa352768a3cc935` (`test(workflow): prove the canonical semantic structure`).
+- Prestige-shaped tracer topology correction: `55a71ec52cb3be9f08d1947ddc6729d3638c9f78` (`test(workflow): correct prestige conformance topology`).
 
 The tracer builds the motivating shape through the public programmatic draft:
 file and structured root inputs, a static module call, independent agent
