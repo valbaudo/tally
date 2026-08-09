@@ -192,17 +192,30 @@ func TestCompileRejectsNodeWithMultipleVariants(t *testing.T) {
 // This catches retaining any draft-owned graph, node, edge, binding, or literal
 // slice in the compiled definition.
 func TestCompileCopiesDraftOwnedState(t *testing.T) {
-	nested := GraphDraft{Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
+	fixed, err := value.Required("fixed", value.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := value.Required("other", value.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupInputs, err := value.NewContract(fixed, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested := GraphDraft{Inputs: groupInputs, Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
 	cleanup := GraphDraft{Nodes: []NodeDraft{{Name: "clean", Leaf: scriptLeaf()}}}
 	draft := ProgramDraft{Root: "root", Modules: []ModuleDraft{
 		module("root", GraphDraft{
+			Inputs: contract(t, "input"),
 			Nodes: []NodeDraft{{
 				Name: "group", Graph: &nested,
 				Literals: []LiteralBindingDraft{{Input: "fixed", Value: mustLiteral(t, `"value"`)}},
 			}},
 			Edges: []EdgeDraft{{
 				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "group"},
-				Bindings: []BindingDraft{{From: []string{"input"}, To: "fixed"}},
+				Bindings: []BindingDraft{{From: []string{"input"}, To: "other"}},
 			}},
 			Finally: &cleanup,
 		}),
@@ -345,18 +358,27 @@ func loweringFixture(t *testing.T) ProgramDraft {
 	return ProgramDraft{
 		Root: "root",
 		Modules: []ModuleDraft{
-			module("root", GraphDraft{Nodes: []NodeDraft{
+			module("root", GraphDraft{Inputs: request, Nodes: []NodeDraft{
 				{Name: "analysis", Call: &CallDraft{Module: "analyze"}},
 				{Name: "reviewers", Parallel: &ParallelDraft{Graph: GraphDraft{Nodes: []NodeDraft{
 					{Name: "first", Leaf: scriptLeaf()},
 					{Name: "second", Leaf: scriptLeaf()},
 				}}}},
-			}}),
+			}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "analysis"},
+				Bindings: []BindingDraft{{From: []string{"request"}, To: "request"}},
+			}}}),
 			module("analyze", GraphDraft{Inputs: request, Outputs: report, Nodes: []NodeDraft{
 				{Name: "write", Call: &CallDraft{Module: "report"}},
+			}, Edges: []EdgeDraft{
+				{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write"}, Bindings: []BindingDraft{{From: []string{"request"}, To: "request"}}},
+				{From: EndpointDraft{Kind: Child, Child: "write"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"report"}, To: "report"}}},
 			}}),
 			module("report", GraphDraft{Inputs: request, Outputs: report, Nodes: []NodeDraft{
 				{Name: "render", Leaf: &LeafDraft{Kind: Script, Inputs: request, Outputs: report}},
+			}, Edges: []EdgeDraft{
+				{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "render"}, Bindings: []BindingDraft{{From: []string{"request"}, To: "request"}}},
+				{From: EndpointDraft{Kind: Child, Child: "render"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"report"}, To: "report"}}},
 			}}),
 		},
 	}

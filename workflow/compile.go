@@ -95,6 +95,10 @@ func (c *compiler) compileGraph(draft *GraphDraft) (Graph, error) {
 		outputs:    outputs,
 		provenance: authoredProvenance(draft.Provenance, c.active),
 	}
+	fallbackSource := graph.provenance.Source == "" && len(c.active) > 0
+	if fallbackSource {
+		graph.provenance.Source = c.modules[c.active[len(c.active)-1]].Provenance.Source
+	}
 	for _, draftNode := range draft.Nodes {
 		node, err := c.compileNode(draftNode)
 		if err != nil {
@@ -102,9 +106,13 @@ func (c *compiler) compileGraph(draft *GraphDraft) (Graph, error) {
 		}
 		graph.nodes = append(graph.nodes, node)
 	}
-	for _, draftEdge := range draft.Edges {
-		edge := compileEdge(draftEdge)
-		graph.edges = append(graph.edges, edge)
+	edges, err := validateBindings(graph, draft.Edges)
+	if err != nil {
+		return Graph{}, err
+	}
+	graph.edges = edges
+	if fallbackSource {
+		graph.provenance.Source = ""
 	}
 	if draft.Finally != nil {
 		cleanup, err := c.compileGraph(draft.Finally)
@@ -263,20 +271,6 @@ func (c *compiler) compileLoop(draft LoopDraft) (Loop, error) {
 		inputs: inputs, outputs: outputs, maximum: draft.Maximum,
 		termination: append([]string(nil), draft.Termination...), body: body,
 	}, nil
-}
-
-func compileEdge(draft EdgeDraft) Edge {
-	edge := Edge{
-		from: Endpoint{kind: draft.From.Kind, child: draft.From.Child},
-		to:   Endpoint{kind: draft.To.Kind, child: draft.To.Child},
-	}
-	for _, draftBinding := range draft.Bindings {
-		edge.bindings = append(edge.bindings, Binding{
-			from: append([]string(nil), draftBinding.From...),
-			to:   draftBinding.To,
-		})
-	}
-	return edge
 }
 
 func authoredProvenance(provenance Provenance, active []string) Provenance {
