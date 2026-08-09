@@ -274,6 +274,7 @@ func normalizeGraph(graph *Graph) {
 		normalizeEdge(&graph.edges[index])
 	}
 	sort.Slice(graph.edges, func(i, j int) bool { return compareEdges(graph.edges[i], graph.edges[j]) < 0 })
+	graph.edges = coalesceEdges(graph.edges)
 	if graph.cleanup != nil {
 		normalizeGraph(&graph.cleanup.graph)
 	}
@@ -310,6 +311,24 @@ func normalizeBranch(branch *Branch) {
 
 func normalizeEdge(edge *Edge) {
 	sort.Slice(edge.bindings, func(i, j int) bool { return compareBindings(edge.bindings[i], edge.bindings[j]) < 0 })
+}
+
+func coalesceEdges(edges []Edge) []Edge {
+	if len(edges) == 0 {
+		return edges
+	}
+	coalesced := make([]Edge, 0, len(edges))
+	for _, edge := range edges {
+		if len(coalesced) == 0 || compareEndpoints(coalesced[len(coalesced)-1].from, edge.from) != 0 || compareEndpoints(coalesced[len(coalesced)-1].to, edge.to) != 0 {
+			coalesced = append(coalesced, edge)
+			continue
+		}
+		coalesced[len(coalesced)-1].bindings = append(coalesced[len(coalesced)-1].bindings, edge.bindings...)
+	}
+	for index := range coalesced {
+		normalizeEdge(&coalesced[index])
+	}
+	return coalesced
 }
 
 func compareEdges(left, right Edge) int {

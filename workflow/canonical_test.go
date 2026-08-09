@@ -67,6 +67,49 @@ func TestCompiledDefinitionNormalizesPublicInspectionOrder(t *testing.T) {
 	}
 }
 
+// This catches preserving lexical edge grouping after validation, where one
+// dependency relation can be expressed as split data edges or redundant
+// completion edges and therefore must normalize to one public Edge.
+func TestCompiledDefinitionCoalescesSemanticEdges(t *testing.T) {
+	combined := mustCompileCanonical(t, canonicalEdgeGroupingFixture(t, "combined"))
+	for _, name := range []string{"split", "split reversed", "data plus completion"} {
+		t.Run(name, func(t *testing.T) {
+			got := mustCompileCanonical(t, canonicalEdgeGroupingFixture(t, name))
+			if !bytes.Equal(combined.Canonical(), got.Canonical()) {
+				t.Fatalf("canonical bytes differ for %s", name)
+			}
+			assertCanonicalEdgeGroup(t, got.Root())
+		})
+	}
+	assertCanonicalEdgeGroup(t, combined.Root())
+
+	t.Run("duplicate completion", func(t *testing.T) {
+		def := mustCompileCanonical(t, canonicalCompletionGroupingFixture())
+		edges := def.Root().Edges()
+		if len(edges) != 1 || len(edges[0].Bindings()) != 0 {
+			t.Fatalf("completion edges = %#v, want one empty edge", edges)
+		}
+	})
+
+	t.Run("nested graph", func(t *testing.T) {
+		combined := mustCompileCanonical(t, canonicalNestedEdgeGroupingFixture(t, "combined"))
+		split := mustCompileCanonical(t, canonicalNestedEdgeGroupingFixture(t, "split reversed"))
+		if !bytes.Equal(combined.Canonical(), split.Canonical()) {
+			t.Fatal("nested canonical bytes differ")
+		}
+		scope, _ := mustNode(t, split.Root(), "nested").Scope()
+		graph, _ := scope.Graph()
+		assertCanonicalEdgeGroup(t, graph)
+	})
+
+	t.Run("distinct pairs remain distinct", func(t *testing.T) {
+		def := mustCompileCanonical(t, canonicalDistinctEdgePairsFixture())
+		if got := len(def.Root().Edges()); got != 2 {
+			t.Fatalf("distinct endpoint edges = %d, want 2", got)
+		}
+	})
+}
+
 // This catches canonical encodings that preserve authoring order for sets of
 // modules, graph children, edges, bindings, or branch cases.
 func TestCanonicalDefinitionIgnoresSourceOrder(t *testing.T) {
@@ -769,4 +812,85 @@ func canonicalNodeOf(graph Graph, name string) Node {
 		panic("node is missing: " + name)
 	}
 	return node
+}
+
+func canonicalEdgeGroupingFixture(t *testing.T, grouping string) ProgramDraft {
+	t.Helper()
+	ports := canonicalContract(t, canonicalField(t, "one", value.String()), canonicalField(t, "two", value.String()))
+	edges := []EdgeDraft{{
+		From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"},
+		Bindings: []BindingDraft{{From: []string{"one"}, To: "one"}, {From: []string{"two"}, To: "two"}},
+	}}
+	switch grouping {
+	case "combined":
+	case "split":
+		edges = []EdgeDraft{
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}, Bindings: []BindingDraft{{From: []string{"one"}, To: "one"}}},
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}, Bindings: []BindingDraft{{From: []string{"two"}, To: "two"}}},
+		}
+	case "split reversed":
+		edges = []EdgeDraft{
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}, Bindings: []BindingDraft{{From: []string{"two"}, To: "two"}}},
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}, Bindings: []BindingDraft{{From: []string{"one"}, To: "one"}}},
+		}
+	case "data plus completion":
+		edges = append(edges, EdgeDraft{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}})
+	default:
+		panic("unknown edge grouping " + grouping)
+	}
+	return bindingProgram(GraphDraft{
+		Nodes: []NodeDraft{
+			bindingLeaf("source", value.EmptyContract(), ports),
+			bindingLeaf("target", ports, value.EmptyContract()),
+		},
+		Edges: edges,
+	})
+}
+
+func canonicalCompletionGroupingFixture() ProgramDraft {
+	return bindingProgram(GraphDraft{
+		Nodes: []NodeDraft{bindingLeaf("source", value.EmptyContract(), value.EmptyContract()), bindingLeaf("target", value.EmptyContract(), value.EmptyContract())},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}},
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "target"}},
+		},
+	})
+}
+
+func canonicalNestedEdgeGroupingFixture(t *testing.T, grouping string) ProgramDraft {
+	t.Helper()
+	draft := canonicalEdgeGroupingFixture(t, grouping)
+	root := canonicalRoot(&draft)
+	root.Nodes = []NodeDraft{{Name: "nested", Graph: &GraphDraft{Nodes: root.Nodes, Edges: root.Edges, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}
+	root.Edges = nil
+	return draft
+}
+
+func canonicalDistinctEdgePairsFixture() ProgramDraft {
+	return bindingProgram(GraphDraft{
+		Nodes: []NodeDraft{
+			bindingLeaf("source", value.EmptyContract(), value.EmptyContract()),
+			bindingLeaf("first", value.EmptyContract(), value.EmptyContract()),
+			bindingLeaf("second", value.EmptyContract(), value.EmptyContract()),
+		},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "first"}},
+			{From: EndpointDraft{Kind: Child, Child: "source"}, To: EndpointDraft{Kind: Child, Child: "second"}},
+		},
+	})
+}
+
+func assertCanonicalEdgeGroup(t *testing.T, graph Graph) {
+	t.Helper()
+	edges := graph.Edges()
+	if len(edges) != 1 {
+		t.Fatalf("edges = %d, want one", len(edges))
+	}
+	bindings := edges[0].Bindings()
+	if len(bindings) != 2 {
+		t.Fatalf("bindings = %d, want two", len(bindings))
+	}
+	if got := []string{bindings[0].To(), bindings[1].To()}; !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Fatalf("binding targets = %v, want [one two]", got)
+	}
 }
