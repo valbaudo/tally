@@ -23,7 +23,6 @@ func TestPrestigeShapeCompilesIntoClosedHierarchy(t *testing.T) {
 	assertLoweredOrigin(t, root, "review", OriginParallel)
 	assertNoDependency(t, mustGraph(t, root, "review"), "static", "dynamic")
 	assertEncapsulated(t, root)
-	assertNoRuntimePaths(t, root)
 	assertOptionalWorkTopology(t, root)
 	assertRevisionTopology(t, root)
 
@@ -34,6 +33,42 @@ func TestPrestigeShapeCompilesIntoClosedHierarchy(t *testing.T) {
 	aggregateLeaf, ok := aggregate.Leaf()
 	if !ok || aggregateLeaf.Kind() != Script {
 		t.Fatal("aggregate is not a script leaf")
+	}
+}
+
+// This catches endpoint resolution splitting an opaque immediate sibling name
+// into a nested scope and child instead of selecting the exact sibling.
+func TestProductInvariantOpaqueSiblingDoesNotDescend(t *testing.T) {
+	text := prestigeContract(t, prestigeRequired(t, "text", value.String()))
+	empty := value.EmptyContract()
+	draft := ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []NodeDraft{
+			{Name: "review", Graph: &GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{{Name: "static", Leaf: &LeafDraft{Kind: Script, Inputs: empty, Outputs: empty}}}}},
+			{Name: "review/static", Leaf: &LeafDraft{Kind: Script, Inputs: empty, Outputs: text}},
+			{Name: "aggregate", Leaf: &LeafDraft{Kind: Script, Inputs: text, Outputs: empty}},
+		},
+		Edges: []EdgeDraft{{
+			From: childEndpoint("review/static"), To: childEndpoint("aggregate"),
+			Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+		}},
+	})}}
+	def, err := Compile(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := def.Root()
+	assertEncapsulated(t, root)
+	edge := root.Edges()[0]
+	if edge.From().Child() != "review/static" {
+		t.Fatalf("edge source = %q, want exact immediate sibling", edge.From().Child())
+	}
+	if _, found := findNode(root, edge.From().Child()); !found {
+		t.Fatalf("edge source %q is not an immediate sibling", edge.From().Child())
+	}
+	if _, found := findNode(mustGraph(t, root, "review"), "static"); !found {
+		t.Fatal("nested review child is missing from collision fixture")
 	}
 }
 
@@ -438,9 +473,6 @@ func assertEncapsulated(t *testing.T, graph Graph) {
 	for _, edge := range graph.Edges() {
 		for _, endpoint := range []Endpoint{edge.From(), edge.To()} {
 			if endpoint.Kind() == Child {
-				if strings.Contains(endpoint.Child(), "/") {
-					t.Fatalf("graph edge crosses a scope boundary through %q", endpoint.Child())
-				}
 				if _, ok := findNode(graph, endpoint.Child()); !ok {
 					t.Fatalf("graph edge references non-immediate child %q", endpoint.Child())
 				}
@@ -464,47 +496,6 @@ func assertEncapsulated(t *testing.T, graph Graph) {
 			case LoopScope:
 				loop, _ := scope.Loop()
 				assertEncapsulated(t, loop.Body())
-			}
-		}
-	}
-}
-
-func assertNoRuntimePaths(t *testing.T, graph Graph) {
-	t.Helper()
-	for _, edge := range graph.Edges() {
-		for _, endpoint := range []Endpoint{edge.From(), edge.To()} {
-			if strings.Contains(endpoint.Child(), "/") {
-				t.Fatalf("endpoint contains runtime path %q", endpoint.Child())
-			}
-		}
-		for _, binding := range edge.Bindings() {
-			for _, part := range binding.From() {
-				if strings.Contains(part, "/") {
-					t.Fatalf("binding contains runtime path %q", part)
-				}
-			}
-		}
-	}
-	if cleanup, ok := graph.Finally(); ok {
-		assertNoRuntimePaths(t, cleanup.Graph())
-	}
-	for _, node := range graph.Nodes() {
-		if scope, ok := node.Scope(); ok {
-			switch scope.Kind() {
-			case GraphScope:
-				inner, _ := scope.Graph()
-				assertNoRuntimePaths(t, inner)
-			case BranchScope:
-				branch, _ := scope.Branch()
-				for _, branchCase := range branch.Cases() {
-					assertNoRuntimePaths(t, branchCase.Graph())
-				}
-			case MapScope:
-				mapped, _ := scope.Map()
-				assertNoRuntimePaths(t, mapped.Body())
-			case LoopScope:
-				loop, _ := scope.Loop()
-				assertNoRuntimePaths(t, loop.Body())
 			}
 		}
 	}

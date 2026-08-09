@@ -940,7 +940,7 @@ Build a programmatic draft with:
 7. a separate deterministic gate; and
 8. unconditional cleanup attached through `finally`.
 
-Assert the compiled definition contains only the four canonical leaf kinds and five canonical scope kinds, `call` and `parallel` appear only as provenance, the reviewers have no edge between them, all external visibility goes through declared graph outputs, and no reference or record contains a runtime path.
+Assert the compiled definition contains only the four canonical leaf kinds and five canonical scope kinds, `call` and `parallel` appear only as provenance, the reviewers have no edge between them, all external visibility goes through declared graph outputs, and every reference targets a declared immediate endpoint without runtime-path parsing.
 
 ```go
 func TestPrestigeShapeCompilesIntoClosedHierarchy(t *testing.T) {
