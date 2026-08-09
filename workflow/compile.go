@@ -25,6 +25,9 @@ func Compile(draft ProgramDraft) (Definition, error) {
 	if err != nil {
 		return Definition{}, err
 	}
+	if err := validateGraph(root, false); err != nil {
+		return Definition{}, err
+	}
 	return Definition{root: root}, nil
 }
 
