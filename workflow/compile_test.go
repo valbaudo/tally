@@ -274,6 +274,31 @@ func TestCompileRejectsRecursiveDraftGraphPointers(t *testing.T) {
 	}
 }
 
+// This catches recursive structured drafts being copied on each compilation
+// frame, which previously evaded the active graph-pointer guard and overflowed
+// the process stack.
+func TestCompileRejectsRecursiveStructuredDraftPointers(t *testing.T) {
+	const recursiveCase = "DAWN_COMPILE_RECURSIVE_STRUCTURED_CASE"
+	if name := os.Getenv(recursiveCase); name != "" {
+		debug.SetMaxStack(64 << 10)
+		if _, err := Compile(recursiveStructuredFixture(name)); err == nil {
+			t.Fatal("Compile() accepted a recursive structured draft pointer")
+		}
+		return
+	}
+
+	for _, name := range []string{"branch", "map", "loop"} {
+		t.Run(name, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestCompileRejectsRecursiveStructuredDraftPointers$")
+			command.Env = append(os.Environ(), recursiveCase+"="+name)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Compile() did not return an ordinary error for a recursive %s draft pointer: %v\n%s", name, err, output)
+			}
+		})
+	}
+}
+
 // This catches an active-pointer guard that rejects legitimate reuse after the
 // first independent occurrence has finished compiling.
 func TestCompileAllowsReusedNonRecursiveDraftGraph(t *testing.T) {
@@ -296,6 +321,40 @@ func TestCompileAllowsReusedNonRecursiveDraftGraph(t *testing.T) {
 		if _, found := findNode(graph, "work"); !found {
 			t.Fatalf("%s did not compile its reused graph", name)
 		}
+	}
+}
+
+// This catches active-pointer protection that mistakes separate uses of an
+// already-finished branch, map, or loop draft for recursive expansion.
+func TestCompileAllowsReusedNonRecursiveStructuredDraft(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nodes []NodeDraft
+	}{
+		{
+			name:  "branch",
+			nodes: reusedBranchNodes(t),
+		},
+		{
+			name:  "map",
+			nodes: reusedMapNodes(t),
+		},
+		{
+			name:  "loop",
+			nodes: reusedLoopNodes(t),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+				module("root", GraphDraft{Nodes: tc.nodes}),
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(def.Root().Nodes()) != 2 {
+				t.Fatalf("compiled nodes = %d, want 2 reused occurrences", len(def.Root().Nodes()))
+			}
+		})
 	}
 }
 
@@ -344,6 +403,132 @@ func recursiveGraphFixture(name string) ProgramDraft {
 		panic("unknown recursive graph fixture " + name)
 	}
 	return ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", graph)}}
+}
+
+func recursiveStructuredFixture(name string) ProgramDraft {
+	empty := value.EmptyContract()
+	var node NodeDraft
+	switch name {
+	case "branch":
+		branch := &BranchDraft{Inputs: empty, Outputs: empty}
+		branch.Cases = []CaseDraft{{Name: "again", Graph: GraphDraft{
+			Inputs: empty, Outputs: empty,
+			Nodes: []NodeDraft{{Name: "again", Branch: branch}},
+		}}}
+		node = NodeDraft{Name: "structured", Branch: branch}
+	case "map":
+		mapped := &MapDraft{Inputs: empty, Outputs: empty}
+		mapped.Body = GraphDraft{
+			Inputs: empty, Outputs: empty,
+			Nodes: []NodeDraft{{Name: "again", Map: mapped}},
+		}
+		node = NodeDraft{Name: "structured", Map: mapped}
+	case "loop":
+		loop := &LoopDraft{Inputs: empty, Outputs: empty}
+		loop.Body = GraphDraft{
+			Inputs: empty, Outputs: empty,
+			Nodes: []NodeDraft{{Name: "again", Loop: loop}},
+		}
+		node = NodeDraft{Name: "structured", Loop: loop}
+	default:
+		panic("unknown recursive structured fixture " + name)
+	}
+	return ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", GraphDraft{Nodes: []NodeDraft{node}})}}
+}
+
+func reusedBranchNodes(t *testing.T) []NodeDraft {
+	t.Helper()
+	selected := contractOf(t, requiredPort(t, "selected", value.Boolean()))
+	branch := &BranchDraft{
+		Inputs: selected, Outputs: value.EmptyContract(), Selector: "selected",
+		Cases: []CaseDraft{
+			{Name: "false", Graph: GraphDraft{Inputs: selected, Outputs: value.EmptyContract()}},
+			{Name: "true", Graph: GraphDraft{Inputs: selected, Outputs: value.EmptyContract()}},
+		},
+	}
+	literal := mustLiteral(t, "true")
+	return []NodeDraft{
+		{Name: "first", Branch: branch, Literals: []LiteralBindingDraft{{Input: "selected", Value: literal}}},
+		{Name: "second", Branch: branch, Literals: []LiteralBindingDraft{{Input: "selected", Value: literal}}},
+	}
+}
+
+func reusedMapNodes(t *testing.T) []NodeDraft {
+	t.Helper()
+	items := requiredPort(t, "items", listType(t, value.String()))
+	mapInputs := contractOf(t, items)
+	item := requiredPort(t, "item", value.String())
+	index := requiredPort(t, "index", value.Integer())
+	bodyInputs := contractOf(t, item, index)
+	resultType := listType(t, value.EmptyContract().ObjectType())
+	mapOutputs := contractOf(t, requiredPort(t, "result", resultType))
+	mapped := &MapDraft{
+		Inputs: mapInputs, Outputs: mapOutputs, Collection: "items", Result: "result",
+		Body: GraphDraft{Inputs: bodyInputs, Outputs: value.EmptyContract()},
+	}
+	literal := mustLiteral(t, `["one"]`)
+	return []NodeDraft{
+		{Name: "first", Map: mapped, Literals: []LiteralBindingDraft{{Input: "items", Value: literal}}},
+		{Name: "second", Map: mapped, Literals: []LiteralBindingDraft{{Input: "items", Value: literal}}},
+	}
+}
+
+func reusedLoopNodes(t *testing.T) []NodeDraft {
+	t.Helper()
+	empty := value.EmptyContract()
+	stop := requiredPort(t, "stop", value.Boolean())
+	bodyOutputs := contractOf(t, stop)
+	initial := requiredPort(t, "initial", empty.ObjectType())
+	previous := optionalPort(t, "previous", bodyOutputs.ObjectType())
+	iteration := requiredPort(t, "iteration", value.Integer())
+	loop := &LoopDraft{
+		Inputs: empty, Outputs: bodyOutputs, Maximum: 1, Termination: []string{"stop"},
+		Body: GraphDraft{
+			Inputs: contractOf(t, initial, previous, iteration), Outputs: bodyOutputs,
+			Nodes: []NodeDraft{{Name: "produce", Leaf: &LeafDraft{Kind: Script, Inputs: empty, Outputs: bodyOutputs}}},
+			Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Child, Child: "produce"}, To: EndpointDraft{Kind: Boundary},
+				Bindings: []BindingDraft{{From: []string{"stop"}, To: "stop"}},
+			}},
+		},
+	}
+	return []NodeDraft{{Name: "first", Loop: loop}, {Name: "second", Loop: loop}}
+}
+
+func requiredPort(t *testing.T, name string, typ value.Type) value.Field {
+	t.Helper()
+	port, err := value.Required(name, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func optionalPort(t *testing.T, name string, typ value.Type) value.Field {
+	t.Helper()
+	port, err := value.Optional(name, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func contractOf(t *testing.T, ports ...value.Field) value.Contract {
+	t.Helper()
+	contract, err := value.NewContract(ports...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contract
+}
+
+func listType(t *testing.T, element value.Type) value.Type {
+	t.Helper()
+	typ, err := value.List(element)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return typ
 }
 
 func assertAuthoredProvenance(t *testing.T, got Provenance, source, module string) {

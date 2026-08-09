@@ -10,9 +10,12 @@ import (
 // compiler resolves static module calls while keeping the current expansion
 // chain available for recursion diagnostics.
 type compiler struct {
-	modules map[string]ModuleDraft
-	active  []string
-	graphs  map[*GraphDraft]struct{}
+	modules  map[string]ModuleDraft
+	active   []string
+	graphs   map[*GraphDraft]struct{}
+	branches map[*BranchDraft]struct{}
+	maps     map[*MapDraft]struct{}
+	loops    map[*LoopDraft]struct{}
 }
 
 // Compile lowers source-neutral workflow drafts into one immutable definition.
@@ -40,8 +43,11 @@ func Compile(draft ProgramDraft) (Definition, error) {
 
 func newCompiler(modules []ModuleDraft) (*compiler, error) {
 	c := &compiler{
-		modules: make(map[string]ModuleDraft, len(modules)),
-		graphs:  make(map[*GraphDraft]struct{}),
+		modules:  make(map[string]ModuleDraft, len(modules)),
+		graphs:   make(map[*GraphDraft]struct{}),
+		branches: make(map[*BranchDraft]struct{}),
+		maps:     make(map[*MapDraft]struct{}),
+		loops:    make(map[*LoopDraft]struct{}),
 	}
 	for _, module := range modules {
 		if module.Name == "" {
@@ -199,19 +205,19 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		}
 		node.scope = &Scope{kind: GraphScope, graph: &graph}
 	case draft.Branch != nil:
-		branch, err := c.compileBranch(*draft.Branch)
+		branch, err := c.compileBranch(draft.Branch)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q branch: %w", draft.Name, err)
 		}
 		node.scope = &Scope{kind: BranchScope, branch: &branch}
 	case draft.Map != nil:
-		mapped, err := c.compileMap(*draft.Map)
+		mapped, err := c.compileMap(draft.Map)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q map: %w", draft.Name, err)
 		}
 		node.scope = &Scope{kind: MapScope, map_: &mapped}
 	case draft.Loop != nil:
-		loop, err := c.compileLoop(*draft.Loop)
+		loop, err := c.compileLoop(draft.Loop)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q loop: %w", draft.Name, err)
 		}
@@ -241,7 +247,13 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 	return node, nil
 }
 
-func (c *compiler) compileBranch(draft BranchDraft) (Branch, error) {
+func (c *compiler) compileBranch(draft *BranchDraft) (Branch, error) {
+	if _, active := c.branches[draft]; active {
+		return Branch{}, fmt.Errorf("recursive branch draft pointer")
+	}
+	c.branches[draft] = struct{}{}
+	defer delete(c.branches, draft)
+
 	inputs, err := cloneContract(draft.Inputs)
 	if err != nil {
 		return Branch{}, fmt.Errorf("inputs: %w", err)
@@ -251,7 +263,8 @@ func (c *compiler) compileBranch(draft BranchDraft) (Branch, error) {
 		return Branch{}, fmt.Errorf("outputs: %w", err)
 	}
 	branch := Branch{inputs: inputs, outputs: outputs, selector: draft.Selector}
-	for _, draftCase := range draft.Cases {
+	for index := range draft.Cases {
+		draftCase := &draft.Cases[index]
 		graph, err := c.compileGraph(&draftCase.Graph)
 		if err != nil {
 			return Branch{}, fmt.Errorf("case %q: %w", draftCase.Name, err)
@@ -261,7 +274,13 @@ func (c *compiler) compileBranch(draft BranchDraft) (Branch, error) {
 	return branch, nil
 }
 
-func (c *compiler) compileMap(draft MapDraft) (Map, error) {
+func (c *compiler) compileMap(draft *MapDraft) (Map, error) {
+	if _, active := c.maps[draft]; active {
+		return Map{}, fmt.Errorf("recursive map draft pointer")
+	}
+	c.maps[draft] = struct{}{}
+	defer delete(c.maps, draft)
+
 	inputs, err := cloneContract(draft.Inputs)
 	if err != nil {
 		return Map{}, fmt.Errorf("inputs: %w", err)
@@ -277,7 +296,13 @@ func (c *compiler) compileMap(draft MapDraft) (Map, error) {
 	return Map{inputs: inputs, outputs: outputs, collection: draft.Collection, result: draft.Result, body: body}, nil
 }
 
-func (c *compiler) compileLoop(draft LoopDraft) (Loop, error) {
+func (c *compiler) compileLoop(draft *LoopDraft) (Loop, error) {
+	if _, active := c.loops[draft]; active {
+		return Loop{}, fmt.Errorf("recursive loop draft pointer")
+	}
+	c.loops[draft] = struct{}{}
+	defer delete(c.loops, draft)
+
 	inputs, err := cloneContract(draft.Inputs)
 	if err != nil {
 		return Loop{}, fmt.Errorf("inputs: %w", err)
