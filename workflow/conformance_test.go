@@ -24,6 +24,8 @@ func TestPrestigeShapeCompilesIntoClosedHierarchy(t *testing.T) {
 	assertNoDependency(t, mustGraph(t, root, "review"), "static", "dynamic")
 	assertEncapsulated(t, root)
 	assertNoRuntimePaths(t, root)
+	assertOptionalWorkTopology(t, root)
+	assertRevisionTopology(t, root)
 
 	aggregate := mustNode(t, root, "aggregate")
 	if !hasEdge(root, "aggregate", "", "result") {
@@ -32,6 +34,91 @@ func TestPrestigeShapeCompilesIntoClosedHierarchy(t *testing.T) {
 	aggregateLeaf, ok := aggregate.Leaf()
 	if !ok || aggregateLeaf.Kind() != Script {
 		t.Fatal("aggregate is not a script leaf")
+	}
+}
+
+// This catches optional work being represented as two identical branch bodies
+// rather than one zero-work path and one explicit work path with a shared
+// contract.
+func assertOptionalWorkTopology(t *testing.T, root Graph) {
+	t.Helper()
+	scope, ok := mustNode(t, root, "optional").Scope()
+	if !ok || scope.Kind() != BranchScope {
+		t.Fatal("optional work is not a branch scope")
+	}
+	branch, ok := scope.Branch()
+	if !ok {
+		t.Fatal("optional work has no branch record")
+	}
+	wantInputs := prestigeContract(t, prestigeRequired(t, "selected", value.Boolean()))
+	if !branch.Inputs().Equal(wantInputs) || !branch.Outputs().Equal(value.EmptyContract()) {
+		t.Fatalf("optional branch contracts = %v -> %v, want selected boolean -> empty", branch.Inputs(), branch.Outputs())
+	}
+	if len(branch.Cases()) != 2 {
+		t.Fatalf("optional branch cases = %d, want exactly two", len(branch.Cases()))
+	}
+	falseCase, trueCase := mustCase(t, branch, "false"), mustCase(t, branch, "true")
+	for _, branchCase := range []Case{falseCase, trueCase} {
+		if !branchCase.Graph().Inputs().Equal(branch.Inputs()) || !branchCase.Graph().Outputs().Equal(branch.Outputs()) {
+			t.Fatalf("optional case %q does not preserve the branch contract", branchCase.Name())
+		}
+	}
+	if len(falseCase.Graph().Nodes()) != 0 {
+		t.Fatal("false optional case contains work")
+	}
+	work := mustNode(t, trueCase.Graph(), "work")
+	leaf, ok := work.Leaf()
+	if !ok || leaf.Kind() != Script || len(trueCase.Graph().Nodes()) != 1 {
+		t.Fatal("true optional case does not contain exactly the script work leaf")
+	}
+}
+
+// This catches a loop whose worker creates its own verdict or whose parent
+// gate is disconnected from the loop result instead of consuming that verdict
+// through the one ordinary edge relation.
+func assertRevisionTopology(t *testing.T, root Graph) {
+	t.Helper()
+	scope, ok := mustNode(t, root, "revise").Scope()
+	if !ok || scope.Kind() != LoopScope {
+		t.Fatal("revision is not a loop scope")
+	}
+	loop, ok := scope.Loop()
+	if !ok {
+		t.Fatal("revision has no loop record")
+	}
+	if !samePath(loop.Termination(), []string{"passed"}) {
+		t.Fatalf("loop termination = %v, want [passed]", loop.Termination())
+	}
+	body := loop.Body()
+	worker := mustNode(t, body, "worker")
+	if leaf, ok := worker.Leaf(); !ok || leaf.Kind() != Agent {
+		t.Fatal("revision worker is not an agent leaf")
+	}
+	judge := mustNode(t, body, "judge")
+	judgeLeaf, ok := judge.Leaf()
+	if !ok || (judgeLeaf.Kind() != LLM && judgeLeaf.Kind() != Agent) {
+		t.Fatal("revision judge is not an llm or agent leaf")
+	}
+	if !judgeLeaf.Outputs().Equal(loop.Outputs()) {
+		t.Fatal("revision judge does not produce the loop verdict contract")
+	}
+	if !hasEdge(body, "worker", "judge", "draft") {
+		t.Fatal("revision worker does not feed the judge")
+	}
+	if !hasEdge(body, "judge", "", "passed") || !hasEdge(body, "judge", "", "reason") {
+		t.Fatal("revision judge verdict does not drive the loop body outputs")
+	}
+
+	gate := mustNode(t, root, "gate")
+	gateLeaf, ok := gate.Leaf()
+	if !ok || gateLeaf.Kind() != Gate {
+		t.Fatal("parent deterministic gate is not a gate leaf")
+	}
+	if len(gate.Literals()) != 0 {
+		t.Fatal("parent deterministic gate is supplied by a literal")
+	}
+	if !hasEdge(root, "revise", "gate", "passed") || !hasEdge(root, "revise", "gate", "reason") {
+		t.Fatal("loop verdict does not feed the parent deterministic gate")
 	}
 }
 
@@ -190,6 +277,7 @@ func prestigeDraft(t *testing.T, reverseReviewers bool) ProgramDraft {
 		prestigeRequired(t, "passed", value.Boolean()),
 		prestigeOptional(t, "reason", value.String()),
 	)
+	workerOutputs := prestigeContract(t, prestigeRequired(t, "draft", value.String()))
 	loopBodyInputs := prestigeContract(t,
 		prestigeRequired(t, "initial", loopInputs.ObjectType()),
 		prestigeOptional(t, "previous", loopOutputs.ObjectType()),
@@ -203,13 +291,13 @@ func prestigeDraft(t *testing.T, reverseReviewers bool) ProgramDraft {
 				{Name: "worker", Leaf: &LeafDraft{Kind: Agent, Inputs: prestigeContract(t,
 					prestigeRequired(t, "initial", loopInputs.ObjectType()),
 					prestigeRequired(t, "iteration", value.Integer()),
-				), Outputs: loopOutputs}},
-				{Name: "judge", Leaf: &LeafDraft{Kind: Gate, Inputs: prestigeGateInputs(t), Outputs: value.EmptyContract()}},
+				), Outputs: workerOutputs}},
+				{Name: "judge", Leaf: &LeafDraft{Kind: LLM, Inputs: workerOutputs, Outputs: loopOutputs}},
 			},
 			Edges: []EdgeDraft{
 				{From: boundaryEndpoint(), To: childEndpoint("worker"), Bindings: []BindingDraft{{From: []string{"initial"}, To: "initial"}, {From: []string{"iteration"}, To: "iteration"}}},
-				{From: childEndpoint("worker"), To: childEndpoint("judge"), Bindings: []BindingDraft{{From: []string{"passed"}, To: "passed"}, {From: []string{"reason"}, To: "reason"}}},
-				{From: childEndpoint("worker"), To: boundaryEndpoint(), Bindings: []BindingDraft{{From: []string{"passed"}, To: "passed"}, {From: []string{"reason"}, To: "reason"}}},
+				{From: childEndpoint("worker"), To: childEndpoint("judge"), Bindings: []BindingDraft{{From: []string{"draft"}, To: "draft"}}},
+				{From: childEndpoint("judge"), To: boundaryEndpoint(), Bindings: []BindingDraft{{From: []string{"passed"}, To: "passed"}, {From: []string{"reason"}, To: "reason"}}},
 			},
 		},
 	}
@@ -225,8 +313,13 @@ func prestigeDraft(t *testing.T, reverseReviewers bool) ProgramDraft {
 		},
 	}
 
-	optionalGraph := func() GraphDraft {
-		return GraphDraft{Inputs: selected, Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "work", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}}
+	optionalCase := func(withWork bool) GraphDraft {
+		graph := GraphDraft{Inputs: selected, Outputs: value.EmptyContract()}
+		if !withWork {
+			return graph
+		}
+		graph.Nodes = []NodeDraft{{Name: "work", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}
+		return graph
 	}
 	root := GraphDraft{
 		Inputs: rootInputs, Outputs: result,
@@ -234,16 +327,17 @@ func prestigeDraft(t *testing.T, reverseReviewers bool) ProgramDraft {
 			{Name: "recon", Call: &CallDraft{Module: "recon"}},
 			{Name: "review", Parallel: &ParallelDraft{Graph: reviewGraph}},
 			{Name: "aggregate", Leaf: &LeafDraft{Kind: Script, Inputs: review, Outputs: result}},
-			{Name: "optional", Branch: &BranchDraft{Inputs: selected, Outputs: value.EmptyContract(), Selector: "selected", Cases: []CaseDraft{{Name: "false", Graph: optionalGraph()}, {Name: "true", Graph: optionalGraph()}}}, Literals: []LiteralBindingDraft{{Input: "selected", Value: prestigeLiteral(t, "true")}}},
+			{Name: "optional", Branch: &BranchDraft{Inputs: selected, Outputs: value.EmptyContract(), Selector: "selected", Cases: []CaseDraft{{Name: "false", Graph: optionalCase(false)}, {Name: "true", Graph: optionalCase(true)}}}, Literals: []LiteralBindingDraft{{Input: "selected", Value: prestigeLiteral(t, "true")}}},
 			{Name: "revise", Loop: &loop, Literals: []LiteralBindingDraft{{Input: "prompt", Value: prestigeLiteral(t, `"revise"`)}}},
 			{Name: "index", Map: &mapped, Literals: []LiteralBindingDraft{{Input: "items", Value: prestigeLiteral(t, "[]")}}},
-			{Name: "gate", Leaf: &LeafDraft{Kind: Gate, Inputs: prestigeGateInputs(t), Outputs: value.EmptyContract()}, Literals: []LiteralBindingDraft{{Input: "passed", Value: prestigeLiteral(t, "true")}}},
+			{Name: "gate", Leaf: &LeafDraft{Kind: Gate, Inputs: prestigeGateInputs(t), Outputs: value.EmptyContract()}},
 		},
 		Edges: []EdgeDraft{
 			{From: boundaryEndpoint(), To: childEndpoint("recon"), Bindings: []BindingDraft{{From: []string{"brief"}, To: "brief"}, {From: []string{"document"}, To: "document"}}},
 			{From: childEndpoint("recon"), To: childEndpoint("review"), Bindings: []BindingDraft{{From: []string{"summary"}, To: "summary"}}},
 			{From: childEndpoint("review"), To: childEndpoint("aggregate"), Bindings: []BindingDraft{{From: []string{"static"}, To: "static"}, {From: []string{"dynamic"}, To: "dynamic"}}},
 			{From: childEndpoint("aggregate"), To: boundaryEndpoint(), Bindings: []BindingDraft{{From: []string{"result"}, To: "result"}}},
+			{From: childEndpoint("revise"), To: childEndpoint("gate"), Bindings: []BindingDraft{{From: []string{"passed"}, To: "passed"}, {From: []string{"reason"}, To: "reason"}}},
 		},
 		Finally: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "cleanup", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}},
 	}
@@ -427,6 +521,17 @@ func mustGraph(t *testing.T, graph Graph, name string) Graph {
 		t.Fatalf("node %q is not a graph scope", name)
 	}
 	return inner
+}
+
+func mustCase(t *testing.T, branch Branch, name string) Case {
+	t.Helper()
+	for _, branchCase := range branch.Cases() {
+		if branchCase.Name() == name {
+			return branchCase
+		}
+	}
+	t.Fatalf("branch case %q not found", name)
+	return Case{}
 }
 
 func hasEdge(graph Graph, from, to, targetPort string) bool {

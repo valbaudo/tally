@@ -414,7 +414,7 @@ The implemented kernel is recorded in these commits:
 - Lexical bindings and the sole edge relation: `a00a24a` and `f98ffad`.
 - Closed structured-scope validation: `44277c0` and `bb845ac`.
 - Canonical immutable encoding: `ca064c2` and `08aed3d`.
-- Prestige-shaped structural tracer: this commit — `test(workflow): prove the canonical semantic structure`.
+- Prestige-shaped structural tracer: `12baebc2e9ea95081e1fb2960fa352768a3cc935` (`test(workflow): prove the canonical semantic structure`).
 
 The tracer builds the motivating shape through the public programmatic draft:
 file and structured root inputs, a static module call, independent agent
