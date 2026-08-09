@@ -4,7 +4,7 @@
 
 **Depends on:** GitHub #5, GitHub #6, `2026-08-09-canonical-workflow-semantic-model-design.md`, and `2026-08-09-values-contracts-workspaces-files-design.md`
 
-**Status:** Draft for final review
+**Status:** Design approved on 2026-08-09
 
 **Goal:** Give `branch`, `parallel`, `map`, bounded `loop`, `gate`, and `finally` exact execution, output, failure, rejection, cancellation, and cleanup semantics without growing a second scheduler or a policy-knob language inside individual constructs.
 
