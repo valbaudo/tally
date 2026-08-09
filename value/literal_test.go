@@ -25,6 +25,39 @@ func TestParseLiteralCanonicalizesObjectsAndRejectsInvalidJSONShapes(t *testing.
 	}
 }
 
+func TestParseLiteralRejectsInvalidUnicodeRepresentations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"invalid raw UTF-8", []byte{'"', 0xff, '"'}},
+		{"lone high surrogate value", []byte(`"\uD800"`)},
+		{"lone low surrogate value", []byte(`"\uDC00"`)},
+		{"lone high surrogate key", []byte(`{"\uD800":1}`)},
+		{"lone low surrogate key", []byte(`{"\uDC00":1}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseLiteral(tc.data); err == nil {
+				t.Fatalf("ParseLiteral(%q) accepted invalid Unicode", tc.data)
+			}
+		})
+	}
+
+	_, firstErr := ParseLiteral([]byte(`"\uD800"`))
+	_, secondErr := ParseLiteral([]byte(`"\uD801"`))
+	if firstErr == nil || secondErr == nil {
+		t.Fatalf("distinct malformed surrogate literals must both reject: %v, %v", firstErr, secondErr)
+	}
+
+	valid, err := ParseLiteral([]byte(`"\uD83D\uDE00"`))
+	if err != nil {
+		t.Fatalf("ParseLiteral(valid surrogate pair): %v", err)
+	}
+	if got, want := string(valid.Bytes()), `"😀"`; got != want {
+		t.Fatalf("valid surrogate pair canonicalized to %q, want %q", got, want)
+	}
+}
+
 func TestValidateLiteralEnforcesTypesAndObjectPresence(t *testing.T) {
 	object := objectType(t,
 		required(t, "name", String()),
@@ -74,6 +107,24 @@ func TestValidateLiteralEnforcesTypesAndObjectPresence(t *testing.T) {
 				t.Fatalf("ValidateLiteral(%s) succeeded", tc.json)
 			}
 		})
+	}
+}
+
+func TestValidateLiteralReportsObjectAndMapFailuresInLexicalKeyOrder(t *testing.T) {
+	object := objectType(t, optional(t, "known", String()))
+	objectLiteral := mustLiteral(t, `{"z":true,"a":false}`)
+	for range 100 {
+		if err := object.ValidateLiteral(objectLiteral); err == nil || err.Error() != `undeclared field "a"` {
+			t.Fatalf("object validation error = %v, want undeclared field a", err)
+		}
+	}
+
+	maps := mapType(t, mapType(t, Integer()))
+	mapLiteral := mustLiteral(t, `{"z":{"z":1.5},"a":{"y":"bad"}}`)
+	for range 100 {
+		if err := maps.ValidateLiteral(mapLiteral); err == nil || err.Error() != `map key "a": map key "y": want integer` {
+			t.Fatalf("map validation error = %v, want lexical first nested failure", err)
+		}
 	}
 }
 

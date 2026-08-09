@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Literal is one canonical ordinary JSON value.
@@ -17,6 +18,9 @@ type Literal struct {
 
 // ParseLiteral parses exactly one ordinary JSON value into canonical form.
 func ParseLiteral(data []byte) (Literal, error) {
+	if err := validateLiteralLexically(data); err != nil {
+		return Literal{}, err
+	}
 	if err := validateOneJSONValue(data); err != nil {
 		return Literal{}, err
 	}
@@ -34,6 +38,74 @@ func ParseLiteral(data []byte) (Literal, error) {
 		return Literal{}, err
 	}
 	return Literal{canonical: canonical, decoded: decoded}, nil
+}
+
+func validateLiteralLexically(data []byte) error {
+	if !utf8.Valid(data) {
+		return fmt.Errorf("literal contains invalid UTF-8")
+	}
+	inString := false
+	for i := 0; i < len(data); i++ {
+		if !inString {
+			if data[i] == '"' {
+				inString = true
+			}
+			continue
+		}
+		switch data[i] {
+		case '"':
+			inString = false
+		case '\\':
+			i++
+			if i == len(data) {
+				return fmt.Errorf("literal ends in an escape")
+			}
+			if data[i] != 'u' {
+				continue
+			}
+			unit, ok := unicodeEscapeUnit(data, i+1)
+			if !ok {
+				return fmt.Errorf("literal contains an invalid Unicode escape")
+			}
+			switch {
+			case unit >= 0xD800 && unit <= 0xDBFF:
+				if i+10 >= len(data) || data[i+5] != '\\' || data[i+6] != 'u' {
+					return fmt.Errorf("literal contains an unpaired high surrogate")
+				}
+				low, ok := unicodeEscapeUnit(data, i+7)
+				if !ok || low < 0xDC00 || low > 0xDFFF {
+					return fmt.Errorf("literal contains an unpaired high surrogate")
+				}
+				i += 10
+			case unit >= 0xDC00 && unit <= 0xDFFF:
+				return fmt.Errorf("literal contains an unpaired low surrogate")
+			default:
+				i += 4
+			}
+		}
+	}
+	return nil
+}
+
+func unicodeEscapeUnit(data []byte, start int) (rune, bool) {
+	if start+4 > len(data) {
+		return 0, false
+	}
+	var unit rune
+	for _, digit := range data[start : start+4] {
+		unit <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			unit += rune(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			unit += rune(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			unit += rune(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return unit, true
 }
 
 func validateOneJSONValue(data []byte) error {
@@ -204,11 +276,7 @@ func appendCanonicalJSON(out *bytes.Buffer, value any) error {
 		}
 		out.WriteByte(']')
 	case map[string]any:
-		keys := make([]string, 0, len(value))
-		for key := range value {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
+		keys := sortedMapKeys(value)
 		out.WriteByte('{')
 		for i, key := range keys {
 			if i > 0 {
@@ -229,6 +297,15 @@ func appendCanonicalJSON(out *bytes.Buffer, value any) error {
 		return fmt.Errorf("unsupported JSON value %T", value)
 	}
 	return nil
+}
+
+func sortedMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Bytes returns a copy of the literal's canonical JSON bytes.
@@ -294,32 +371,23 @@ func validateLiteral(t Type, l Literal) error {
 		if !ok {
 			return fmt.Errorf("want object")
 		}
-		if len(object) != len(t.fields) {
-			for key := range object {
-				if _, ok := findField(t.fields, key); !ok {
-					return fmt.Errorf("undeclared field %q", key)
-				}
+		for _, key := range sortedMapKeys(object) {
+			fieldType, declared := findField(t.fields, key)
+			if !declared {
+				return fmt.Errorf("undeclared field %q", key)
 			}
-		}
-		for _, field := range t.fields {
-			value, present := object[field.name]
-			if !present {
-				if field.optional {
-					continue
-				}
-				return fmt.Errorf("required field %q is absent", field.name)
-			}
+			value := object[key]
 			child, err := literalFromDecoded(value)
 			if err != nil {
 				return err
 			}
-			if err := validateLiteral(field.typ, child); err != nil {
-				return fmt.Errorf("field %q: %w", field.name, err)
+			if err := validateLiteral(fieldType, child); err != nil {
+				return fmt.Errorf("field %q: %w", key, err)
 			}
 		}
-		for key := range object {
-			if _, ok := findField(t.fields, key); !ok {
-				return fmt.Errorf("undeclared field %q", key)
+		for _, field := range t.fields {
+			if _, present := object[field.name]; !present && !field.optional {
+				return fmt.Errorf("required field %q is absent", field.name)
 			}
 		}
 	case MapKind:
@@ -327,7 +395,8 @@ func validateLiteral(t Type, l Literal) error {
 		if !ok {
 			return fmt.Errorf("want map")
 		}
-		for key, value := range object {
+		for _, key := range sortedMapKeys(object) {
+			value := object[key]
 			child, err := literalFromDecoded(value)
 			if err != nil {
 				return err

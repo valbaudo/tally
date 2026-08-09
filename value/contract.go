@@ -13,17 +13,12 @@ type Contract struct {
 
 // NewContract constructs a closed contract from declared top-level ports.
 func NewContract(ports ...Field) (Contract, error) {
-	copy := append([]Field(nil), ports...)
-	for _, port := range copy {
-		if !validField(port) {
-			return Contract{}, fmt.Errorf("contract has an invalid port")
-		}
+	copy, problem := canonicalFields(ports)
+	if problem.invalid {
+		return Contract{}, fmt.Errorf("contract has an invalid port")
 	}
-	sort.Slice(copy, func(i, j int) bool { return copy[i].name < copy[j].name })
-	for i := 1; i < len(copy); i++ {
-		if copy[i-1].name == copy[i].name {
-			return Contract{}, fmt.Errorf("contract has duplicate port %q", copy[i].name)
-		}
+	if problem.duplicate != "" {
+		return Contract{}, fmt.Errorf("contract has duplicate port %q", problem.duplicate)
 	}
 	return Contract{valid: true, ports: copy}, nil
 }

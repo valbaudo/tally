@@ -178,19 +178,35 @@ func Map(element Type) (Type, error) {
 
 // Object constructs a closed object with the supplied named fields.
 func Object(fields ...Field) (Type, error) {
+	copy, problem := canonicalFields(fields)
+	if problem.invalid {
+		return Type{}, fmt.Errorf("object has an invalid field")
+	}
+	if problem.duplicate != "" {
+		return Type{}, fmt.Errorf("object has duplicate field %q", problem.duplicate)
+	}
+	return Type{kind: ObjectKind, fields: copy}, nil
+}
+
+type fieldSetProblem struct {
+	invalid   bool
+	duplicate string
+}
+
+func canonicalFields(fields []Field) ([]Field, fieldSetProblem) {
 	copy := append([]Field(nil), fields...)
 	for _, field := range copy {
 		if !validField(field) {
-			return Type{}, fmt.Errorf("object has an invalid field")
+			return nil, fieldSetProblem{invalid: true}
 		}
 	}
 	sort.Slice(copy, func(i, j int) bool { return copy[i].name < copy[j].name })
 	for i := 1; i < len(copy); i++ {
 		if copy[i-1].name == copy[i].name {
-			return Type{}, fmt.Errorf("object has duplicate field %q", copy[i].name)
+			return nil, fieldSetProblem{duplicate: copy[i].name}
 		}
 	}
-	return Type{kind: ObjectKind, fields: copy}, nil
+	return copy, fieldSetProblem{}
 }
 
 func validField(field Field) bool {
