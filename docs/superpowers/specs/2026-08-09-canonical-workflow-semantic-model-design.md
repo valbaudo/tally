@@ -190,7 +190,7 @@ There is initially no `catch`, compensation graph, or branch-on-failure feature.
 
 ## Leaf Boundary
 
-Every leaf declares semantic requirements independent of a particular provider. Examples include structured JSON, raw attachments with required media fidelity, workspace materialization, workspace capture, or recoverable same-node execution.
+The compiler derives each leaf's semantic requirements independently of a particular provider. Examples include structured output, raw attachments with required media fidelity, workspace materialization, and workspace capture. Exact same-node recovery is adapter operational support used automatically when available; it is not a leaf declaration or admission requirement.
 
 The configured adapter and execution backend must satisfy those requirements during preflight. Translation belongs below the language boundary:
 
@@ -199,7 +199,7 @@ The configured adapter and execution backend must satisfy those requirements dur
 - A `script` receives declared values and workspace files through the native execution contract.
 - Skills are ordinary staged files/instructions or adapter-native configuration, not invocations of a Dawn `/skill` primitive.
 
-Session continuation is not cross-node memory. A named agent role may be reused, but each agent node begins a fresh logical context. Provider recovery references are limited to resuming or polling the same logical node execution.
+Session continuation is not cross-node memory. A named agent binding may be reused, but each agent node begins a fresh logical context. Provider recovery references are limited to retrieving, attaching to, or continuing the exact same logical node execution.
 
 ## Compilation Responsibilities
 
