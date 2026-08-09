@@ -127,7 +127,7 @@ func TestCompileRejectsEmptyModuleAndNodeNames(t *testing.T) {
 	}
 }
 
-// This catches calls that remain unresolved until a scheduler attempts execution.
+// This catches calls that remain unresolved until a scheduler runs them.
 func TestCompileRejectsUnknownCall(t *testing.T) {
 	_, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
 		module("root", GraphDraft{Nodes: []NodeDraft{{Name: "missing", Call: &CallDraft{Module: "nope"}}}}),

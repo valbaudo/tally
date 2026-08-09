@@ -403,3 +403,43 @@ These findings constrain adapter and backend boundaries. They do not enlarge the
 | Runtime responsibilities | Runtime responsibilities and outcomes |
 | Preserved invariants | Invariants and conformance strategy |
 | No premature YAML choice | Deferred decisions and syntax-independent tests |
+
+## Implementation Evidence
+
+The implemented kernel is recorded in these commits:
+
+- Contract kernel: `f2547eb` and `3e64780`.
+- Immutable hierarchical model: `f69160e`.
+- Module/call and parallel lowering: `d66de40` and `2263536`.
+- Lexical bindings and the sole edge relation: `a00a24a` and `f98ffad`.
+- Closed structured-scope validation: `44277c0` and `bb845ac`.
+- Canonical immutable encoding: `ca064c2` and `08aed3d`.
+- Prestige-shaped structural tracer: this commit — `test(workflow): prove the canonical semantic structure`.
+
+The tracer builds the motivating shape through the public programmatic draft:
+file and structured root inputs, a static module call, independent agent
+reviewers in a lowered parallel graph, aggregation, exhaustive optional work,
+a bounded worker-and-judge revision loop, a deterministic gate, and one
+unconditional cleanup graph. It verifies the closed hierarchy and provenance,
+the absent reviewer edge, lexical scope encapsulation, declared-output
+visibility, source-order equivalence, and rejection of the invalid draft
+values the existing surface can represent.
+
+Verification completed with these exact commands:
+
+```bash
+go test ./workflow -run 'TestPrestigeShape|TestProductInvariant' -count=1
+go test ./value ./workflow -count=1
+go test -race ./value ./workflow -count=1
+go test ./... -count=1
+go vet ./...
+git diff --check
+if rg -n 'depends_on|continue_on_error|retry_count|attempts|quorum|merge_policy|concurrency:' value workflow; then exit 1; fi
+if rg -n 'github\.com/valbaudo/dawn/(plan|gate|backend|proc)|dawn\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
+```
+
+This plan proves compile-time structure only. Issue #6 implements runtime
+values and workspaces; #7 implements recursive scheduling and propagation;
+#8 implements durable execution; #9 implements adapters; and #10 implements
+native scripts. It does not claim runtime scheduling, commit, replay, adapter,
+or script conformance.
