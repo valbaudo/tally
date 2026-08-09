@@ -119,18 +119,14 @@ func TestCompileReferenceRejectsInvalidLexicalReferences(t *testing.T) {
 			wants: []string{"root", "workflow.dawn", "boundary", "absent", "unknown source"},
 		},
 		{
-			name: "descendant child name",
-			graph: GraphDraft{Inputs: text, Nodes: []NodeDraft{bindingLeaf("write", text, value.EmptyContract())}, Edges: []EdgeDraft{{
-				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write/grandchild"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+			name: "undeclared nested child name",
+			graph: GraphDraft{Inputs: text, Nodes: []NodeDraft{
+				{Name: "review", Graph: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{bindingLeaf("static", value.EmptyContract(), value.EmptyContract())}}},
+				bindingLeaf("aggregate", text, value.EmptyContract()),
+			}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Child, Child: "review/static"}, To: EndpointDraft{Kind: Child, Child: "aggregate"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
 			}}},
-			wants: []string{"root", "workflow.dawn", "write/grandchild", "text", "unknown child"},
-		},
-		{
-			name: "literal slash-bearing child name",
-			graph: GraphDraft{Inputs: text, Nodes: []NodeDraft{bindingLeaf("write/grandchild", text, value.EmptyContract())}, Edges: []EdgeDraft{{
-				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write/grandchild"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
-			}}},
-			wants: []string{"root", "workflow.dawn", "write/grandchild", "text", "unknown child"},
+			wants: []string{"root", "workflow.dawn", "review/static", "text", "unknown child"},
 		},
 		{
 			name: "boundary as source with output-only port",
@@ -151,6 +147,27 @@ func TestCompileReferenceRejectsInvalidLexicalReferences(t *testing.T) {
 			_, err := Compile(bindingProgram(tc.graph))
 			assertBindingError(t, err, tc.wants...)
 		})
+	}
+}
+
+// This catches interpreting an immediate child name as a runtime path. A
+// slash-bearing name is opaque data and must resolve by exact sibling match.
+func TestCompileBindingResolvesOpaqueSlashSiblingName(t *testing.T) {
+	text := bindingContract(t, false, "text", value.String())
+	def, err := Compile(bindingProgram(GraphDraft{
+		Inputs: text,
+		Nodes:  []NodeDraft{bindingLeaf("review/static", text, value.EmptyContract())},
+		Edges: []EdgeDraft{{
+			From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "review/static"},
+			Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := def.Root().Edges()[0].To()
+	if endpoint.Kind() != Child || endpoint.Child() != "review/static" {
+		t.Fatalf("endpoint = kind %d child %q, want exact opaque sibling name", endpoint.Kind(), endpoint.Child())
 	}
 }
 

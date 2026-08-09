@@ -697,7 +697,7 @@ Rules are directional:
 - a child target writes that immediate child's inputs;
 - a boundary target writes graph outputs;
 - a completion-only edge is valid only from one child to another distinct child; and
-- a name containing `/` is just an unknown immediate child, never a descendant path.
+- a name containing `/` is an opaque immediate child name: it resolves only by an exact sibling-name match and is never parsed as a descendant path.
 
 For every binding, call `value.CheckAssignable`. Store its `RuntimeValidation` bit in the canonical binding; do not introduce a transform node or a runtime expression.
 

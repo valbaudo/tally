@@ -29,9 +29,6 @@ func resolveEndpoint(graph Graph, endpoint EndpointDraft) (resolvedEndpoint, err
 		if endpoint.Child == "" {
 			return resolvedEndpoint{}, fmt.Errorf("child endpoint has an empty child name")
 		}
-		if strings.Contains(endpoint.Child, "/") {
-			return resolvedEndpoint{}, fmt.Errorf("unknown child %q", endpoint.Child)
-		}
 		for index, node := range graph.nodes {
 			if node.name == endpoint.Child {
 				inputs, outputs, ok := nodeContracts(node)

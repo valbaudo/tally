@@ -175,7 +175,7 @@ func TestProductInvariantRejectsInvalidDrafts(t *testing.T) {
 			},
 		},
 		{
-			name: "parent reference to nested reviewer", want: "unknown child",
+			name: "undeclared opaque name cannot reference nested reviewer", want: "unknown child",
 			draft: func(t *testing.T) ProgramDraft {
 				draft := prestigeDraft(t, false)
 				root := mustDraftRoot(t, &draft)
