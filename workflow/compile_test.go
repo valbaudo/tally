@@ -1,6 +1,9 @@
 package workflow
 
 import (
+	"os"
+	"os/exec"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -231,6 +234,107 @@ func TestCompileCopiesDraftOwnedState(t *testing.T) {
 	finally, ok := root.Finally()
 	if !ok || mustNode(t, finally.Graph(), "clean").Name() != "clean" {
 		t.Fatal("finally graph changed through its draft")
+	}
+}
+
+// This catches recursive pointers in public graph drafts causing Compile to
+// exhaust the process stack instead of rejecting malformed input.
+func TestCompileRejectsRecursiveDraftGraphPointers(t *testing.T) {
+	const recursiveCase = "DAWN_COMPILE_RECURSIVE_GRAPH_CASE"
+	if name := os.Getenv(recursiveCase); name != "" {
+		debug.SetMaxStack(64 << 10)
+		if _, err := Compile(recursiveGraphFixture(name)); err == nil {
+			t.Fatal("Compile() accepted a recursive graph pointer")
+		}
+		return
+	}
+
+	for _, name := range []string{"finally", "inline"} {
+		t.Run(name, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestCompileRejectsRecursiveDraftGraphPointers$")
+			command.Env = append(os.Environ(), recursiveCase+"="+name)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Compile() did not return an ordinary error for a recursive graph pointer: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
+// This catches an active-pointer guard that rejects legitimate reuse after the
+// first independent occurrence has finished compiling.
+func TestCompileAllowsReusedNonRecursiveDraftGraph(t *testing.T) {
+	reused := GraphDraft{Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
+	def, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{Nodes: []NodeDraft{
+			{Name: "first", Graph: &reused},
+			{Name: "second", Graph: &reused},
+		}}),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first", "second"} {
+		scope, ok := mustNode(t, def.Root(), name).Scope()
+		if !ok {
+			t.Fatalf("%s is not a graph scope", name)
+		}
+		graph, _ := scope.Graph()
+		if _, found := findNode(graph, "work"); !found {
+			t.Fatalf("%s did not compile its reused graph", name)
+		}
+	}
+}
+
+// This catches authored drafts forging lowering provenance or a module name
+// other than the module currently being compiled.
+func TestCompileOwnsAuthoredProvenance(t *testing.T) {
+	inner := GraphDraft{
+		Provenance: Provenance{Source: "inner.dawn", Module: "forged", Origin: OriginCall},
+		Nodes: []NodeDraft{{
+			Name: "work", Leaf: scriptLeaf(),
+			Provenance: Provenance{Source: "work.dawn", Module: "forged", Origin: OriginParallel},
+		}},
+	}
+	def, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
+		module("root", GraphDraft{
+			Provenance: Provenance{Source: "root.dawn", Module: "forged", Origin: OriginParallel},
+			Nodes: []NodeDraft{{
+				Name: "group", Graph: &inner,
+				Provenance: Provenance{Source: "group.dawn", Module: "forged", Origin: OriginCall},
+			}},
+		}),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertAuthoredProvenance(t, def.Root().Provenance(), "root.dawn", "root")
+	group := mustNode(t, def.Root(), "group")
+	assertAuthoredProvenance(t, group.Provenance(), "group.dawn", "root")
+	scope, _ := group.Scope()
+	graph, _ := scope.Graph()
+	assertAuthoredProvenance(t, graph.Provenance(), "inner.dawn", "root")
+	assertAuthoredProvenance(t, mustNode(t, graph, "work").Provenance(), "work.dawn", "root")
+}
+
+func recursiveGraphFixture(name string) ProgramDraft {
+	graph := GraphDraft{}
+	switch name {
+	case "finally":
+		graph.Finally = &graph
+	case "inline":
+		graph.Nodes = []NodeDraft{{Name: "self", Graph: &graph}}
+	default:
+		panic("unknown recursive graph fixture " + name)
+	}
+	return ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", graph)}}
+}
+
+func assertAuthoredProvenance(t *testing.T, got Provenance, source, module string) {
+	t.Helper()
+	if got.Source != source || got.Module != module || got.Origin != OriginAuthored {
+		t.Fatalf("provenance = %#v, want source %q module %q origin %q", got, source, module, OriginAuthored)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 type compiler struct {
 	modules map[string]ModuleDraft
 	active  []string
+	graphs  map[*GraphDraft]struct{}
 }
 
 // Compile lowers source-neutral workflow drafts into one immutable definition.
@@ -28,7 +29,10 @@ func Compile(draft ProgramDraft) (Definition, error) {
 }
 
 func newCompiler(modules []ModuleDraft) (*compiler, error) {
-	c := &compiler{modules: make(map[string]ModuleDraft, len(modules))}
+	c := &compiler{
+		modules: make(map[string]ModuleDraft, len(modules)),
+		graphs:  make(map[*GraphDraft]struct{}),
+	}
 	for _, module := range modules {
 		if module.Name == "" {
 			return nil, fmt.Errorf("module name is empty")
@@ -56,7 +60,7 @@ func (c *compiler) compileModule(name string) (Graph, error) {
 	c.active = append(c.active, name)
 	defer func() { c.active = c.active[:len(c.active)-1] }()
 
-	graph, err := c.compileGraph(module.Graph)
+	graph, err := c.compileGraph(&module.Graph)
 	if err != nil {
 		return Graph{}, fmt.Errorf("module %q: %w", name, err)
 	}
@@ -68,7 +72,16 @@ func (c *compiler) compileModule(name string) (Graph, error) {
 	return graph, nil
 }
 
-func (c *compiler) compileGraph(draft GraphDraft) (Graph, error) {
+func (c *compiler) compileGraph(draft *GraphDraft) (Graph, error) {
+	if draft == nil {
+		return Graph{}, fmt.Errorf("graph draft is nil")
+	}
+	if _, active := c.graphs[draft]; active {
+		return Graph{}, fmt.Errorf("recursive graph draft pointer")
+	}
+	c.graphs[draft] = struct{}{}
+	defer delete(c.graphs, draft)
+
 	inputs, err := cloneContract(draft.Inputs)
 	if err != nil {
 		return Graph{}, fmt.Errorf("graph inputs: %w", err)
@@ -94,7 +107,7 @@ func (c *compiler) compileGraph(draft GraphDraft) (Graph, error) {
 		graph.edges = append(graph.edges, edge)
 	}
 	if draft.Finally != nil {
-		cleanup, err := c.compileGraph(*draft.Finally)
+		cleanup, err := c.compileGraph(draft.Finally)
 		if err != nil {
 			return Graph{}, fmt.Errorf("finally: %w", err)
 		}
@@ -149,7 +162,7 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		}
 		node.leaf = &Leaf{kind: draft.Leaf.Kind, inputs: inputs, outputs: outputs}
 	case draft.Graph != nil:
-		graph, err := c.compileGraph(*draft.Graph)
+		graph, err := c.compileGraph(draft.Graph)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q graph: %w", draft.Name, err)
 		}
@@ -186,7 +199,7 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		if len(draft.Parallel.Graph.Nodes) < 2 {
 			return Node{}, fmt.Errorf("node %q parallel requires at least two immediate children", draft.Name)
 		}
-		graph, err := c.compileGraph(draft.Parallel.Graph)
+		graph, err := c.compileGraph(&draft.Parallel.Graph)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q parallel: %w", draft.Name, err)
 		}
@@ -208,7 +221,7 @@ func (c *compiler) compileBranch(draft BranchDraft) (Branch, error) {
 	}
 	branch := Branch{inputs: inputs, outputs: outputs, selector: draft.Selector}
 	for _, draftCase := range draft.Cases {
-		graph, err := c.compileGraph(draftCase.Graph)
+		graph, err := c.compileGraph(&draftCase.Graph)
 		if err != nil {
 			return Branch{}, fmt.Errorf("case %q: %w", draftCase.Name, err)
 		}
@@ -226,7 +239,7 @@ func (c *compiler) compileMap(draft MapDraft) (Map, error) {
 	if err != nil {
 		return Map{}, fmt.Errorf("outputs: %w", err)
 	}
-	body, err := c.compileGraph(draft.Body)
+	body, err := c.compileGraph(&draft.Body)
 	if err != nil {
 		return Map{}, fmt.Errorf("body: %w", err)
 	}
@@ -242,7 +255,7 @@ func (c *compiler) compileLoop(draft LoopDraft) (Loop, error) {
 	if err != nil {
 		return Loop{}, fmt.Errorf("outputs: %w", err)
 	}
-	body, err := c.compileGraph(draft.Body)
+	body, err := c.compileGraph(&draft.Body)
 	if err != nil {
 		return Loop{}, fmt.Errorf("body: %w", err)
 	}
@@ -267,13 +280,11 @@ func compileEdge(draft EdgeDraft) Edge {
 }
 
 func authoredProvenance(provenance Provenance, active []string) Provenance {
-	if provenance.Module == "" && len(active) > 0 {
-		provenance.Module = active[len(active)-1]
+	module := ""
+	if len(active) > 0 {
+		module = active[len(active)-1]
 	}
-	if provenance.Origin == "" {
-		provenance.Origin = OriginAuthored
-	}
-	return provenance
+	return Provenance{Source: provenance.Source, Module: module, Origin: OriginAuthored}
 }
 
 func cloneContract(contract value.Contract) (value.Contract, error) {
