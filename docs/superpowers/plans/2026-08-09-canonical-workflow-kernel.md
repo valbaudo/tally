@@ -66,7 +66,7 @@ Keep contract knowledge in `value` and graph knowledge in `workflow`. Do not spl
 
 **Interfaces:**
 - Produces: `value.Type`, `value.Field`, `value.Contract`, `value.Literal`, and `value.Assignment`.
-- Produces: scalar and composite constructors, `ParseLiteral`, `Contract.Resolve`, `Contract.ValidateLiteral`, and `CheckAssignable`.
+- Produces: scalar and composite constructors, `ParseLiteral`, `Contract.Resolve`, `Type.ValidateLiteral`, `Contract.ValidateLiteral`, and `CheckAssignable`.
 - Consumes: no Dawn package.
 
 - [ ] **Step 1: Write failing closed-algebra and construction tests**
@@ -248,6 +248,7 @@ type Assignment struct {
 func ParseLiteral(data []byte) (Literal, error)
 func (l Literal) Bytes() []byte
 func (l Literal) Equal(other Literal) bool
+func (t Type) ValidateLiteral(l Literal) error
 func (c Contract) ValidateLiteral(l Literal) error
 func CheckAssignable(from, to Type) (Assignment, error)
 ```
@@ -304,14 +305,14 @@ func TestCanonicalKindsAreClosed(t *testing.T) {
 }
 ```
 
-Add compile-time tests that construct every draft variant and tests proving:
+Add tests that pass every draft variant through a test-local model constructor and prove:
 
 - a node contains exactly one of leaf, graph, branch, map, loop, call, or parallel;
-- `call` and `parallel` are draft-only and have no canonical kind constants;
-- terminal statuses are exactly `succeeded`, `rejected`, `failed`, and `cancelled`;
 - graph boundaries and child endpoints are different typed values rather than a reserved name;
 - mutating any draft slice, contract input, or provenance byte slice after compilation cannot change the compiled definition; and
 - accessor-returned slices can be mutated without changing the definition.
+
+Task 3's observable lowering tests—not constant-presence tests—prove `call` and `parallel` are draft-only. Later scheduler conformance tests prove terminal outcome behavior; this task defines the four status names without adding tests that merely restate constants.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -367,6 +368,36 @@ type LeafDraft struct {
 
 type CallDraft struct { Module string }
 type ParallelDraft struct { Graph GraphDraft }
+```
+
+Define the edge construction records here as model data; Task 4 adds their semantic validation rather than introducing types after `GraphDraft` already depends on them:
+
+```go
+type EndpointKind uint8
+const (
+	Boundary EndpointKind = iota + 1
+	Child
+)
+
+type EndpointDraft struct {
+	Kind EndpointKind
+	Child string
+}
+
+type BindingDraft struct {
+	From []string
+	To   string
+}
+
+type EdgeDraft struct {
+	From, To EndpointDraft
+	Bindings []BindingDraft
+}
+
+type LiteralBindingDraft struct {
+	Input string
+	Value value.Literal
+}
 ```
 
 Also define the exact structured draft shapes used for static checks:
@@ -438,6 +469,11 @@ type Node struct {
 	literals []LiteralBinding
 	provenance Provenance
 }
+
+type Endpoint struct { kind EndpointKind; child string }
+type Binding struct { from []string; to string; runtimeValidation bool }
+type Edge struct { from, to Endpoint; bindings []Binding }
+type LiteralBinding struct { input string; value value.Literal }
 ```
 
 `Leaf` holds one closed leaf kind and its contracts. `Scope` is a closed tagged union over graph, branch, map, and loop. `Finally` owns one cleanup graph and is only reachable from its protected graph. All fields stay private; accessors return values or defensive copies. There is no exported constructor for compiled records: `Compile` is the sole creation path.
@@ -534,11 +570,7 @@ func Compile(draft ProgramDraft) (Definition, error) {
 	if err != nil { return Definition{}, err }
 	root, err := c.compileModule(draft.Root, OriginAuthored)
 	if err != nil { return Definition{}, err }
-	def := Definition{root: root}
-	canonical, err := encodeDefinition(def)
-	if err != nil { return Definition{}, err }
-	def.canonical = canonical
-	return def, nil
+	return Definition{root: root}, nil
 }
 ```
 
@@ -574,8 +606,6 @@ git commit -m "feat(workflow): resolve modules into canonical graphs"
 **Files:**
 - Create: `workflow/bindings.go`
 - Create: `workflow/bindings_test.go`
-- Modify: `workflow/draft.go`
-- Modify: `workflow/model.go`
 - Modify: `workflow/compile.go`
 
 **Interfaces:**
@@ -585,7 +615,7 @@ git commit -m "feat(workflow): resolve modules into canonical graphs"
 
 - [ ] **Step 1: Add failing lexical-reference tests**
 
-Define endpoints explicitly:
+Use the explicit endpoint and binding drafts established in Task 2:
 
 ```go
 type EndpointKind uint8
@@ -702,7 +732,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit the binding slice**
 
 ```bash
-git add workflow/draft.go workflow/model.go workflow/compile.go workflow/bindings.go workflow/bindings_test.go
+git add workflow/compile.go workflow/bindings.go workflow/bindings_test.go
 git commit -m "feat(workflow): validate one lexical edge model"
 ```
 
@@ -778,6 +808,8 @@ func validateGraph(graph Graph, cleanup bool) error {
 `validateAcyclic` derives one adjacency set from child-to-child edges regardless of whether they carry bindings, then uses deterministic DFS colors. It does not build a second `depends_on` structure.
 
 Structured checks inspect `value.Type` and `value.Contract` through read-only methods. They do not know YAML, execute a child, resolve an adapter, allocate runtime identities, or assign persistence keys.
+
+Call `validateGraph(root, false)` inside `Compile` after recursive lowering and binding resolution and before returning the definition. A failed graph never becomes a partially accepted `Definition`.
 
 - [ ] **Step 5: Run the validation suite for GREEN**
 
@@ -857,6 +889,16 @@ type definitionWire struct {
 Convert private model data to wire records, sorting nodes by name, edges by their full source/target/binding tuple, bindings by target then source path, and branch cases by case name. Preserve list order where it is semantic: source field paths, literal list values, and any later runtime collection input.
 
 `Definition.Canonical` returns a defensive copy of the bytes produced after validation. Invalid or partial definitions never receive bytes. This encoding is the captured canonical definition format; #8 may derive work fingerprints from semantic subrecords without exposing this wire format to the scheduler.
+
+Modify `Compile` only in this task to encode the already validated definition:
+
+```go
+def := Definition{root: root}
+canonical, err := encodeDefinition(def)
+if err != nil { return Definition{}, err }
+def.canonical = canonical
+return def, nil
+```
 
 - [ ] **Step 4: Run canonical and complete package tests for GREEN**
 
