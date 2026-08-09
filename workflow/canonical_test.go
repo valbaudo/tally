@@ -2,10 +2,70 @@ package workflow
 
 import (
 	"bytes"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/valbaudo/dawn/value"
 )
+
+// This catches JSON string replacement collapsing two distinct semantic Go
+// strings that contain invalid UTF-8 into the same canonical definition.
+func TestCanonicalDefinitionDistinguishesInvalidUTF8Strings(t *testing.T) {
+	first := string([]byte{0xff})
+	second := string([]byte{0xfe})
+	for _, tc := range []struct {
+		name  string
+		draft func(string) ProgramDraft
+	}{
+		{name: "node name", draft: canonicalInvalidNodeName},
+		{name: "contract port", draft: canonicalInvalidPort},
+		{name: "object field", draft: canonicalInvalidObjectField},
+		{name: "binding path", draft: canonicalInvalidBindingPath},
+		{name: "branch selector", draft: canonicalInvalidBranchSelector},
+		{name: "loop termination path", draft: canonicalInvalidLoopTermination},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			left := mustCompileCanonical(t, tc.draft(first)).Canonical()
+			right := mustCompileCanonical(t, tc.draft(second)).Canonical()
+			if bytes.Equal(left, right) {
+				t.Fatalf("canonical bytes collapsed distinct semantic strings: %x", left)
+			}
+		})
+	}
+}
+
+// This catches ordering that is normalized only while encoding, leaving
+// semantically identical compiled definitions observably source ordered.
+func TestCompiledDefinitionNormalizesPublicInspectionOrder(t *testing.T) {
+	forward := mustCompileCanonical(t, canonicalNestedFixture(t, false))
+	reversed := mustCompileCanonical(t, canonicalNestedFixture(t, true))
+	got := canonicalInspection(forward)
+	if !reflect.DeepEqual(got, canonicalInspection(reversed)) {
+		t.Fatalf("public inspection order differs:\n%v\n%v", got, canonicalInspection(reversed))
+	}
+	want := []string{
+		"root:nodes=alpha,beta,choose,each,literal,nested,repeat",
+		"root:edges=alpha->:one,alpha->:two,alpha->beta",
+		"root:literals=a,b",
+		"nested:nodes=nested-a,nested-b,nested-c",
+		"nested:edges=nested-a->nested-b,nested-b->nested-c",
+		"branch:false:nodes=false-a,false-b,false-c",
+		"branch:false:edges=false-a->false-b,false-b->false-c",
+		"branch:true:nodes=true-a,true-b,true-c",
+		"branch:true:edges=true-a->true-b,true-b->true-c",
+		"branch:cases=false,true",
+		"map:nodes=map-a,map-b,map-c",
+		"map:edges=map-a->map-b,map-b->map-c",
+		"loop:nodes=loop-a,loop-b,work",
+		"loop:edges=loop-a->loop-b,loop-b->work,work->:done",
+		"finally:nodes=cleanup-a,cleanup-b,cleanup-c",
+		"finally:edges=cleanup-a->cleanup-b,cleanup-b->cleanup-c",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("public inspection order =\n%v\nwant\n%v", got, want)
+	}
+}
 
 // This catches canonical encodings that preserve authoring order for sets of
 // modules, graph children, edges, bindings, or branch cases.
@@ -377,4 +437,336 @@ func reverseCases(cases []CaseDraft) {
 	for left, right := 0, len(cases)-1; left < right; left, right = left+1, right-1 {
 		cases[left], cases[right] = cases[right], cases[left]
 	}
+}
+
+func canonicalInvalidNodeName(name string) ProgramDraft {
+	return bindingProgram(GraphDraft{Nodes: []NodeDraft{{Name: name, Leaf: scriptLeaf()}}})
+}
+
+func canonicalInvalidPort(name string) ProgramDraft {
+	return bindingProgram(GraphDraft{Inputs: mustCanonicalContract(name, value.String())})
+}
+
+func canonicalInvalidObjectField(name string) ProgramDraft {
+	field, err := value.Required(name, value.String())
+	if err != nil {
+		panic(err)
+	}
+	object, err := value.Object(field)
+	if err != nil {
+		panic(err)
+	}
+	return bindingProgram(GraphDraft{Inputs: mustCanonicalContract("object", object)})
+}
+
+func canonicalInvalidBindingPath(name string) ProgramDraft {
+	contract := mustCanonicalContract(name, value.String())
+	return bindingProgram(GraphDraft{
+		Inputs: contract,
+		Nodes:  []NodeDraft{bindingLeaf("child", contract, value.EmptyContract())},
+		Edges: []EdgeDraft{{
+			From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "child"},
+			Bindings: []BindingDraft{{From: []string{name}, To: name}},
+		}},
+	})
+}
+
+func canonicalInvalidBranchSelector(name string) ProgramDraft {
+	inputs := mustCanonicalContract(name, value.Boolean())
+	cases := []CaseDraft{
+		{Name: "false", Graph: GraphDraft{Inputs: inputs, Outputs: value.EmptyContract()}},
+		{Name: "true", Graph: GraphDraft{Inputs: inputs, Outputs: value.EmptyContract()}},
+	}
+	return bindingProgram(GraphDraft{Nodes: []NodeDraft{{
+		Name: "branch", Branch: &BranchDraft{Inputs: inputs, Outputs: value.EmptyContract(), Selector: name, Cases: cases},
+		Literals: []LiteralBindingDraft{{Input: name, Value: mustCanonicalLiteral("true")}},
+	}}})
+}
+
+func canonicalInvalidLoopTermination(name string) ProgramDraft {
+	outputs := mustCanonicalContract(name, value.Boolean())
+	previous, err := value.Optional("previous", outputs.ObjectType())
+	if err != nil {
+		panic(err)
+	}
+	initial, err := value.Required("initial", value.EmptyContract().ObjectType())
+	if err != nil {
+		panic(err)
+	}
+	iteration, err := value.Required("iteration", value.Integer())
+	if err != nil {
+		panic(err)
+	}
+	bodyInputs, err := value.NewContract(initial, previous, iteration)
+	if err != nil {
+		panic(err)
+	}
+	loop := LoopDraft{
+		Inputs: value.EmptyContract(), Outputs: outputs, Maximum: 1, Termination: []string{name},
+		Body: GraphDraft{
+			Inputs: bodyInputs, Outputs: outputs,
+			Nodes: []NodeDraft{bindingLeaf("work", value.EmptyContract(), outputs)},
+			Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Child, Child: "work"}, To: EndpointDraft{Kind: Boundary},
+				Bindings: []BindingDraft{{From: []string{name}, To: name}},
+			}},
+		},
+	}
+	return bindingProgram(GraphDraft{Nodes: []NodeDraft{{Name: "loop", Loop: &loop}}})
+}
+
+func mustCanonicalContract(name string, typ value.Type, rest ...any) value.Contract {
+	fields := []value.Field{mustCanonicalField(name, typ)}
+	for index := 0; index < len(rest); index += 2 {
+		fieldName, ok := rest[index].(string)
+		if !ok {
+			panic("contract field name is not a string")
+		}
+		fieldType, ok := rest[index+1].(value.Type)
+		if !ok {
+			panic("contract field type is not a value.Type")
+		}
+		fields = append(fields, mustCanonicalField(fieldName, fieldType))
+	}
+	contract, err := value.NewContract(fields...)
+	if err != nil {
+		panic(err)
+	}
+	return contract
+}
+
+func mustCanonicalField(name string, typ value.Type) value.Field {
+	field, err := value.Required(name, typ)
+	if err != nil {
+		panic(err)
+	}
+	return field
+}
+
+func mustCanonicalLiteral(data string) value.Literal {
+	literal, err := value.ParseLiteral([]byte(data))
+	if err != nil {
+		panic(err)
+	}
+	return literal
+}
+
+func canonicalNestedFixture(t *testing.T, reverse bool) ProgramDraft {
+	t.Helper()
+	strings := canonicalContract(t, canonicalField(t, "a", value.String()), canonicalField(t, "b", value.String()))
+	outputs := canonicalContract(t, canonicalField(t, "one", value.String()), canonicalField(t, "two", value.String()))
+	emptyLeaf := func(name string) NodeDraft { return NodeDraft{Name: name, Leaf: scriptLeaf()} }
+	chain := func(prefix string) GraphDraft {
+		return GraphDraft{
+			Inputs: value.EmptyContract(), Outputs: value.EmptyContract(),
+			Nodes: []NodeDraft{emptyLeaf(prefix + "-a"), emptyLeaf(prefix + "-b"), emptyLeaf(prefix + "-c")},
+			Edges: []EdgeDraft{
+				{From: EndpointDraft{Kind: Child, Child: prefix + "-a"}, To: EndpointDraft{Kind: Child, Child: prefix + "-b"}},
+				{From: EndpointDraft{Kind: Child, Child: prefix + "-b"}, To: EndpointDraft{Kind: Child, Child: prefix + "-c"}},
+			},
+		}
+	}
+	selector := canonicalContract(t, canonicalField(t, "selected", value.Boolean()))
+	branch := BranchDraft{
+		Inputs: selector, Outputs: value.EmptyContract(), Selector: "selected",
+		Cases: []CaseDraft{
+			{Name: "false", Graph: canonicalBranchGraph(selector, chain("false"))},
+			{Name: "true", Graph: canonicalBranchGraph(selector, chain("true"))},
+		},
+	}
+	item, err := value.Required("item", value.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := value.Required("index", value.Integer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapInputs := canonicalContract(t, canonicalField(t, "items", mustCanonicalList(t, value.String())))
+	mapResult := canonicalContract(t, canonicalField(t, "result", mustCanonicalList(t, value.EmptyContract().ObjectType())))
+	mapped := MapDraft{
+		Inputs: mapInputs, Outputs: mapResult, Collection: "items", Result: "result",
+		Body: canonicalMapBody(chain("map"), item, index),
+	}
+	loop := canonicalOrderedLoop(t)
+	root := GraphDraft{
+		Outputs: outputs,
+		Nodes: []NodeDraft{
+			{Name: "alpha", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: outputs}},
+			emptyLeaf("beta"),
+			{Name: "choose", Branch: &branch, Literals: []LiteralBindingDraft{{Input: "selected", Value: canonicalLiteral(t, "true")}}},
+			{Name: "each", Map: &mapped, Literals: []LiteralBindingDraft{{Input: "items", Value: canonicalLiteral(t, "[]")}}},
+			{Name: "literal", Leaf: &LeafDraft{Kind: Script, Inputs: strings, Outputs: value.EmptyContract()}, Literals: []LiteralBindingDraft{{Input: "b", Value: canonicalLiteral(t, `"b"`)}, {Input: "a", Value: canonicalLiteral(t, `"a"`)}}},
+			{Name: "nested", Graph: canonicalNestedGraph(chain("nested"))},
+			{Name: "repeat", Loop: &loop},
+		},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Child, Child: "alpha"}, To: EndpointDraft{Kind: Child, Child: "beta"}},
+			{From: EndpointDraft{Kind: Child, Child: "alpha"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"two"}, To: "two"}, {From: []string{"one"}, To: "one"}}},
+		},
+		Finally: &GraphDraft{
+			Inputs: value.EmptyContract(), Outputs: value.EmptyContract(),
+			Nodes: chain("cleanup").Nodes, Edges: chain("cleanup").Edges,
+		},
+	}
+	if reverse {
+		reverseDraftCollections(&root)
+	}
+	return bindingProgram(root)
+}
+
+func canonicalBranchGraph(inputs value.Contract, graph GraphDraft) GraphDraft {
+	graph.Inputs = inputs
+	return graph
+}
+
+func canonicalMapBody(graph GraphDraft, item, index value.Field) GraphDraft {
+	inputs, err := value.NewContract(item, index)
+	if err != nil {
+		panic(err)
+	}
+	graph.Inputs = inputs
+	return graph
+}
+
+func canonicalNestedGraph(graph GraphDraft) *GraphDraft { return &graph }
+
+func mustCanonicalList(t *testing.T, element value.Type) value.Type {
+	t.Helper()
+	typ, err := value.List(element)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return typ
+}
+
+func canonicalOrderedLoop(t *testing.T) LoopDraft {
+	t.Helper()
+	outputs := canonicalContract(t, canonicalField(t, "done", value.Boolean()))
+	initial := canonicalField(t, "initial", value.EmptyContract().ObjectType())
+	previous, err := value.Optional("previous", outputs.ObjectType())
+	if err != nil {
+		t.Fatal(err)
+	}
+	iteration := canonicalField(t, "iteration", value.Integer())
+	bodyInputs := canonicalContract(t, initial, previous, iteration)
+	return LoopDraft{
+		Inputs: value.EmptyContract(), Outputs: outputs, Maximum: 2, Termination: []string{"done"},
+		Body: GraphDraft{
+			Inputs: bodyInputs, Outputs: outputs,
+			Nodes: []NodeDraft{
+				{Name: "loop-a", Leaf: scriptLeaf()},
+				{Name: "loop-b", Leaf: scriptLeaf()},
+				{Name: "work", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: outputs}},
+			},
+			Edges: []EdgeDraft{
+				{From: EndpointDraft{Kind: Child, Child: "loop-a"}, To: EndpointDraft{Kind: Child, Child: "loop-b"}},
+				{From: EndpointDraft{Kind: Child, Child: "loop-b"}, To: EndpointDraft{Kind: Child, Child: "work"}},
+				{From: EndpointDraft{Kind: Child, Child: "work"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"done"}, To: "done"}}},
+			},
+		},
+	}
+}
+
+func reverseDraftCollections(graph *GraphDraft) {
+	reverseNodes(graph.Nodes)
+	reverseEdges(graph.Edges)
+	for index := range graph.Edges {
+		reverseBindings(graph.Edges[index].Bindings)
+	}
+	for index := range graph.Nodes {
+		node := &graph.Nodes[index]
+		reverseLiteralBindings(node.Literals)
+		switch {
+		case node.Graph != nil:
+			reverseDraftCollections(node.Graph)
+		case node.Branch != nil:
+			reverseCases(node.Branch.Cases)
+			for caseIndex := range node.Branch.Cases {
+				reverseDraftCollections(&node.Branch.Cases[caseIndex].Graph)
+			}
+		case node.Map != nil:
+			reverseDraftCollections(&node.Map.Body)
+		case node.Loop != nil:
+			reverseDraftCollections(&node.Loop.Body)
+		}
+	}
+	if graph.Finally != nil {
+		reverseDraftCollections(graph.Finally)
+	}
+}
+
+func reverseLiteralBindings(bindings []LiteralBindingDraft) {
+	for left, right := 0, len(bindings)-1; left < right; left, right = left+1, right-1 {
+		bindings[left], bindings[right] = bindings[right], bindings[left]
+	}
+}
+
+func canonicalInspection(def Definition) []string {
+	root := def.Root()
+	inspection := []string{
+		"root:nodes=" + canonicalNodeNames(root),
+		"root:edges=" + canonicalEdgeNames(root),
+		"root:literals=" + canonicalLiteralNames(canonicalNodeOf(root, "literal")),
+	}
+	nestedScope, _ := canonicalNodeOf(root, "nested").Scope()
+	nested, _ := nestedScope.Graph()
+	inspection = append(inspection, "nested:nodes="+canonicalNodeNames(nested), "nested:edges="+canonicalEdgeNames(nested))
+	branchScope, _ := canonicalNodeOf(root, "choose").Scope()
+	branch, _ := branchScope.Branch()
+	caseNames := make([]string, len(branch.Cases()))
+	for index, branchCase := range branch.Cases() {
+		caseNames[index] = branchCase.Name()
+		inspection = append(inspection,
+			"branch:"+branchCase.Name()+":nodes="+canonicalNodeNames(branchCase.Graph()),
+			"branch:"+branchCase.Name()+":edges="+canonicalEdgeNames(branchCase.Graph()),
+		)
+	}
+	inspection = append(inspection, "branch:cases="+strings.Join(caseNames, ","))
+	mappedScope, _ := canonicalNodeOf(root, "each").Scope()
+	mapped, _ := mappedScope.Map()
+	inspection = append(inspection, "map:nodes="+canonicalNodeNames(mapped.Body()), "map:edges="+canonicalEdgeNames(mapped.Body()))
+	loopScope, _ := canonicalNodeOf(root, "repeat").Scope()
+	loop, _ := loopScope.Loop()
+	inspection = append(inspection, "loop:nodes="+canonicalNodeNames(loop.Body()), "loop:edges="+canonicalEdgeNames(loop.Body()))
+	cleanup, _ := root.Finally()
+	inspection = append(inspection, "finally:nodes="+canonicalNodeNames(cleanup.Graph()), "finally:edges="+canonicalEdgeNames(cleanup.Graph()))
+	return inspection
+}
+
+func canonicalNodeNames(graph Graph) string {
+	names := make([]string, len(graph.Nodes()))
+	for index, node := range graph.Nodes() {
+		names[index] = node.Name()
+	}
+	return strings.Join(names, ",")
+}
+
+func canonicalEdgeNames(graph Graph) string {
+	names := make([]string, 0)
+	for _, edge := range graph.Edges() {
+		for _, binding := range edge.Bindings() {
+			names = append(names, edge.From().Child()+"->"+edge.To().Child()+":"+binding.To())
+		}
+		if len(edge.Bindings()) == 0 {
+			names = append(names, edge.From().Child()+"->"+edge.To().Child())
+		}
+	}
+	return strings.Join(names, ",")
+}
+
+func canonicalLiteralNames(node Node) string {
+	names := make([]string, len(node.Literals()))
+	for index, literal := range node.Literals() {
+		names[index] = literal.Input()
+	}
+	return strings.Join(names, ",")
+}
+
+func canonicalNodeOf(graph Graph, name string) Node {
+	node, ok := findNode(graph, name)
+	if !ok {
+		panic("node is missing: " + name)
+	}
+	return node
 }

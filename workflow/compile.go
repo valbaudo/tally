@@ -29,6 +29,7 @@ func Compile(draft ProgramDraft) (Definition, error) {
 		return Definition{}, err
 	}
 	definition := Definition{root: root}
+	normalizeDefinition(&definition)
 	canonical, err := encodeDefinition(definition)
 	if err != nil {
 		return Definition{}, err

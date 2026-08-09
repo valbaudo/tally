@@ -18,6 +18,10 @@ type definitionWire struct {
 	Root   graphWire `json:"root"`
 }
 
+// stringWire holds the original Go string bytes. Encoding JSON strings from
+// Go strings would replace invalid UTF-8 and collapse distinct definitions.
+type stringWire []byte
+
 type graphWire struct {
 	Inputs  contractWire `json:"inputs"`
 	Outputs contractWire `json:"outputs"`
@@ -31,9 +35,9 @@ type contractWire struct {
 }
 
 type fieldWire struct {
-	Name     string   `json:"name"`
-	Type     typeWire `json:"type"`
-	Optional bool     `json:"optional"`
+	Name     stringWire `json:"name"`
+	Type     typeWire   `json:"type"`
+	Optional bool       `json:"optional"`
 }
 
 type typeWire struct {
@@ -41,24 +45,24 @@ type typeWire struct {
 	Elem   *typeWire         `json:"elem"`
 	Fields []fieldWire       `json:"fields"`
 	Enum   []json.RawMessage `json:"enum"`
-	Media  []string          `json:"media"`
+	Media  []stringWire      `json:"media"`
 }
 
 type nodeWire struct {
-	Name     string        `json:"name"`
+	Name     stringWire    `json:"name"`
 	Leaf     *leafWire     `json:"leaf"`
 	Scope    *scopeWire    `json:"scope"`
 	Literals []literalWire `json:"literals"`
 }
 
 type leafWire struct {
-	Kind    LeafKind     `json:"kind"`
+	Kind    stringWire   `json:"kind"`
 	Inputs  contractWire `json:"inputs"`
 	Outputs contractWire `json:"outputs"`
 }
 
 type scopeWire struct {
-	Kind   ScopeKind   `json:"kind"`
+	Kind   stringWire  `json:"kind"`
 	Graph  *graphWire  `json:"graph"`
 	Branch *branchWire `json:"branch"`
 	Map    *mapWire    `json:"map"`
@@ -68,20 +72,20 @@ type scopeWire struct {
 type branchWire struct {
 	Inputs   contractWire `json:"inputs"`
 	Outputs  contractWire `json:"outputs"`
-	Selector string       `json:"selector"`
+	Selector stringWire   `json:"selector"`
 	Cases    []caseWire   `json:"cases"`
 }
 
 type caseWire struct {
-	Name  string    `json:"name"`
-	Graph graphWire `json:"graph"`
+	Name  stringWire `json:"name"`
+	Graph graphWire  `json:"graph"`
 }
 
 type mapWire struct {
 	Inputs     contractWire `json:"inputs"`
 	Outputs    contractWire `json:"outputs"`
-	Collection string       `json:"collection"`
-	Result     string       `json:"result"`
+	Collection stringWire   `json:"collection"`
+	Result     stringWire   `json:"result"`
 	Body       graphWire    `json:"body"`
 }
 
@@ -89,13 +93,13 @@ type loopWire struct {
 	Inputs      contractWire `json:"inputs"`
 	Outputs     contractWire `json:"outputs"`
 	Maximum     int          `json:"maximum"`
-	Termination []string     `json:"termination"`
+	Termination []stringWire `json:"termination"`
 	Body        graphWire    `json:"body"`
 }
 
 type endpointWire struct {
 	Kind  EndpointKind `json:"kind"`
-	Child string       `json:"child"`
+	Child stringWire   `json:"child"`
 }
 
 type edgeWire struct {
@@ -105,13 +109,13 @@ type edgeWire struct {
 }
 
 type bindingWire struct {
-	From              []string `json:"from"`
-	To                string   `json:"to"`
-	RuntimeValidation bool     `json:"runtimeValidation"`
+	From              []stringWire `json:"from"`
+	To                stringWire   `json:"to"`
+	RuntimeValidation bool         `json:"runtimeValidation"`
 }
 
 type literalWire struct {
-	Input string          `json:"input"`
+	Input stringWire      `json:"input"`
 	Value json.RawMessage `json:"value"`
 }
 
@@ -129,11 +133,9 @@ func encodeGraph(graph Graph) graphWire {
 	for index, node := range graph.nodes {
 		wire.Nodes[index] = encodeNode(node)
 	}
-	sort.Slice(wire.Nodes, func(i, j int) bool { return wire.Nodes[i].Name < wire.Nodes[j].Name })
 	for index, edge := range graph.edges {
 		wire.Edges[index] = encodeEdge(edge)
 	}
-	sort.Slice(wire.Edges, func(i, j int) bool { return compareEdges(wire.Edges[i], wire.Edges[j]) < 0 })
 	if graph.cleanup != nil {
 		cleanup := encodeGraph(graph.cleanup.graph)
 		wire.Cleanup = &cleanup
@@ -145,7 +147,7 @@ func encodeContract(contract value.Contract) contractWire {
 	ports := contract.Ports()
 	wire := contractWire{Fields: make([]fieldWire, len(ports))}
 	for index, port := range ports {
-		wire.Fields[index] = fieldWire{Name: port.Name(), Type: encodeType(port.Type()), Optional: port.Optional()}
+		wire.Fields[index] = fieldWire{Name: encodeString(port.Name()), Type: encodeType(port.Type()), Optional: port.Optional()}
 	}
 	return wire
 }
@@ -161,7 +163,7 @@ func encodeType(typ value.Type) typeWire {
 		fields := typ.Fields()
 		wire.Fields = make([]fieldWire, len(fields))
 		for index, field := range fields {
-			wire.Fields[index] = fieldWire{Name: field.Name(), Type: encodeType(field.Type()), Optional: field.Optional()}
+			wire.Fields[index] = fieldWire{Name: encodeString(field.Name()), Type: encodeType(field.Type()), Optional: field.Optional()}
 		}
 	case value.EnumKind:
 		values := typ.EnumValues()
@@ -170,24 +172,22 @@ func encodeType(typ value.Type) typeWire {
 			wire.Enum[index] = json.RawMessage(member.Bytes())
 		}
 	case value.FileKind:
-		wire.Media = typ.Media()
+		media := typ.Media()
+		wire.Media = make([]stringWire, len(media))
+		for index, constraint := range media {
+			wire.Media[index] = encodeString(constraint)
+		}
 	}
 	return wire
 }
 
 func encodeNode(node Node) nodeWire {
-	wire := nodeWire{Name: node.name, Literals: make([]literalWire, len(node.literals))}
+	wire := nodeWire{Name: encodeString(node.name), Literals: make([]literalWire, len(node.literals))}
 	for index, literal := range node.literals {
-		wire.Literals[index] = literalWire{Input: literal.input, Value: json.RawMessage(literal.value.Bytes())}
+		wire.Literals[index] = literalWire{Input: encodeString(literal.input), Value: json.RawMessage(literal.value.Bytes())}
 	}
-	sort.Slice(wire.Literals, func(i, j int) bool {
-		if wire.Literals[i].Input != wire.Literals[j].Input {
-			return wire.Literals[i].Input < wire.Literals[j].Input
-		}
-		return bytes.Compare(wire.Literals[i].Value, wire.Literals[j].Value) < 0
-	})
 	if node.leaf != nil {
-		wire.Leaf = &leafWire{Kind: node.leaf.kind, Inputs: encodeContract(node.leaf.inputs), Outputs: encodeContract(node.leaf.outputs)}
+		wire.Leaf = &leafWire{Kind: encodeString(string(node.leaf.kind)), Inputs: encodeContract(node.leaf.inputs), Outputs: encodeContract(node.leaf.outputs)}
 	}
 	if node.scope != nil {
 		wire.Scope = encodeScope(*node.scope)
@@ -196,7 +196,7 @@ func encodeNode(node Node) nodeWire {
 }
 
 func encodeScope(scope Scope) *scopeWire {
-	wire := &scopeWire{Kind: scope.kind}
+	wire := &scopeWire{Kind: encodeString(string(scope.kind))}
 	switch scope.kind {
 	case GraphScope:
 		graph := encodeGraph(*scope.graph)
@@ -216,78 +216,135 @@ func encodeScope(scope Scope) *scopeWire {
 
 func encodeBranch(branch Branch) branchWire {
 	wire := branchWire{
-		Inputs: encodeContract(branch.inputs), Outputs: encodeContract(branch.outputs), Selector: branch.selector,
+		Inputs: encodeContract(branch.inputs), Outputs: encodeContract(branch.outputs), Selector: encodeString(branch.selector),
 		Cases: make([]caseWire, len(branch.cases)),
 	}
 	for index, branchCase := range branch.cases {
-		wire.Cases[index] = caseWire{Name: branchCase.name, Graph: encodeGraph(branchCase.graph)}
+		wire.Cases[index] = caseWire{Name: encodeString(branchCase.name), Graph: encodeGraph(branchCase.graph)}
 	}
-	sort.Slice(wire.Cases, func(i, j int) bool { return wire.Cases[i].Name < wire.Cases[j].Name })
 	return wire
 }
 
 func encodeMap(mapped Map) mapWire {
 	return mapWire{
 		Inputs: encodeContract(mapped.inputs), Outputs: encodeContract(mapped.outputs),
-		Collection: mapped.collection, Result: mapped.result, Body: encodeGraph(mapped.body),
+		Collection: encodeString(mapped.collection), Result: encodeString(mapped.result), Body: encodeGraph(mapped.body),
 	}
 }
 
 func encodeLoop(loop Loop) loopWire {
 	return loopWire{
 		Inputs: encodeContract(loop.inputs), Outputs: encodeContract(loop.outputs), Maximum: loop.maximum,
-		Termination: append([]string(nil), loop.termination...), Body: encodeGraph(loop.body),
+		Termination: encodeStrings(loop.termination), Body: encodeGraph(loop.body),
 	}
 }
 
 func encodeEdge(edge Edge) edgeWire {
 	wire := edgeWire{
-		From:     endpointWire{Kind: edge.from.kind, Child: edge.from.child},
-		To:       endpointWire{Kind: edge.to.kind, Child: edge.to.child},
+		From:     endpointWire{Kind: edge.from.kind, Child: encodeString(edge.from.child)},
+		To:       endpointWire{Kind: edge.to.kind, Child: encodeString(edge.to.child)},
 		Bindings: make([]bindingWire, len(edge.bindings)),
 	}
 	for index, binding := range edge.bindings {
 		wire.Bindings[index] = bindingWire{
-			From: append([]string(nil), binding.from...), To: binding.to, RuntimeValidation: binding.runtimeValidation,
+			From: encodeStrings(binding.from), To: encodeString(binding.to), RuntimeValidation: binding.runtimeValidation,
 		}
 	}
-	sort.Slice(wire.Bindings, func(i, j int) bool { return compareBindings(wire.Bindings[i], wire.Bindings[j]) < 0 })
 	return wire
 }
 
-func compareEdges(left, right edgeWire) int {
-	if result := compareEndpoints(left.From, right.From); result != 0 {
+func encodeString(value string) stringWire { return stringWire([]byte(value)) }
+
+func encodeStrings(values []string) []stringWire {
+	wire := make([]stringWire, len(values))
+	for index, value := range values {
+		wire[index] = encodeString(value)
+	}
+	return wire
+}
+
+func normalizeDefinition(definition *Definition) { normalizeGraph(&definition.root) }
+
+func normalizeGraph(graph *Graph) {
+	for index := range graph.nodes {
+		normalizeNode(&graph.nodes[index])
+	}
+	sort.Slice(graph.nodes, func(i, j int) bool { return graph.nodes[i].name < graph.nodes[j].name })
+	for index := range graph.edges {
+		normalizeEdge(&graph.edges[index])
+	}
+	sort.Slice(graph.edges, func(i, j int) bool { return compareEdges(graph.edges[i], graph.edges[j]) < 0 })
+	if graph.cleanup != nil {
+		normalizeGraph(&graph.cleanup.graph)
+	}
+}
+
+func normalizeNode(node *Node) {
+	sort.Slice(node.literals, func(i, j int) bool {
+		if node.literals[i].input != node.literals[j].input {
+			return node.literals[i].input < node.literals[j].input
+		}
+		return bytes.Compare(node.literals[i].value.Bytes(), node.literals[j].value.Bytes()) < 0
+	})
+	if node.scope == nil {
+		return
+	}
+	switch node.scope.kind {
+	case GraphScope:
+		normalizeGraph(node.scope.graph)
+	case BranchScope:
+		normalizeBranch(node.scope.branch)
+	case MapScope:
+		normalizeGraph(&node.scope.map_.body)
+	case LoopScope:
+		normalizeGraph(&node.scope.loop.body)
+	}
+}
+
+func normalizeBranch(branch *Branch) {
+	for index := range branch.cases {
+		normalizeGraph(&branch.cases[index].graph)
+	}
+	sort.Slice(branch.cases, func(i, j int) bool { return branch.cases[i].name < branch.cases[j].name })
+}
+
+func normalizeEdge(edge *Edge) {
+	sort.Slice(edge.bindings, func(i, j int) bool { return compareBindings(edge.bindings[i], edge.bindings[j]) < 0 })
+}
+
+func compareEdges(left, right Edge) int {
+	if result := compareEndpoints(left.from, right.from); result != 0 {
 		return result
 	}
-	if result := compareEndpoints(left.To, right.To); result != 0 {
+	if result := compareEndpoints(left.to, right.to); result != 0 {
 		return result
 	}
-	for index := 0; index < len(left.Bindings) && index < len(right.Bindings); index++ {
-		if result := compareBindings(left.Bindings[index], right.Bindings[index]); result != 0 {
+	for index := 0; index < len(left.bindings) && index < len(right.bindings); index++ {
+		if result := compareBindings(left.bindings[index], right.bindings[index]); result != 0 {
 			return result
 		}
 	}
-	return compareInt(len(left.Bindings), len(right.Bindings))
+	return compareInt(len(left.bindings), len(right.bindings))
 }
 
-func compareEndpoints(left, right endpointWire) int {
-	if result := compareInt(int(left.Kind), int(right.Kind)); result != 0 {
+func compareEndpoints(left, right Endpoint) int {
+	if result := compareInt(int(left.kind), int(right.kind)); result != 0 {
 		return result
 	}
-	return compareString(left.Child, right.Child)
+	return compareString(left.child, right.child)
 }
 
-func compareBindings(left, right bindingWire) int {
-	if result := compareString(left.To, right.To); result != 0 {
+func compareBindings(left, right Binding) int {
+	if result := compareString(left.to, right.to); result != 0 {
 		return result
 	}
-	if result := compareStrings(left.From, right.From); result != 0 {
+	if result := compareStrings(left.from, right.from); result != 0 {
 		return result
 	}
-	if left.RuntimeValidation == right.RuntimeValidation {
+	if left.runtimeValidation == right.runtimeValidation {
 		return 0
 	}
-	if !left.RuntimeValidation {
+	if !left.runtimeValidation {
 		return -1
 	}
 	return 1
