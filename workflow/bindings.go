@@ -13,6 +13,11 @@ type resolvedEndpoint struct {
 	inputs, outputs value.Contract
 }
 
+type resolvedSource struct {
+	typ      value.Type
+	optional bool
+}
+
 func resolveEndpoint(graph Graph, endpoint EndpointDraft) (resolvedEndpoint, error) {
 	switch endpoint.Kind {
 	case Boundary:
@@ -23,6 +28,9 @@ func resolveEndpoint(graph Graph, endpoint EndpointDraft) (resolvedEndpoint, err
 	case Child:
 		if endpoint.Child == "" {
 			return resolvedEndpoint{}, fmt.Errorf("child endpoint has an empty child name")
+		}
+		if strings.Contains(endpoint.Child, "/") {
+			return resolvedEndpoint{}, fmt.Errorf("unknown child %q", endpoint.Child)
 		}
 		for index, node := range graph.nodes {
 			if node.name == endpoint.Child {
@@ -39,16 +47,16 @@ func resolveEndpoint(graph Graph, endpoint EndpointDraft) (resolvedEndpoint, err
 	}
 }
 
-func resolveSource(endpoint resolvedEndpoint, path []string) (value.Type, error) {
+func resolveSource(endpoint resolvedEndpoint, path []string) (resolvedSource, error) {
 	contract := endpoint.outputs
 	if endpoint.kind == Boundary {
 		contract = endpoint.inputs
 	}
 	typ, ok := contract.Resolve(path...)
 	if !ok {
-		return value.Type{}, fmt.Errorf("unknown source port %q", strings.Join(path, "."))
+		return resolvedSource{}, fmt.Errorf("unknown source port %q", strings.Join(path, "."))
 	}
-	return typ, nil
+	return resolvedSource{typ: typ, optional: contractPathOptional(contract, path)}, nil
 }
 
 func resolveTarget(endpoint resolvedEndpoint, port string) (value.Type, error) {
@@ -102,7 +110,7 @@ func validateBindings(graph Graph, drafts []EdgeDraft) ([]Edge, error) {
 		}
 
 		for _, draftBinding := range draft.Bindings {
-			fromType, err := resolveSource(from, draftBinding.From)
+			source, err := resolveSource(from, draftBinding.From)
 			if err != nil {
 				return nil, bindingError(graph, "edge source endpoint %s port %q: %v", describeEndpoint(draft.From), strings.Join(draftBinding.From, "."), err)
 			}
@@ -110,7 +118,10 @@ func validateBindings(graph Graph, drafts []EdgeDraft) ([]Edge, error) {
 			if err != nil {
 				return nil, bindingError(graph, "edge target endpoint %s port %q: %v", describeEndpoint(draft.To), draftBinding.To, err)
 			}
-			assignment, err := value.CheckAssignable(fromType, toType)
+			if source.optional && !targetOptional(to, draftBinding.To) {
+				return nil, bindingError(graph, "edge from %s port %q to %s port %q: optional source cannot satisfy required target", describeEndpoint(draft.From), strings.Join(draftBinding.From, "."), describeEndpoint(draft.To), draftBinding.To)
+			}
+			assignment, err := value.CheckAssignable(source.typ, toType)
 			if err != nil {
 				return nil, bindingError(graph, "edge from %s port %q to %s port %q: %v", describeEndpoint(draft.From), strings.Join(draftBinding.From, "."), describeEndpoint(draft.To), draftBinding.To, err)
 			}
@@ -166,6 +177,45 @@ func validateBindings(graph Graph, drafts []EdgeDraft) ([]Edge, error) {
 		}
 	}
 	return edges, nil
+}
+
+func contractPathOptional(contract value.Contract, path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	field, ok := fieldNamed(contract.Ports(), path[0])
+	if !ok {
+		return false
+	}
+	optional := field.Optional()
+	typ := field.Type()
+	for _, name := range path[1:] {
+		field, ok = fieldNamed(typ.Fields(), name)
+		if !ok {
+			return optional
+		}
+		optional = optional || field.Optional()
+		typ = field.Type()
+	}
+	return optional
+}
+
+func targetOptional(endpoint resolvedEndpoint, port string) bool {
+	contract := endpoint.inputs
+	if endpoint.kind == Boundary {
+		contract = endpoint.outputs
+	}
+	field, ok := fieldNamed(contract.Ports(), port)
+	return ok && field.Optional()
+}
+
+func fieldNamed(fields []value.Field, name string) (value.Field, bool) {
+	for _, field := range fields {
+		if field.Name() == name {
+			return field, true
+		}
+	}
+	return value.Field{}, false
 }
 
 func nodeContracts(node Node) (value.Contract, value.Contract, bool) {

@@ -126,6 +126,13 @@ func TestCompileReferenceRejectsInvalidLexicalReferences(t *testing.T) {
 			wants: []string{"root", "workflow.dawn", "write/grandchild", "text", "unknown child"},
 		},
 		{
+			name: "literal slash-bearing child name",
+			graph: GraphDraft{Inputs: text, Nodes: []NodeDraft{bindingLeaf("write/grandchild", text, value.EmptyContract())}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write/grandchild"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+			}}},
+			wants: []string{"root", "workflow.dawn", "write/grandchild", "text", "unknown child"},
+		},
+		{
 			name: "boundary as source with output-only port",
 			graph: GraphDraft{Outputs: text, Nodes: []NodeDraft{bindingLeaf("write", text, value.EmptyContract())}, Edges: []EdgeDraft{{
 				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
@@ -225,6 +232,76 @@ func TestCompileBindingRequiresExactlyOneSource(t *testing.T) {
 	}
 	if got := mustNode(t, def.Root(), "write").Literals(); len(got) != 0 {
 		t.Fatalf("optional node literals = %v, want none", got)
+	}
+}
+
+// This catches duplicate sibling names letting one lexical edge bind several
+// distinct child declarations through the same endpoint key.
+func TestCompileBindingRejectsDuplicateSiblingNames(t *testing.T) {
+	text := bindingContract(t, false, "text", value.String())
+	_, err := Compile(bindingProgram(GraphDraft{
+		Inputs: text,
+		Nodes: []NodeDraft{
+			bindingLeaf("write", text, value.EmptyContract()),
+			bindingLeaf("write", text, value.EmptyContract()),
+		},
+		Edges: []EdgeDraft{{
+			From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write"},
+			Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+		}},
+	}))
+	assertBindingError(t, err, "root", "workflow.dawn", "write", "duplicate child name")
+}
+
+// This catches treating an optional contract field as a guaranteed source for
+// a required target while allowing the same conditional source for an optional
+// target that can remain absent.
+func TestCompileBindingRequiresPresentSourceForRequiredTarget(t *testing.T) {
+	text := bindingContract(t, false, "text", value.String())
+	optionalText := bindingContract(t, true, "text", value.String())
+	optionalName, err := value.Optional("name", value.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	person := bindingContract(t, false, "person", mustObject(t, optionalName))
+
+	for _, tc := range []struct {
+		name  string
+		graph GraphDraft
+		wants []string
+	}{
+		{
+			name: "optional top-level source",
+			graph: GraphDraft{Inputs: optionalText, Nodes: []NodeDraft{bindingLeaf("write", text, value.EmptyContract())}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write"},
+				Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+			}}},
+			wants: []string{"root", "workflow.dawn", "boundary", "write", "text", "optional source", "required target"},
+		},
+		{
+			name: "optional nested object field",
+			graph: GraphDraft{Inputs: person, Nodes: []NodeDraft{bindingLeaf("write", text, value.EmptyContract())}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write"},
+				Bindings: []BindingDraft{{From: []string{"person", "name"}, To: "text"}},
+			}}},
+			wants: []string{"root", "workflow.dawn", "boundary", "write", "person.name", "text", "optional source", "required target"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(bindingProgram(tc.graph))
+			assertBindingError(t, err, tc.wants...)
+		})
+	}
+
+	def, err := Compile(bindingProgram(GraphDraft{Inputs: optionalText, Nodes: []NodeDraft{bindingLeaf("write", optionalText, value.EmptyContract())}, Edges: []EdgeDraft{{
+		From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "write"},
+		Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+	}}}))
+	if err != nil {
+		t.Fatalf("optional source to optional target was rejected: %v", err)
+	}
+	if got := len(def.Root().Edges()); got != 1 {
+		t.Fatalf("edges = %d, want one optional binding edge", got)
 	}
 }
 

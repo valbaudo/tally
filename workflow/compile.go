@@ -99,11 +99,16 @@ func (c *compiler) compileGraph(draft *GraphDraft) (Graph, error) {
 	if fallbackSource {
 		graph.provenance.Source = c.modules[c.active[len(c.active)-1]].Provenance.Source
 	}
+	childNames := make(map[string]struct{}, len(draft.Nodes))
 	for _, draftNode := range draft.Nodes {
 		node, err := c.compileNode(draftNode)
 		if err != nil {
 			return Graph{}, err
 		}
+		if _, exists := childNames[node.name]; exists {
+			return Graph{}, bindingError(graph, "duplicate child name %q", node.name)
+		}
+		childNames[node.name] = struct{}{}
 		graph.nodes = append(graph.nodes, node)
 	}
 	edges, err := validateBindings(graph, draft.Edges)
