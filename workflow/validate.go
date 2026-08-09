@@ -8,8 +8,8 @@ import (
 	"github.com/valbaudo/dawn/value"
 )
 
-func validateGraph(graph Graph, cleanup bool) error {
-	if cleanup && !graph.outputs.Equal(value.EmptyContract()) {
+func validateGraph(graph Graph, cleanupBoundary, cleanupContext bool) error {
+	if cleanupBoundary && !graph.outputs.Equal(value.EmptyContract()) {
 		return fmt.Errorf("cleanup output contract must be explicitly empty")
 	}
 	if err := validateAcyclic(graph); err != nil {
@@ -18,15 +18,15 @@ func validateGraph(graph Graph, cleanup bool) error {
 	nodes := append([]Node(nil), graph.nodes...)
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].name < nodes[j].name })
 	for _, node := range nodes {
-		if err := validateNode(node, cleanup); err != nil {
+		if err := validateNode(node, cleanupContext); err != nil {
 			return fmt.Errorf("node %q: %w", node.name, err)
 		}
 	}
 	if graph.cleanup != nil {
-		if cleanup {
+		if cleanupContext {
 			return fmt.Errorf("finally cannot contain finally")
 		}
-		if err := validateGraph(graph.cleanup.graph, true); err != nil {
+		if err := validateGraph(graph.cleanup.graph, true, true); err != nil {
 			return fmt.Errorf("finally: %w", err)
 		}
 	}
@@ -140,7 +140,7 @@ func validateNode(node Node, cleanup bool) error {
 		if !ok || !inputs.Equal(node.scope.graph.inputs) || !outputs.Equal(node.scope.graph.outputs) {
 			return fmt.Errorf("graph scope boundary contracts do not match its inner graph")
 		}
-		return validateGraph(*node.scope.graph, cleanup)
+		return validateGraph(*node.scope.graph, false, cleanup)
 	case BranchScope:
 		if node.scope.branch == nil {
 			return fmt.Errorf("branch scope is missing its branch")
@@ -149,7 +149,7 @@ func validateNode(node Node, cleanup bool) error {
 			return err
 		}
 		for _, branchCase := range node.scope.branch.cases {
-			if err := validateGraph(branchCase.graph, cleanup); err != nil {
+			if err := validateGraph(branchCase.graph, false, cleanup); err != nil {
 				return fmt.Errorf("branch case %q: %w", branchCase.name, err)
 			}
 		}
@@ -161,7 +161,7 @@ func validateNode(node Node, cleanup bool) error {
 		if err := validateMap(*node.scope.map_); err != nil {
 			return err
 		}
-		return validateGraph(node.scope.map_.body, cleanup)
+		return validateGraph(node.scope.map_.body, false, cleanup)
 	case LoopScope:
 		if cleanup {
 			return fmt.Errorf("cleanup cannot contain loop")
@@ -172,7 +172,7 @@ func validateNode(node Node, cleanup bool) error {
 		if err := validateLoop(*node.scope.loop); err != nil {
 			return err
 		}
-		return validateGraph(node.scope.loop.body, false)
+		return validateGraph(node.scope.loop.body, false, false)
 	default:
 		return fmt.Errorf("unknown scope kind %q", node.scope.kind)
 	}

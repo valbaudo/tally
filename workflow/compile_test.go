@@ -204,8 +204,8 @@ func TestCompileCopiesDraftOwnedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nested := GraphDraft{Inputs: groupInputs, Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
-	cleanup := GraphDraft{Nodes: []NodeDraft{{Name: "clean", Leaf: scriptLeaf()}}}
+	nested := GraphDraft{Inputs: groupInputs, Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
+	cleanup := GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "clean", Leaf: scriptLeaf()}}}
 	draft := ProgramDraft{Root: "root", Modules: []ModuleDraft{
 		module("root", GraphDraft{
 			Inputs: contract(t, "input"),
@@ -277,7 +277,7 @@ func TestCompileRejectsRecursiveDraftGraphPointers(t *testing.T) {
 // This catches an active-pointer guard that rejects legitimate reuse after the
 // first independent occurrence has finished compiling.
 func TestCompileAllowsReusedNonRecursiveDraftGraph(t *testing.T) {
-	reused := GraphDraft{Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
+	reused := GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
 	def, err := Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{
 		module("root", GraphDraft{Nodes: []NodeDraft{
 			{Name: "first", Graph: &reused},
@@ -303,6 +303,8 @@ func TestCompileAllowsReusedNonRecursiveDraftGraph(t *testing.T) {
 // other than the module currently being compiled.
 func TestCompileOwnsAuthoredProvenance(t *testing.T) {
 	inner := GraphDraft{
+		Inputs:     value.EmptyContract(),
+		Outputs:    value.EmptyContract(),
 		Provenance: Provenance{Source: "inner.dawn", Module: "forged", Origin: OriginCall},
 		Nodes: []NodeDraft{{
 			Name: "work", Leaf: scriptLeaf(),
@@ -360,7 +362,7 @@ func loweringFixture(t *testing.T) ProgramDraft {
 		Modules: []ModuleDraft{
 			module("root", GraphDraft{Inputs: request, Nodes: []NodeDraft{
 				{Name: "analysis", Call: &CallDraft{Module: "analyze"}},
-				{Name: "reviewers", Parallel: &ParallelDraft{Graph: GraphDraft{Nodes: []NodeDraft{
+				{Name: "reviewers", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{
 					{Name: "first", Leaf: scriptLeaf()},
 					{Name: "second", Leaf: scriptLeaf()},
 				}}}},
@@ -385,6 +387,12 @@ func loweringFixture(t *testing.T) ProgramDraft {
 }
 
 func module(name string, graph GraphDraft) ModuleDraft {
+	if !graph.Inputs.Valid() {
+		graph.Inputs = value.EmptyContract()
+	}
+	if !graph.Outputs.Valid() {
+		graph.Outputs = value.EmptyContract()
+	}
 	return ModuleDraft{Name: name, Graph: graph, Provenance: Provenance{Source: name + ".dawn"}}
 }
 

@@ -25,7 +25,7 @@ func Compile(draft ProgramDraft) (Definition, error) {
 	if err != nil {
 		return Definition{}, err
 	}
-	if err := validateGraph(root, false); err != nil {
+	if err := validateGraph(root, false, false); err != nil {
 		return Definition{}, err
 	}
 	return Definition{root: root}, nil
@@ -290,6 +290,9 @@ func authoredProvenance(provenance Provenance, active []string) Provenance {
 }
 
 func cloneContract(contract value.Contract) (value.Contract, error) {
+	if !contract.Valid() {
+		return value.Contract{}, fmt.Errorf("contract is invalid")
+	}
 	copy, err := value.NewContract(contract.Ports()...)
 	if err != nil {
 		return value.Contract{}, err

@@ -355,6 +355,12 @@ func TestCompileCompletionOnlyEdgeRequiresDistinctChildren(t *testing.T) {
 }
 
 func bindingProgram(graph GraphDraft) ProgramDraft {
+	if !graph.Inputs.Valid() {
+		graph.Inputs = value.EmptyContract()
+	}
+	if !graph.Outputs.Valid() {
+		graph.Outputs = value.EmptyContract()
+	}
 	return ProgramDraft{Root: "root", Modules: []ModuleDraft{{
 		Name: "root", Provenance: Provenance{Source: "workflow.dawn"}, Graph: graph,
 	}}}

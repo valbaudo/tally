@@ -104,6 +104,9 @@ func TestCompileRejectsMalformedBranch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			branch := tc.branch
+			if !branch.Outputs.Valid() {
+				branch.Outputs = value.EmptyContract()
+			}
 			selector := `true`
 			if _, ok := branch.Inputs.Resolve("selected"); ok && branch.Inputs.Ports()[0].Type().Kind() == value.EnumKind {
 				selector = `"alpha"`
@@ -123,7 +126,7 @@ func TestCompileRejectsMalformedMap(t *testing.T) {
 	validBody := GraphDraft{Inputs: validationContract(t,
 		validationRequired(t, "item", value.String()),
 		validationRequired(t, "index", value.Integer()),
-	)}
+	), Outputs: value.EmptyContract()}
 	for _, tc := range []struct {
 		name string
 		map_ MapDraft
@@ -136,7 +139,7 @@ func TestCompileRejectsMalformedMap(t *testing.T) {
 		},
 		{
 			name: "body has fixed inputs",
-			map_: MapDraft{Inputs: validationContract(t, validationRequired(t, "items", stringsList)), Collection: "items", Result: "result", Outputs: result, Body: GraphDraft{Inputs: validationContract(t, validationRequired(t, "item", value.String()))}},
+			map_: MapDraft{Inputs: validationContract(t, validationRequired(t, "items", stringsList)), Collection: "items", Result: "result", Outputs: result, Body: GraphDraft{Inputs: validationContract(t, validationRequired(t, "item", value.String())), Outputs: value.EmptyContract()}},
 			want: "body input",
 		},
 		{
@@ -245,17 +248,17 @@ func TestCompileRejectsMalformedFinally(t *testing.T) {
 		},
 		{
 			name:    "cleanup cannot contain a gate",
-			cleanup: GraphDraft{Nodes: []NodeDraft{{Name: "check", Leaf: &LeafDraft{Kind: Gate, Inputs: validationContract(t, validationRequired(t, "passed", value.Boolean())), Outputs: value.EmptyContract()}, Literals: []LiteralBindingDraft{{Input: "passed", Value: validationLiteral(t, `true`)}}}}},
+			cleanup: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "check", Leaf: &LeafDraft{Kind: Gate, Inputs: validationContract(t, validationRequired(t, "passed", value.Boolean())), Outputs: value.EmptyContract()}, Literals: []LiteralBindingDraft{{Input: "passed", Value: validationLiteral(t, `true`)}}}}},
 			want:    "gate",
 		},
 		{
 			name:    "cleanup cannot contain a loop below a graph",
-			cleanup: GraphDraft{Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Nodes: []NodeDraft{{Name: "repeat", Loop: validationLoopPointer(t)}}}}}},
+			cleanup: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "repeat", Loop: validationLoopPointer(t)}}}}}},
 			want:    "loop",
 		},
 		{
 			name:    "cleanup cannot contain nested finally",
-			cleanup: GraphDraft{Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Finally: &GraphDraft{}}}}},
+			cleanup: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}}},
 			want:    "finally",
 		},
 	} {
@@ -267,18 +270,164 @@ func TestCompileRejectsMalformedFinally(t *testing.T) {
 	}
 }
 
+// Cleanup itself cannot publish data, but its ordinary composed scopes may use
+// their own explicit boundaries to pass internal data.
+func TestCompileAllowsComposedCleanupWithInternalOutputs(t *testing.T) {
+	text := validationContract(t, validationRequired(t, "text", value.String()))
+	selected := validationContract(t, validationRequired(t, "selected", value.Boolean()))
+	items := validationContract(t, validationRequired(t, "items", validationList(t, value.String())))
+	copyGraph := GraphDraft{
+		Inputs: text, Outputs: text,
+		Nodes: []NodeDraft{bindingLeaf("copy", text, text)},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Boundary}, To: validationChild("copy"), Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+			{From: validationChild("copy"), To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+		},
+	}
+	caseGraph := GraphDraft{
+		Inputs: selected, Outputs: text,
+		Nodes: []NodeDraft{bindingLeaf("value", value.EmptyContract(), text)},
+		Edges: []EdgeDraft{{From: validationChild("value"), To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}}},
+	}
+	bodyOutputs := text
+	mapped := MapDraft{
+		Inputs: items, Outputs: validationMapResult(t, bodyOutputs), Collection: "items", Result: "result",
+		Body: GraphDraft{
+			Inputs: validationContract(t,
+				validationRequired(t, "item", value.String()),
+				validationRequired(t, "index", value.Integer()),
+			),
+			Outputs: bodyOutputs,
+			Nodes:   []NodeDraft{bindingLeaf("copy", validationContract(t, validationRequired(t, "item", value.String())), bodyOutputs)},
+			Edges: []EdgeDraft{
+				{From: EndpointDraft{Kind: Boundary}, To: validationChild("copy"), Bindings: []BindingDraft{{From: []string{"item"}, To: "item"}}},
+				{From: validationChild("copy"), To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+			},
+		},
+	}
+	cleanupInputs := validationContract(t,
+		validationRequired(t, "items", validationList(t, value.String())),
+		validationRequired(t, "selected", value.Boolean()),
+		validationRequired(t, "text", value.String()),
+	)
+	cleanup := GraphDraft{
+		Inputs: cleanupInputs, Outputs: value.EmptyContract(),
+		Nodes: []NodeDraft{
+			{Name: "inner", Graph: &copyGraph},
+			{Name: "choose", Branch: &BranchDraft{Inputs: selected, Outputs: text, Selector: "selected", Cases: []CaseDraft{{Name: "false", Graph: caseGraph}, {Name: "true", Graph: caseGraph}}}},
+			{Name: "each", Map: &mapped},
+		},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Boundary}, To: validationChild("inner"), Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+			{From: EndpointDraft{Kind: Boundary}, To: validationChild("choose"), Bindings: []BindingDraft{{From: []string{"selected"}, To: "selected"}}},
+			{From: EndpointDraft{Kind: Boundary}, To: validationChild("each"), Bindings: []BindingDraft{{From: []string{"items"}, To: "items"}}},
+		},
+	}
+	root := GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &cleanup}
+	if _, err := Compile(bindingProgram(root)); err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
+func TestCompileRejectsUnconstructedGateAndCleanupOutputs(t *testing.T) {
+	gateInputs := validationContract(t,
+		validationRequired(t, "passed", value.Boolean()),
+		validationOptional(t, "reason", value.String()),
+	)
+	for _, tc := range []struct {
+		name  string
+		draft ProgramDraft
+		want  string
+	}{
+		{
+			name: "gate output",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(),
+				Nodes: []NodeDraft{{Name: "check", Leaf: &LeafDraft{Kind: Gate, Inputs: gateInputs}, Literals: []LiteralBindingDraft{{Input: "passed", Value: validationLiteral(t, `true`)}}}},
+			})}},
+			want: "leaf outputs: contract is invalid",
+		},
+		{
+			name: "cleanup output",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &GraphDraft{Inputs: value.EmptyContract()},
+			})}},
+			want: "finally: graph outputs: contract is invalid",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(tc.draft)
+			assertValidationError(t, err, tc.want)
+		})
+	}
+}
+
+func TestCompileRejectsUnconstructedContractsAtOtherBoundaries(t *testing.T) {
+	validLoop := validationLoop(t)
+	validLoop.Inputs = value.EmptyContract()
+	for _, tc := range []struct {
+		name  string
+		draft ProgramDraft
+		want  string
+	}{
+		{
+			name:  "root graph input",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{{Name: "root", Graph: GraphDraft{Outputs: value.EmptyContract()}}}},
+			want:  "graph inputs: contract is invalid",
+		},
+		{
+			name: "leaf input",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{{Name: "root", Graph: GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "work", Leaf: &LeafDraft{Kind: Script, Outputs: value.EmptyContract()}}},
+			}}}},
+			want: "leaf inputs: contract is invalid",
+		},
+		{
+			name: "map body output",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{{Name: "root", Graph: GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(),
+				Nodes: []NodeDraft{{Name: "each", Map: &MapDraft{
+					Inputs:  validationContract(t, validationRequired(t, "items", validationList(t, value.String()))),
+					Outputs: validationMapResult(t, value.EmptyContract()), Collection: "items", Result: "result",
+					Body: GraphDraft{Inputs: validationContract(t, validationRequired(t, "item", value.String()), validationRequired(t, "index", value.Integer()))},
+				}, Literals: []LiteralBindingDraft{{Input: "items", Value: validationLiteral(t, `[]`)}}}},
+			}}}},
+			want: "body: graph outputs: contract is invalid",
+		},
+		{
+			name: "loop input",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{{Name: "root", Graph: GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "repeat", Loop: &LoopDraft{Outputs: validLoop.Outputs, Maximum: validLoop.Maximum, Termination: validLoop.Termination, Body: validLoop.Body}}},
+			}}}},
+			want: "loop: inputs: contract is invalid",
+		},
+		{
+			name: "ordinary graph output",
+			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{{Name: "root", Graph: GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Inputs: value.EmptyContract()}}},
+			}}}},
+			want: "graph outputs: contract is invalid",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(tc.draft)
+			assertValidationError(t, err, tc.want)
+		})
+	}
+}
+
 func validationBranch(inputs value.Contract, cases []CaseDraft) BranchDraft {
 	return BranchDraft{Inputs: inputs, Selector: "missing", Cases: cases}
 }
 
 func validationCase(name string, inputs value.Contract) CaseDraft {
-	return CaseDraft{Name: name, Graph: GraphDraft{Inputs: inputs}}
+	return CaseDraft{Name: name, Graph: GraphDraft{Inputs: inputs, Outputs: value.EmptyContract()}}
 }
 
 func validationLoop(t *testing.T) LoopDraft {
 	t.Helper()
 	output := validationContract(t, validationRequired(t, "done", value.Boolean()))
-	return LoopDraft{Outputs: output, Maximum: 2, Termination: []string{"done"}, Body: validationLoopBody(t, output)}
+	return LoopDraft{Inputs: value.EmptyContract(), Outputs: output, Maximum: 2, Termination: []string{"done"}, Body: validationLoopBody(t, output)}
 }
 
 func validationLoopPointer(t *testing.T) *LoopDraft {
@@ -309,6 +458,7 @@ func validationCleanupWithOutput(t *testing.T) GraphDraft {
 	t.Helper()
 	output := validationContract(t, validationRequired(t, "result", value.String()))
 	return GraphDraft{
+		Inputs:  value.EmptyContract(),
 		Outputs: output,
 		Nodes:   []NodeDraft{bindingLeaf("clean", value.EmptyContract(), output)},
 		Edges:   []EdgeDraft{{From: validationChild("clean"), To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"result"}, To: "result"}}}},
