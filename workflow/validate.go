@@ -136,10 +136,6 @@ func validateNode(node Node, cleanup bool) error {
 		if node.scope.graph == nil {
 			return fmt.Errorf("graph scope is missing its graph")
 		}
-		inputs, outputs, ok := nodeContracts(node)
-		if !ok || !inputs.Equal(node.scope.graph.inputs) || !outputs.Equal(node.scope.graph.outputs) {
-			return fmt.Errorf("graph scope boundary contracts do not match its inner graph")
-		}
 		return validateGraph(*node.scope.graph, false, cleanup)
 	case BranchScope:
 		if node.scope.branch == nil {
@@ -148,7 +144,7 @@ func validateNode(node Node, cleanup bool) error {
 		if err := validateBranch(*node.scope.branch); err != nil {
 			return err
 		}
-		for _, branchCase := range node.scope.branch.cases {
+		for _, branchCase := range sortedBranchCases(node.scope.branch.cases) {
 			if err := validateGraph(branchCase.graph, false, cleanup); err != nil {
 				return fmt.Errorf("branch case %q: %w", branchCase.name, err)
 			}
@@ -183,6 +179,9 @@ func validateBranch(branch Branch) error {
 	if !ok {
 		return fmt.Errorf("branch selector %q is not an input", branch.selector)
 	}
+	if contractPathOptional(branch.inputs, []string{branch.selector}) {
+		return fmt.Errorf("branch selector %q must be required", branch.selector)
+	}
 	wantCases := make([]string, 0)
 	switch selector.Kind() {
 	case value.BooleanKind:
@@ -194,8 +193,9 @@ func validateBranch(branch Branch) error {
 	default:
 		return fmt.Errorf("branch selector %q must be boolean or enum", branch.selector)
 	}
-	gotCases := make([]string, 0, len(branch.cases))
-	for _, branchCase := range branch.cases {
+	cases := sortedBranchCases(branch.cases)
+	gotCases := make([]string, 0, len(cases))
+	for _, branchCase := range cases {
 		if !branchCase.graph.inputs.Equal(branch.inputs) {
 			return fmt.Errorf("branch case %q input contract does not match branch", branchCase.name)
 		}
@@ -220,6 +220,9 @@ func validateMap(mapped Map) error {
 	inputs := mapped.inputs.Ports()
 	if len(inputs) != 1 || inputs[0].Name() != mapped.collection || inputs[0].Type().Kind() != value.ListKind {
 		return fmt.Errorf("map collection must be its only list input")
+	}
+	if contractPathOptional(mapped.inputs, []string{mapped.collection}) {
+		return fmt.Errorf("map collection %q must be required", mapped.collection)
 	}
 	element, _ := inputs[0].Type().Element()
 	item, err := value.Required("item", element)
@@ -289,10 +292,19 @@ func validateLoop(loop Loop) error {
 	if !ok || termination.Kind() != value.BooleanKind {
 		return fmt.Errorf("loop termination path must resolve to boolean body output")
 	}
+	if contractPathOptional(loop.body.outputs, loop.termination) {
+		return fmt.Errorf("loop termination path must be required")
+	}
 	if !loop.outputs.Equal(loop.body.outputs) {
 		return fmt.Errorf("loop output contract must equal its body output contract")
 	}
 	return nil
+}
+
+func sortedBranchCases(cases []Case) []Case {
+	sorted := append([]Case(nil), cases...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].name < sorted[j].name })
+	return sorted
 }
 
 func validateGate(gate Leaf) error {

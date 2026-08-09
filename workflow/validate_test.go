@@ -120,6 +120,48 @@ func TestCompileRejectsMalformedBranch(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsOptionalBranchSelector(t *testing.T) {
+	selector := validationContract(t, validationOptional(t, "selected", value.Boolean()))
+	branch := BranchDraft{Inputs: selector, Outputs: value.EmptyContract(), Selector: "selected", Cases: []CaseDraft{
+		validationCase("false", selector), validationCase("true", selector),
+	}}
+	_, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{{
+		Name: "choose", Branch: &branch,
+		Literals: []LiteralBindingDraft{{Input: "selected", Value: validationLiteral(t, `true`)}},
+	}}}))
+	assertValidationError(t, err, "branch selector \"selected\" must be required")
+}
+
+func TestCompileReportsBranchCaseDiagnosticsInLexicalOrder(t *testing.T) {
+	selector := validationContract(t, validationRequired(t, "selected", value.Boolean()))
+	branchCases := func(reverse bool) []CaseDraft {
+		loop := validationLoop(t)
+		loop.Maximum = 0
+		cases := []CaseDraft{
+			{Name: "false", Graph: GraphDraft{Inputs: selector, Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "gate", Leaf: &LeafDraft{Kind: Gate, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}}},
+			{Name: "true", Graph: GraphDraft{Inputs: selector, Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "loop", Loop: &loop}}}},
+		}
+		if reverse {
+			cases[0], cases[1] = cases[1], cases[0]
+		}
+		return cases
+	}
+	compile := func(cases []CaseDraft) error {
+		branch := BranchDraft{Inputs: selector, Outputs: value.EmptyContract(), Selector: "selected", Cases: cases}
+		_, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{{
+			Name: "choose", Branch: &branch,
+			Literals: []LiteralBindingDraft{{Input: "selected", Value: validationLiteral(t, `true`)}},
+		}}}))
+		return err
+	}
+	first := compile(branchCases(false))
+	second := compile(branchCases(true))
+	assertValidationError(t, first, `branch case "false": node "gate": gate inputs`)
+	if second == nil || first.Error() != second.Error() {
+		t.Fatalf("branch diagnostics differ by authored case order: first %v, second %v", first, second)
+	}
+}
+
 func TestCompileRejectsMalformedMap(t *testing.T) {
 	stringsList := validationList(t, value.String())
 	result := validationMapResult(t, value.EmptyContract())
@@ -163,6 +205,22 @@ func TestCompileRejectsMalformedMap(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsOptionalMapCollection(t *testing.T) {
+	items := validationContract(t, validationOptional(t, "items", validationList(t, value.String())))
+	mapped := MapDraft{
+		Inputs: items, Outputs: validationMapResult(t, value.EmptyContract()), Collection: "items", Result: "result",
+		Body: GraphDraft{Inputs: validationContract(t,
+			validationRequired(t, "item", value.String()),
+			validationRequired(t, "index", value.Integer()),
+		), Outputs: value.EmptyContract()},
+	}
+	_, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{{
+		Name: "each", Map: &mapped,
+		Literals: []LiteralBindingDraft{{Input: "items", Value: validationLiteral(t, `[]`)}},
+	}}}))
+	assertValidationError(t, err, "map collection \"items\" must be required")
+}
+
 func TestCompileRejectsMalformedLoop(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -201,6 +259,36 @@ func TestCompileRejectsMalformedLoop(t *testing.T) {
 			tc.edit(&loop)
 			_, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{{Name: "repeat", Loop: &loop}}}))
 			assertValidationError(t, err, tc.want)
+		})
+	}
+}
+
+func TestCompileRequiresPresentLoopTerminationPath(t *testing.T) {
+	boolOutput := validationContract(t, validationRequired(t, "done", value.Boolean()))
+	nestedRequired := validationLoopTerminationContract(t, false, false)
+	nestedOptionalTop := validationLoopTerminationContract(t, true, false)
+	nestedOptionalField := validationLoopTerminationContract(t, false, true)
+	for _, tc := range []struct {
+		name    string
+		loop    LoopDraft
+		wantErr bool
+	}{
+		{name: "required top level", loop: validationLoopWith(t, boolOutput, []string{"done"})},
+		{name: "required nested field", loop: validationLoopWith(t, nestedRequired, []string{"outcome", "done"})},
+		{name: "optional top level", loop: validationLoopWith(t, validationContract(t, validationOptional(t, "done", value.Boolean())), []string{"done"}), wantErr: true},
+		{name: "optional nested top level", loop: validationLoopWith(t, nestedOptionalTop, []string{"outcome", "done"}), wantErr: true},
+		{name: "optional nested field", loop: validationLoopWith(t, nestedOptionalField, []string{"outcome", "done"}), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loop := tc.loop
+			_, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{{Name: "repeat", Loop: &loop}}}))
+			if tc.wantErr {
+				assertValidationError(t, err, "loop termination path must be required")
+				return
+			}
+			if err != nil {
+				t.Fatalf("Compile() error = %v", err)
+			}
 		})
 	}
 }
@@ -427,7 +515,29 @@ func validationCase(name string, inputs value.Contract) CaseDraft {
 func validationLoop(t *testing.T) LoopDraft {
 	t.Helper()
 	output := validationContract(t, validationRequired(t, "done", value.Boolean()))
-	return LoopDraft{Inputs: value.EmptyContract(), Outputs: output, Maximum: 2, Termination: []string{"done"}, Body: validationLoopBody(t, output)}
+	return validationLoopWith(t, output, []string{"done"})
+}
+
+func validationLoopWith(t *testing.T, outputs value.Contract, termination []string) LoopDraft {
+	t.Helper()
+	return LoopDraft{Inputs: value.EmptyContract(), Outputs: outputs, Maximum: 2, Termination: termination, Body: validationLoopBody(t, outputs)}
+}
+
+func validationLoopTerminationContract(t *testing.T, optionalOutcome, optionalDone bool) value.Contract {
+	t.Helper()
+	done := validationRequired(t, "done", value.Boolean())
+	if optionalDone {
+		done = validationOptional(t, "done", value.Boolean())
+	}
+	outcome, err := value.Object(done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := validationRequired(t, "outcome", outcome)
+	if optionalOutcome {
+		field = validationOptional(t, "outcome", outcome)
+	}
+	return validationContract(t, field)
 }
 
 func validationLoopPointer(t *testing.T) *LoopDraft {
