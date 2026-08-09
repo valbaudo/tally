@@ -76,6 +76,9 @@ type Definition struct {
 // Root returns the definition's root graph.
 func (d Definition) Root() Graph { return d.root }
 
+// Canonical returns a defensive copy of the validated definition's canonical bytes.
+func (d Definition) Canonical() []byte { return append([]byte(nil), d.canonical...) }
+
 // Graph is an immutable contracted hierarchical region.
 type Graph struct {
 	inputs, outputs value.Contract

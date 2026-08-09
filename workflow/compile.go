@@ -28,7 +28,13 @@ func Compile(draft ProgramDraft) (Definition, error) {
 	if err := validateGraph(root, false, false); err != nil {
 		return Definition{}, err
 	}
-	return Definition{root: root}, nil
+	definition := Definition{root: root}
+	canonical, err := encodeDefinition(definition)
+	if err != nil {
+		return Definition{}, err
+	}
+	definition.canonical = canonical
+	return definition, nil
 }
 
 func newCompiler(modules []ModuleDraft) (*compiler, error) {
