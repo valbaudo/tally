@@ -354,6 +354,120 @@ func TestCompileCompletionOnlyEdgeRequiresDistinctChildren(t *testing.T) {
 	}
 }
 
+// This catches endpoint-resolution diagnostics inventing a port for a
+// completion-only edge, which has no binding port to report.
+func TestCompileCompletionReferenceErrorHasNoPort(t *testing.T) {
+	empty := value.EmptyContract()
+	_, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{
+		bindingLeaf("worker", empty, empty),
+	}, Edges: []EdgeDraft{{
+		From: EndpointDraft{Kind: Child, Child: "missing"}, To: EndpointDraft{Kind: Child, Child: "worker"},
+	}}}))
+	assertBindingError(t, err, "root", "workflow.dawn", "missing", "unknown child")
+	if strings.Contains(err.Error(), `port ""`) {
+		t.Fatalf("completion endpoint error = %q, must not invent an empty port", err)
+	}
+}
+
+// This catches ParallelDraft lowering retaining dependency edges between its
+// immediate branches, whether they carry data or only completion ordering.
+func TestCompileParallelRejectsChildOrderingEdges(t *testing.T) {
+	text := bindingContract(t, false, "text", value.String())
+	empty := value.EmptyContract()
+	for _, tc := range []struct {
+		name  string
+		graph GraphDraft
+		wants []string
+	}{
+		{
+			name: "data edge",
+			graph: GraphDraft{Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{
+				bindingLeaf("read", empty, text),
+				bindingLeaf("write", text, empty),
+			}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Child, Child: "read"}, To: EndpointDraft{Kind: Child, Child: "write"},
+				Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+			}}}}}}},
+			wants: []string{"root", "workflow.dawn", "read", "write", "text", "parallel", "ordering"},
+		},
+		{
+			name: "completion edge",
+			graph: GraphDraft{Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{
+				bindingLeaf("first", empty, empty),
+				bindingLeaf("second", empty, empty),
+			}, Edges: []EdgeDraft{{
+				From: EndpointDraft{Kind: Child, Child: "first"}, To: EndpointDraft{Kind: Child, Child: "second"},
+			}}}}}}},
+			wants: []string{"root", "workflow.dawn", "first", "second", "parallel", "ordering"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(bindingProgram(tc.graph))
+			assertBindingError(t, err, tc.wants...)
+		})
+	}
+}
+
+// This catches treating parallel branches as unable to receive shared boundary
+// data or collectively supply distinct boundary outputs.
+func TestCompileParallelAllowsBoundaryFanOutAndFanIn(t *testing.T) {
+	text := bindingContract(t, false, "text", value.String())
+	first := bindingContract(t, false, "first", value.String())
+	second := bindingContract(t, false, "second", value.String())
+	outputs := bindingFieldsContract(t, requiredField(t, "first", value.String()), requiredField(t, "second", value.String()))
+	parallel := GraphDraft{
+		Inputs: text, Outputs: outputs,
+		Nodes: []NodeDraft{
+			bindingLeaf("first", text, first),
+			bindingLeaf("second", text, second),
+		},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "first"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+			{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "second"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+			{From: EndpointDraft{Kind: Child, Child: "first"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"first"}, To: "first"}}},
+			{From: EndpointDraft{Kind: Child, Child: "second"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"second"}, To: "second"}}},
+		},
+	}
+	def, err := Compile(bindingProgram(GraphDraft{
+		Inputs: text, Outputs: outputs,
+		Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: parallel}}},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "parallel"}, Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}}},
+			{From: EndpointDraft{Kind: Child, Child: "parallel"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"first"}, To: "first"}, {From: []string{"second"}, To: "second"}}},
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelNode := mustNode(t, def.Root(), "parallel")
+	scope, ok := parallelNode.Scope()
+	if !ok {
+		t.Fatal("parallel node is not a graph scope")
+	}
+	graph, ok := scope.Graph()
+	if !ok || len(graph.Edges()) != 4 {
+		t.Fatalf("parallel graph edges = %d, want four boundary edges", len(graph.Edges()))
+	}
+}
+
+// This catches applying ParallelDraft's no-ordering rule to ordinary graphs.
+func TestCompileOrdinaryGraphAllowsChildOrdering(t *testing.T) {
+	text := bindingContract(t, false, "text", value.String())
+	def, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{
+		bindingLeaf("read", value.EmptyContract(), text),
+		bindingLeaf("write", text, value.EmptyContract()),
+	}, Edges: []EdgeDraft{{
+		From: EndpointDraft{Kind: Child, Child: "read"}, To: EndpointDraft{Kind: Child, Child: "write"},
+		Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
+	}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(def.Root().Edges()); got != 1 {
+		t.Fatalf("ordinary graph edges = %d, want one child ordering edge", got)
+	}
+}
+
 func bindingProgram(graph GraphDraft) ProgramDraft {
 	if !graph.Inputs.Valid() {
 		graph.Inputs = value.EmptyContract()
@@ -381,6 +495,15 @@ func bindingContract(t *testing.T, optional bool, name string, typ value.Type) v
 		}
 	}
 	contract, err := value.NewContract(field)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contract
+}
+
+func bindingFieldsContract(t *testing.T, fields ...value.Field) value.Contract {
+	t.Helper()
+	contract, err := value.NewContract(fields...)
 	if err != nil {
 		t.Fatal(err)
 	}
