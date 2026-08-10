@@ -732,7 +732,8 @@ type replacingDirectoryTreeCaptureRoot struct {
 
 func (r replacingDirectoryTreeCaptureRoot) readDir(name string) ([]os.DirEntry, error) {
 	if r.host == r.directory {
-		if err := os.Remove(r.host); err != nil {
+		moved := r.host + ".pinned"
+		if err := os.Rename(r.host, moved); err != nil {
 			return nil, err
 		}
 		if err := os.Symlink(r.target, r.host); err != nil {
