@@ -92,6 +92,25 @@ type runState struct {
 	control   *runController
 }
 
+func (r *runState) runScope(ctx context.Context, path Path, scope workflow.Scope, input value.Value) (Result, bool) {
+	switch scope.Kind() {
+	case workflow.GraphScope:
+		graph, present := scope.Graph()
+		if !present {
+			return Result{}, false
+		}
+		return r.runGraph(ctx, path, graph, input), true
+	case workflow.BranchScope:
+		branch, present := scope.Branch()
+		if !present {
+			return Result{}, false
+		}
+		return r.runBranch(ctx, path, branch, input), true
+	default:
+		return Result{}, false
+	}
+}
+
 func (r *runState) runNested(ctx context.Context, fn func(context.Context) Result) <-chan Result {
 	done := make(chan Result, 1)
 	go func() {

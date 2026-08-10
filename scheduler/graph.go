@@ -183,9 +183,9 @@ func (r *runState) runNode(ctx context.Context, path Path, node workflow.Node, i
 		}
 		return r.runLeaf(ctx, path, leaf, input)
 	}
-	if scope, ok := node.Scope(); ok && scope.Kind() == workflow.GraphScope {
-		if graph, present := scope.Graph(); present {
-			return r.runGraph(ctx, path, graph, input)
+	if scope, ok := node.Scope(); ok {
+		if result, handled := r.runScope(ctx, path, scope, input); handled {
+			return result
 		}
 	}
 	return resultFrom(failed(path, MechanicalFailure, fmt.Errorf("unsupported node scope %q", node.ScopeKind())), nil)
