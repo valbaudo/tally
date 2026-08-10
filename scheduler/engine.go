@@ -106,6 +106,12 @@ func (r *runState) runScope(ctx context.Context, path Path, scope workflow.Scope
 			return Result{}, false
 		}
 		return r.runBranch(ctx, path, branch, input), true
+	case workflow.MapScope:
+		mapped, present := scope.Map()
+		if !present {
+			return Result{}, false
+		}
+		return r.runMap(ctx, path, mapped, input), true
 	default:
 		return Result{}, false
 	}
