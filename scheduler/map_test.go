@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,6 +101,58 @@ func TestMapEmptyInputCancelledAfterEntryPublishesNothing(t *testing.T) {
 	}
 	if runner.count() != 0 {
 		t.Fatalf("runner starts = %d, want 0", runner.count())
+	}
+}
+
+func TestMapNonEmptyInputCancelledDuringFinalFanInPublishesNothing(t *testing.T) {
+	bodyInputs := mapBodyInputs(t, value.String())
+	definition := mapDefinition(t, value.String(), value.EmptyContract(), workflow.GraphDraft{
+		Inputs: bodyInputs, Outputs: value.EmptyContract(),
+	})
+	node := definition.Root().Nodes()[0]
+	scope, ok := node.Scope()
+	if !ok {
+		t.Fatal("compiled map node has no scope")
+	}
+
+	trace := &eventTrace{}
+	base := newPathRecordingBoundary(trace)
+	runner := newMapTestRunner()
+	ctx := newFinalFanInCancellationContext(context.Background())
+	boundary := &finalFanInCancellationBoundary{base: base, cancellation: ctx, bodyCount: 2}
+	scheduler, err := New(runner, boundary, Policy{Capacity: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, controlCancel := context.WithCancel(context.Background())
+	defer controlCancel()
+	run := &runState{scheduler: scheduler, control: newRunController(controlCancel)}
+	input := testValue(t, map[string]value.Value{"items": value.NewList(value.NewString("alpha"), value.NewString("beta"))})
+	mapPath := Path{}.AuthoredChild("each")
+
+	result, handled := run.runScope(ctx, mapPath, scope, input)
+	if !handled {
+		t.Fatal("map scope was not dispatched")
+	}
+	requireStatus(t, result, Cancelled)
+	if _, ok := result.Output(); ok || hasPathEvent(base.snapshot(), traceCommit, mapPath) {
+		t.Fatal("non-empty map published output after cancellation became visible during final fan-in")
+	}
+	for _, item := range []value.Value{value.NewString("alpha"), value.NewString("beta")} {
+		bodyPath, pathErr := mapPath.MapItem(item.Canonical(), 0)
+		if pathErr != nil {
+			t.Fatal(pathErr)
+		}
+		if !hasPathEvent(base.snapshot(), traceCommit, bodyPath) {
+			t.Fatalf("body %x did not complete before final fan-in cancellation", item.Canonical())
+		}
+	}
+	settled := base.base.settlements("each")
+	if len(settled) != 1 || !reflect.DeepEqual(settled[0], result) {
+		t.Fatalf("map settlement and returned result differ: settled = %#v, returned = %#v", settled, result)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("runner starts = %d, want 0 for empty body graphs", runner.count())
 	}
 }
 
@@ -398,6 +451,59 @@ type cancelOnMapEnterBoundary struct {
 	base   *pathRecordingBoundary
 	cancel context.CancelFunc
 	once   sync.Once
+}
+
+type finalFanInCancellationContext struct {
+	context.Context
+	done         chan struct{}
+	armed        atomic.Bool
+	observations atomic.Int64
+	once         sync.Once
+}
+
+func newFinalFanInCancellationContext(parent context.Context) *finalFanInCancellationContext {
+	return &finalFanInCancellationContext{Context: parent, done: make(chan struct{})}
+}
+
+func (c *finalFanInCancellationContext) Done() <-chan struct{} { return c.done }
+
+func (c *finalFanInCancellationContext) Err() error {
+	if c.armed.Load() && c.observations.Add(1) >= 2 {
+		c.once.Do(func() { close(c.done) })
+		return context.Canceled
+	}
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+type finalFanInCancellationBoundary struct {
+	base         *pathRecordingBoundary
+	cancellation *finalFanInCancellationContext
+	bodyCount    int64
+	bodyCommits  atomic.Int64
+}
+
+func (b *finalFanInCancellationBoundary) Enter(ctx context.Context, instance Instance) error {
+	return b.base.Enter(ctx, instance)
+}
+
+func (b *finalFanInCancellationBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
+	if err := b.base.Commit(ctx, instance, output); err != nil {
+		return err
+	}
+	components := instance.Path().Components()
+	if len(components) > 0 && components[len(components)-1].Kind() == MapItemComponent && b.bodyCommits.Add(1) == b.bodyCount {
+		b.cancellation.armed.Store(true)
+	}
+	return nil
+}
+
+func (b *finalFanInCancellationBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
+	return b.base.Settle(ctx, instance, result)
 }
 
 func (b *cancelOnMapEnterBoundary) Enter(ctx context.Context, instance Instance) error {

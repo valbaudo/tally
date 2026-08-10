@@ -181,6 +181,9 @@ func (r *runState) runMap(ctx context.Context, path Path, mapped workflow.Map, i
 	if outputErr != nil {
 		return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, outputErr), nil))
 	}
+	if ctx.Err() != nil {
+		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.control.externalError()))
+	}
 	if commitErr := r.scheduler.boundary.Commit(ctx, instance, output); commitErr != nil {
 		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, commitErr), nil))
 	}
