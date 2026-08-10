@@ -41,6 +41,7 @@ type Diagnostic struct {
 	reason          string
 	parentCancelled bool
 	cleanup         bool
+	external        bool
 }
 
 // diagnostic remains the scheduler's internal construction spelling.
@@ -78,11 +79,11 @@ func (d Diagnostic) Valid() bool {
 	}
 	switch d.status {
 	case Failed:
-		return validFailureKind(d.failure) && d.err != nil && d.reason == ""
+		return !d.external && validFailureKind(d.failure) && d.err != nil && d.reason == ""
 	case Rejected:
-		return d.failure == 0 && d.err == nil
+		return !d.external && d.failure == 0 && d.err == nil
 	case Cancelled:
-		return d.failure == 0 && d.err != nil && d.reason == ""
+		return d.failure == 0 && d.err != nil && d.reason == "" && (!d.external || (!d.parentCancelled && !d.cleanup && len(d.path.components) == 0))
 	default:
 		return false
 	}

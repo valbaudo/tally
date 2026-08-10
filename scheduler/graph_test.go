@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -326,6 +328,19 @@ func TestFailFastForceStopErrorDoesNotReleaseQuiescenceOrCapacity(t *testing.T) 
 	}
 	requireStatus(t, first, Cancelled)
 	requireStatus(t, second, Succeeded)
+	workSettlements := boundary.base.settlements("work")
+	if len(workSettlements) == 0 {
+		t.Fatal("failed force-stop leaf did not publish settlement")
+	}
+	settledForce, settledOK := forceFailure(workSettlements[0])
+	returnedForce, returnedOK := forceFailure(first)
+	if !settledOK || !returnedOK || !reflect.DeepEqual(settledForce, returnedForce) {
+		t.Fatalf("settled force diagnostic = %#v/%v, returned = %#v/%v", settledForce, settledOK, returnedForce, returnedOK)
+	}
+	rootSettlements := boundary.base.settlements("root")
+	if len(rootSettlements) != 1 || !reflect.DeepEqual(rootSettlements[0], first) {
+		t.Fatalf("root settlement and Wait differ: settled = %#v, returned = %#v", rootSettlements, first)
+	}
 }
 
 type forceStopObservationBoundary struct {
@@ -369,11 +384,11 @@ func TestExternalCancelWinsIntrinsicFailure(t *testing.T) {
 }
 
 func TestExternalCancelWinsDirectRootTerminalPaths(t *testing.T) {
-	for _, mode := range []rootCancellationMode{rootEnterCancellation, rootCommitCancellation, rootOutputSettlementCancellation} {
+	for _, mode := range []rootCancellationMode{rootEnterCancellation, rootCommitCancellation} {
 		t.Run(string(mode), func(t *testing.T) {
 			trace := &eventTrace{}
 			boundary := &rootCancellationBoundary{
-				mode: mode, blocked: make(chan struct{}), release: make(chan struct{}), base: newRecordingBoundary(trace),
+				mode: mode, blocked: make(chan struct{}), base: newRecordingBoundary(trace),
 			}
 			runner := newControlledRunner(trace)
 			definition, input := rootCancellationDefinition(t, mode)
@@ -387,7 +402,6 @@ func TestExternalCancelWinsDirectRootTerminalPaths(t *testing.T) {
 			}
 			waitClosed(t, boundary.blocked, "root terminal path did not block")
 			execution.Cancel()
-			close(boundary.release)
 			result := waitResult(t, execution)
 			if !result.Valid() || result.Status() != Cancelled {
 				t.Fatalf("status = %v (valid %v), want %v", result.Status(), result.Valid(), Cancelled)
@@ -414,6 +428,119 @@ func TestExternalCancelWinsDirectRootTerminalPaths(t *testing.T) {
 	}
 }
 
+func TestExternalCancelAppearsOnceAcrossNestedGraphSettlements(t *testing.T) {
+	empty := value.EmptyContract()
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{{Name: "nested", Graph: &workflow.GraphDraft{
+			Inputs: empty, Outputs: empty,
+			Nodes: []workflow.NodeDraft{testLeaf("work", empty, empty)},
+		}}},
+	})
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 1})
+	runner.waitStarts(t, 1)
+	execution.Cancel()
+	result := waitResult(t, execution)
+	requireStatus(t, result, Cancelled)
+
+	for _, child := range []string{"work", "nested", "root"} {
+		settlements := boundary.settlements(child)
+		if len(settlements) != 1 {
+			t.Fatalf("%s settlements = %d, want 1", child, len(settlements))
+		}
+		if countExternalCancellations(settlements[0]) != 1 {
+			t.Fatalf("%s external diagnostics = %d, want 1: %#v", child, countExternalCancellations(settlements[0]), settlements[0])
+		}
+	}
+	if countExternalCancellations(result) != 1 {
+		t.Fatalf("Wait external diagnostics = %d, want 1: %#v", countExternalCancellations(result), result)
+	}
+	root := boundary.settlements("root")[0]
+	if !reflect.DeepEqual(root, result) {
+		t.Fatalf("root settlement and Wait differ: settled = %#v, returned = %#v", root, result)
+	}
+}
+
+func TestExternalCancelAfterSettlementStartsDoesNotMutateTerminalResult(t *testing.T) {
+	trace := &eventTrace{}
+	base := newRecordingBoundary(trace)
+	boundary := &blockingSettlementBoundary{base: base, entered: make(chan struct{}), release: make(chan struct{})}
+	definition, input := rootCancellationDefinition(t, rootOutputSettlementCancellation)
+	scheduler, err := New(newControlledRunner(trace), boundary, Policy{Capacity: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := scheduler.Start(context.Background(), definition, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitClosed(t, boundary.entered, "root settlement did not begin")
+	execution.Cancel()
+	close(boundary.release)
+	returned := waitResult(t, execution)
+	settlements := base.settlements("root")
+	if len(settlements) != 1 {
+		t.Fatalf("root settlements = %d, want 1", len(settlements))
+	}
+	if !reflect.DeepEqual(settlements[0], returned) {
+		t.Fatalf("settlement and Wait differ: settled = %#v, returned = %#v", settlements[0], returned)
+	}
+	requireStatus(t, returned, Failed)
+	if countExternalCancellations(returned) != 0 {
+		t.Fatalf("late cancellation mutated terminal result: %#v", returned)
+	}
+}
+
+type blockingSettlementBoundary struct {
+	base    *recordingBoundary
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingSettlementBoundary) Enter(ctx context.Context, instance Instance) error {
+	return b.base.Enter(ctx, instance)
+}
+
+func (b *blockingSettlementBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
+	return b.base.Commit(ctx, instance, output)
+}
+
+func (b *blockingSettlementBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
+	if err := b.base.Settle(ctx, instance, result); err != nil {
+		return err
+	}
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+
+func countExternalCancellations(result Result) int {
+	diagnostics := result.Secondary()
+	if primary, ok := result.Primary(); ok {
+		diagnostics = append([]Diagnostic{primary}, diagnostics...)
+	}
+	count := 0
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Status() == Cancelled && !diagnostic.parentCancelled && len(diagnostic.Path().Components()) == 0 && errors.Is(diagnostic.Error(), context.Canceled) {
+			count++
+		}
+	}
+	return count
+}
+
+func forceFailure(result Result) (Diagnostic, bool) {
+	for _, diagnostic := range result.Secondary() {
+		if diagnostic.Status() == Failed && diagnostic.Error() != nil && strings.Contains(diagnostic.Error().Error(), "force stop leaf") {
+			return diagnostic, true
+		}
+	}
+	return Diagnostic{}, false
+}
+
 type rootCancellationMode string
 
 const (
@@ -425,7 +552,6 @@ const (
 type rootCancellationBoundary struct {
 	mode    rootCancellationMode
 	blocked chan struct{}
-	release chan struct{}
 	base    *recordingBoundary
 	once    sync.Once
 }
@@ -449,10 +575,6 @@ func (b *rootCancellationBoundary) Commit(ctx context.Context, instance Instance
 }
 
 func (b *rootCancellationBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
-	if b.mode == rootOutputSettlementCancellation && instanceName(instance) == "root" {
-		b.signalBlocked()
-		<-b.release
-	}
 	return b.base.Settle(ctx, instance, result)
 }
 

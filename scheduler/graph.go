@@ -208,5 +208,5 @@ func (r *runState) settle(ctx context.Context, instance Instance, result Result)
 		causes = append(causes, failed(instance.Path(), MechanicalFailure, err))
 		return normalize(causes, r.control.externalError())
 	}
-	return r.withExternalCancellation(result)
+	return result
 }

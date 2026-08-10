@@ -64,6 +64,7 @@ type recordingBoundary struct {
 	enterErrors map[string]error
 	commitError map[string]error
 	committed   map[string]value.Value
+	settled     map[string][]Result
 }
 
 func newRecordingBoundary(trace *eventTrace) *recordingBoundary {
@@ -72,6 +73,7 @@ func newRecordingBoundary(trace *eventTrace) *recordingBoundary {
 		enterErrors: make(map[string]error),
 		commitError: make(map[string]error),
 		committed:   make(map[string]value.Value),
+		settled:     make(map[string][]Result),
 	}
 }
 
@@ -96,7 +98,12 @@ func (b *recordingBoundary) Commit(_ context.Context, instance Instance, output 
 }
 
 func (b *recordingBoundary) Settle(_ context.Context, instance Instance, result Result) error {
-	b.trace.record(traceEvent{kind: traceSettle, child: instanceName(instance), status: result.Status()})
+	child := instanceName(instance)
+	b.trace.record(traceEvent{kind: traceSettle, child: child, status: result.Status()})
+	b.mu.Lock()
+	result.secondary = result.Secondary()
+	b.settled[child] = append(b.settled[child], result)
+	b.mu.Unlock()
 	return nil
 }
 
@@ -108,6 +115,16 @@ func (b *recordingBoundary) commits() map[string]value.Value {
 		result[name] = output
 	}
 	return result
+}
+
+func (b *recordingBoundary) settlements(child string) []Result {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	settled := append([]Result(nil), b.settled[child]...)
+	for index := range settled {
+		settled[index].secondary = settled[index].Secondary()
+	}
+	return settled
 }
 
 type controlledRunner struct {

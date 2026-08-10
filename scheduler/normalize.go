@@ -31,7 +31,7 @@ func externalCancelled(err error) diagnostic {
 	if err == nil {
 		err = context.Canceled
 	}
-	return diagnostic{status: Cancelled, err: err}
+	return diagnostic{status: Cancelled, err: err, external: true}
 }
 
 // normalize produces a deterministic outcome after all concurrent causes have
@@ -49,7 +49,13 @@ func normalize(causes []diagnostic, external error) Result {
 	sortDiagnostics(valid)
 
 	if external != nil {
-		return resultFrom(externalCancelled(external), valid)
+		causes := valid[:0]
+		for _, cause := range valid {
+			if !cause.external {
+				causes = append(causes, cause)
+			}
+		}
+		return resultFrom(externalCancelled(external), causes)
 	}
 	if len(valid) == 0 {
 		return resultFrom(failed(Path{}, MechanicalFailure, errors.New("missing terminal cause")), nil)

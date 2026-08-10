@@ -82,10 +82,14 @@ func (r *runState) forceLeaf(ctx context.Context, instance Instance, leaf workfl
 	}
 	if err := execution.ForceStop(); err != nil {
 		completion, channelOpen := <-execution.Done()
-		result := r.completeLeaf(ctx, instance, leaf, completion, channelOpen)
+		result := r.leafCompletion(ctx, instance, leaf, completion, channelOpen)
 		consequence := failed(instance.Path(), MechanicalFailure, fmt.Errorf("force stop leaf: %w", err))
 		consequence.parentCancelled = true
-		return appendSecondaryConsequence(result, consequence)
+		result = appendSecondaryConsequence(result, consequence)
+		if result.Status() == Succeeded {
+			return result
+		}
+		return r.settle(ctx, instance, result)
 	}
 	return r.settle(ctx, instance, resultFrom(parentCancelled(instance.Path()), nil))
 }
@@ -100,36 +104,44 @@ func availableCompletion(done <-chan LeafCompletion) (LeafCompletion, bool, bool
 }
 
 func (r *runState) completeLeaf(ctx context.Context, instance Instance, leaf workflow.Leaf, completion LeafCompletion, channelOpen bool) Result {
+	result := r.leafCompletion(ctx, instance, leaf, completion, channelOpen)
+	if result.Status() == Succeeded {
+		return result
+	}
+	return r.settle(ctx, instance, result)
+}
+
+func (r *runState) leafCompletion(ctx context.Context, instance Instance, leaf workflow.Leaf, completion LeafCompletion, channelOpen bool) Result {
 	path := instance.Path()
 	if !channelOpen || !completion.Valid() {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("leaf runner returned a malformed completion")), nil))
+		return resultFrom(failed(path, MechanicalFailure, errors.New("leaf runner returned a malformed completion")), nil)
 	}
 	switch completion.Status() {
 	case Succeeded:
 		output, _ := completion.Output()
 		if !leaf.Outputs().Valid() {
-			return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("leaf completion lost its output contract")), nil))
+			return resultFrom(failed(path, MechanicalFailure, errors.New("leaf completion lost its output contract")), nil)
 		}
 		if err := leaf.Outputs().Validate(output); err != nil {
-			return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, err), nil))
+			return resultFrom(failed(path, ContractFailure, err), nil)
 		}
 		if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-			return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
+			return resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil)
 		}
 		result, err := NewSucceededResult(output)
 		if err != nil {
-			return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
+			return resultFrom(failed(path, MechanicalFailure, err), nil)
 		}
 		return result
 	case Failed:
-		return r.settle(ctx, instance, resultFrom(failed(path, completion.FailureKind(), completion.Error()), nil))
+		return resultFrom(failed(path, completion.FailureKind(), completion.Error()), nil)
 	case Cancelled:
 		if ctx.Err() != nil {
-			return r.settle(ctx, instance, resultFrom(parentCancelled(path), nil))
+			return resultFrom(parentCancelled(path), nil)
 		}
-		return r.settle(ctx, instance, resultFrom(diagnostic{path: path, status: Cancelled, err: completion.Error()}, nil))
+		return resultFrom(diagnostic{path: path, status: Cancelled, err: completion.Error()}, nil)
 	default:
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("leaf runner returned an unsupported completion")), nil))
+		return resultFrom(failed(path, MechanicalFailure, errors.New("leaf runner returned an unsupported completion")), nil)
 	}
 }
 
