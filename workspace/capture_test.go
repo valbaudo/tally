@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -411,6 +412,154 @@ func TestCapturePublishesWorkspaceOnlyWhenDeclaredAndRequested(t *testing.T) {
 			t.Fatalf("published workspace entries = %#v", entries)
 		}
 	})
+}
+
+func TestCaptureTreeOutputUsesPinnedRootAcrossPathSwapAndRestore(t *testing.T) {
+	base := context.Background()
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := mustContract(t, mustField(t, "result", value.Tree()))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+	environment, err := workspace.Prepare(base, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	target, err := environment.Output(value.Path{}.Field("result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target.Location(), "original.txt"), []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Dir(environment.Workspace())
+	decoy := filepath.Join(runtimeRoot, "tree-decoy")
+	saved := filepath.Join(runtimeRoot, "tree-saved")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "decoy.txt"), []byte("decoy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := newSwapRestoreContext(base, target.Location(), saved, decoy)
+
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		result, err := outputs.Value(ctx, value.Path{}.Field("result"))
+		if err != nil {
+			return value.Value{}, err
+		}
+		return mustObject(t, mustEntry(t, "result", result)), nil
+	})
+	if actionErr := ctx.ActionError(); actionErr != nil {
+		t.Fatalf("swap/restore fixture: %v", actionErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, _ := objectMember(t, candidate, "result").Tree()
+	assertSingleTreeEntry(t, repository, tree, "original.txt")
+}
+
+func TestCaptureWorkspaceUsesPinnedRootAcrossPathSwapAndRestore(t *testing.T) {
+	base := context.Background()
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := mustContract(t, mustField(t, "continued", value.Tree()))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, []string{"continued"})
+	environment, err := workspace.Prepare(base, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	if err := os.WriteFile(filepath.Join(environment.Workspace(), "original.txt"), []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Dir(environment.Workspace())
+	decoy := filepath.Join(runtimeRoot, "workspace-decoy")
+	saved := filepath.Join(runtimeRoot, "workspace-saved")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "decoy.txt"), []byte("decoy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := newSwapRestoreContext(base, environment.Workspace(), saved, decoy)
+
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		continued, err := outputs.Workspace(ctx)
+		if err != nil {
+			return value.Value{}, err
+		}
+		return mustObject(t, mustEntry(t, "continued", continued)), nil
+	})
+	if actionErr := ctx.ActionError(); actionErr != nil {
+		t.Fatalf("swap/restore fixture: %v", actionErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, _ := objectMember(t, candidate, "continued").Tree()
+	assertSingleTreeEntry(t, repository, tree, "original.txt")
+}
+
+type swapRestoreContext struct {
+	context.Context
+	mu        sync.Mutex
+	calls     int
+	path      string
+	saved     string
+	decoy     string
+	actionErr error
+}
+
+func newSwapRestoreContext(base context.Context, path, saved, decoy string) *swapRestoreContext {
+	return &swapRestoreContext{Context: base, path: path, saved: saved, decoy: decoy}
+}
+
+func (c *swapRestoreContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	switch c.calls {
+	case 3:
+		if err := os.Rename(c.path, c.saved); err != nil {
+			c.actionErr = errors.Join(c.actionErr, err)
+			break
+		}
+		if err := os.Rename(c.decoy, c.path); err != nil {
+			c.actionErr = errors.Join(c.actionErr, err, os.Rename(c.saved, c.path))
+		}
+	case 4:
+		if err := os.Rename(c.path, c.decoy); err != nil {
+			c.actionErr = errors.Join(c.actionErr, err)
+			break
+		}
+		if err := os.Rename(c.saved, c.path); err != nil {
+			c.actionErr = errors.Join(c.actionErr, err, os.Rename(c.decoy, c.path))
+		}
+	}
+	return c.Context.Err()
+}
+
+func (c *swapRestoreContext) ActionError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.actionErr
+}
+
+func assertSingleTreeEntry(t *testing.T, repository *content.Repository, tree content.Tree, name string) {
+	t.Helper()
+	entries, err := repository.Entries(context.Background(), tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || len(entries[0].Segments()) != 1 || entries[0].Segments()[0] != name {
+		t.Fatalf("captured tree entries = %#v, want one %q", entries, name)
+	}
 }
 
 func objectMember(t *testing.T, object value.Value, name string) value.Value {

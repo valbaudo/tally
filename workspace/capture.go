@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/valbaudo/dawn/content"
 	"github.com/valbaudo/dawn/value"
 )
 
@@ -221,7 +222,7 @@ func (s *captureState) captureWorkspace(ctx context.Context) (result value.Value
 	if err != nil {
 		return value.Value{}, fmt.Errorf("workspace: open private workspace: %w", err)
 	}
-	tree, captureErr := repository.CaptureTree(ctx, location)
+	tree, captureErr := repository.CaptureTreeRoot(ctx, root)
 	if captureErr == nil {
 		captureErr = verifyDirectoryLocation(root, location, identity)
 	}
@@ -258,45 +259,42 @@ func (s *captureState) captureTarget(ctx context.Context, target Target) (result
 	}
 	switch target.kind {
 	case value.FileKind:
-		file, err := root.Open(filepath.Base(target.location))
+		first, err := s.ingestOutputFile(ctx, root, target, entryInfo)
 		if err != nil {
-			return value.Value{}, fmt.Errorf("open output file: %w", err)
-		}
-		openedInfo, statErr := file.Stat()
-		if statErr != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(entryInfo, openedInfo) {
-			closeErr := file.Close()
-			if statErr != nil {
-				return value.Value{}, errors.Join(fmt.Errorf("inspect opened output file: %w", statErr), closeErr)
-			}
-			return value.Value{}, errors.Join(fmt.Errorf("output file identity changed while opening"), closeErr)
-		}
-		semantic, ingestErr := s.env.repository.IngestFile(ctx, filepath.Base(target.location), "", file)
-		afterInfo, afterErr := file.Stat()
-		closeErr := file.Close()
-		if ingestErr != nil || afterErr != nil || closeErr != nil {
-			if afterErr != nil {
-				afterErr = fmt.Errorf("inspect captured output file: %w", afterErr)
-			}
-			return value.Value{}, errors.Join(ingestErr, afterErr, closeErr)
-		}
-		if !afterInfo.Mode().IsRegular() || !os.SameFile(entryInfo, afterInfo) || entryInfo.Size() != afterInfo.Size() || afterInfo.Size() != semantic.Size() {
-			return value.Value{}, fmt.Errorf("output file changed while being captured")
-		}
-		postInfo, err := inspectTargetSlot(root, target, false)
-		if err != nil || !os.SameFile(entryInfo, postInfo) {
-			if err != nil {
-				return value.Value{}, err
-			}
-			return value.Value{}, fmt.Errorf("output file identity changed while being captured")
-		}
-		if err := verifyDirectoryLocation(root, slotLocation, target.slotIdentity); err != nil {
 			return value.Value{}, err
 		}
-		return value.NewFileValue(semantic), nil
+		second, err := s.ingestOutputFile(ctx, root, target, entryInfo)
+		if err != nil {
+			return value.Value{}, err
+		}
+		if !first.Equal(second) {
+			return value.Value{}, fmt.Errorf("output file was not stable across verified captures")
+		}
+		return value.NewFileValue(second), nil
 	case value.TreeKind:
-		tree, err := s.env.repository.CaptureTree(ctx, target.location)
+		targetRoot, err := root.OpenRoot(filepath.Base(target.location))
 		if err != nil {
-			return value.Value{}, err
+			return value.Value{}, fmt.Errorf("open output tree capability: %w", err)
+		}
+		openedInfo, inspectErr := targetRoot.Lstat(".")
+		if inspectErr != nil || !openedInfo.IsDir() || !os.SameFile(entryInfo, openedInfo) {
+			closeErr := targetRoot.Close()
+			if inspectErr != nil {
+				return value.Value{}, errors.Join(fmt.Errorf("inspect output tree capability: %w", inspectErr), closeErr)
+			}
+			return value.Value{}, errors.Join(fmt.Errorf("output tree identity changed while opening"), closeErr)
+		}
+		tree, captureErr := s.env.repository.CaptureTreeRoot(ctx, targetRoot)
+		afterInfo, afterErr := targetRoot.Lstat(".")
+		closeErr := targetRoot.Close()
+		if captureErr != nil || afterErr != nil || closeErr != nil {
+			if afterErr != nil {
+				afterErr = fmt.Errorf("inspect captured output tree capability: %w", afterErr)
+			}
+			return value.Value{}, errors.Join(captureErr, afterErr, closeErr)
+		}
+		if !afterInfo.IsDir() || !os.SameFile(entryInfo, afterInfo) {
+			return value.Value{}, fmt.Errorf("output tree identity changed while being captured")
 		}
 		postInfo, err := inspectTargetSlot(root, target, false)
 		if err != nil || !os.SameFile(entryInfo, postInfo) {
@@ -312,6 +310,44 @@ func (s *captureState) captureTarget(ctx context.Context, target Target) (result
 	default:
 		return value.Value{}, fmt.Errorf("output target has unsupported kind %v", target.kind)
 	}
+}
+
+func (s *captureState) ingestOutputFile(ctx context.Context, root *os.Root, target Target, expected fs.FileInfo) (content.File, error) {
+	file, err := root.Open(filepath.Base(target.location))
+	if err != nil {
+		return content.File{}, fmt.Errorf("open output file: %w", err)
+	}
+	openedInfo, statErr := file.Stat()
+	if statErr != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(expected, openedInfo) {
+		closeErr := file.Close()
+		if statErr != nil {
+			return content.File{}, errors.Join(fmt.Errorf("inspect opened output file: %w", statErr), closeErr)
+		}
+		return content.File{}, errors.Join(fmt.Errorf("output file identity changed while opening"), closeErr)
+	}
+	semantic, ingestErr := s.env.repository.IngestFile(ctx, filepath.Base(target.location), "", file)
+	afterInfo, afterErr := file.Stat()
+	closeErr := file.Close()
+	if ingestErr != nil || afterErr != nil || closeErr != nil {
+		if afterErr != nil {
+			afterErr = fmt.Errorf("inspect captured output file: %w", afterErr)
+		}
+		return content.File{}, errors.Join(ingestErr, afterErr, closeErr)
+	}
+	if !afterInfo.Mode().IsRegular() || !os.SameFile(expected, afterInfo) || expected.Size() != afterInfo.Size() || afterInfo.Size() != semantic.Size() {
+		return content.File{}, fmt.Errorf("output file changed while being captured")
+	}
+	postInfo, err := inspectTargetSlot(root, target, false)
+	if err != nil || !os.SameFile(expected, postInfo) {
+		if err != nil {
+			return content.File{}, err
+		}
+		return content.File{}, fmt.Errorf("output file identity changed while being captured")
+	}
+	if err := verifyDirectoryLocation(root, filepath.Dir(target.location), target.slotIdentity); err != nil {
+		return content.File{}, err
+	}
+	return semantic, nil
 }
 
 func openVerifiedDirectory(location string, expected fs.FileInfo) (*os.Root, error) {
@@ -498,6 +534,9 @@ func validateCandidateCaptures(contract value.Contract, candidate value.Value, c
 			}
 			if !task.value.Equal(expected.value) {
 				return fmt.Errorf("workspace: output candidate %s is not its captured immutable value", expected.path.String())
+			}
+			if !task.value.SameRuntimeHandle(expected.value) {
+				return fmt.Errorf("workspace: output candidate %s was not constructed from its current capture", expected.path.String())
 			}
 			if seen[key] {
 				return fmt.Errorf("workspace: captured output %s appears more than once", expected.path.String())

@@ -196,6 +196,45 @@ func (r *Repository) CaptureTree(ctx context.Context, source string) (Tree, erro
 		}
 		return Tree{}, fmt.Errorf("content: tree source changed while being opened")
 	}
+	return r.captureOpenedTree(ctx, root)
+}
+
+// CaptureTreeRoot captures a tree through an already-retained directory
+// capability. It duplicates source and never resolves an author-supplied host
+// pathname. The caller retains ownership of source.
+func (r *Repository) CaptureTreeRoot(ctx context.Context, source *os.Root) (Tree, error) {
+	if r == nil || r.store == nil {
+		return Tree{}, fmt.Errorf("content: file repository is invalid")
+	}
+	if source == nil {
+		return Tree{}, fmt.Errorf("content: tree root capability must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return Tree{}, fmt.Errorf("content: capture tree: %w", err)
+	}
+	sourceInfo, err := source.Lstat(".")
+	if err != nil {
+		return Tree{}, fmt.Errorf("content: inspect tree root capability: %w", err)
+	}
+	if !sourceInfo.IsDir() {
+		return Tree{}, fmt.Errorf("content: tree root capability must be a directory")
+	}
+	duplicate, err := source.OpenRoot(".")
+	if err != nil {
+		return Tree{}, fmt.Errorf("content: duplicate tree root capability: %w", err)
+	}
+	openedInfo, err := duplicate.Lstat(".")
+	if err != nil || !openedInfo.IsDir() || !os.SameFile(sourceInfo, openedInfo) {
+		_ = duplicate.Close()
+		if err != nil {
+			return Tree{}, fmt.Errorf("content: inspect duplicated tree root capability: %w", err)
+		}
+		return Tree{}, fmt.Errorf("content: tree root capability identity changed while duplicating")
+	}
+	return r.captureOpenedTree(ctx, osTreeCaptureRoot{root: duplicate})
+}
+
+func (r *Repository) captureOpenedTree(ctx context.Context, root treeCaptureRoot) (Tree, error) {
 	entries, err := r.captureTreeEntries(ctx, root)
 	if err != nil {
 		return Tree{}, err

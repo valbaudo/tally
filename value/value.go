@@ -241,6 +241,24 @@ func (v Value) Tree() (content.Tree, bool) {
 	return *v.tree, true
 }
 
+// SameRuntimeHandle reports whether two file or tree values are copies of the
+// same in-memory handle construction. Runtime orchestration uses this identity
+// to track provenance; it is deliberately absent from canonical bytes and
+// semantic Equal comparisons.
+func (v Value) SameRuntimeHandle(other Value) bool {
+	if v.kind != other.kind {
+		return false
+	}
+	switch v.kind {
+	case FileKind:
+		return v.file != nil && v.file == other.file
+	case TreeKind:
+		return v.tree != nil && v.tree == other.tree
+	default:
+		return false
+	}
+}
+
 // Equal reports whether two values have identical semantics.
 func (v Value) Equal(other Value) bool {
 	return v.Valid() && other.Valid() && bytes.Equal(v.Canonical(), other.Canonical())

@@ -202,7 +202,162 @@ func TestCandidateRejectsCapturedLeavesMovedOmittedOrForged(t *testing.T) {
 	}
 }
 
-func TestAtomicCaptureRejectsFileChangedAfterInspection(t *testing.T) {
+func TestCandidateRejectsEqualContentCapturesSwappedBetweenPaths(t *testing.T) {
+	ctx := context.Background()
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileType, err := value.File("text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := mustContract(t, mustField(t, "first", fileType), mustField(t, "second", fileType))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+	environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	for _, name := range []string{"first", "second"} {
+		target, err := environment.Output(value.Path{}.Field(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWriteOutput(t, target, "identical bytes")
+	}
+
+	semanticallyEqual := false
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		first, err := outputs.Value(ctx, value.Path{}.Field("first"))
+		if err != nil {
+			return value.Value{}, err
+		}
+		second, err := outputs.Value(ctx, value.Path{}.Field("second"))
+		if err != nil {
+			return value.Value{}, err
+		}
+		semanticallyEqual = first.Equal(second)
+		return mustObject(t, mustEntry(t, "first", second), mustEntry(t, "second", first)), nil
+	})
+	if !semanticallyEqual {
+		t.Fatal("equal-content captures were not semantically equal")
+	}
+	assertZeroCaptureError(t, candidate, err)
+}
+
+func TestCandidateRejectsReconstructedEqualContentHandles(t *testing.T) {
+	t.Run("file", func(t *testing.T) {
+		ctx := context.Background()
+		repository, _ := content.NewRepository(content.NewMemory())
+		fileType, _ := value.File("text/plain")
+		contract := mustContract(t, mustField(t, "report", fileType))
+		leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+		environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = environment.Close() })
+		target, err := environment.Output(value.Path{}.Field("report"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWriteOutput(t, target, "same semantic file")
+
+		semanticallyEqual := false
+		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+			captured, err := outputs.Value(ctx, value.Path{}.Field("report"))
+			if err != nil {
+				return value.Value{}, err
+			}
+			file, _ := captured.File()
+			reconstructed := value.NewFileValue(file)
+			semanticallyEqual = captured.Equal(reconstructed)
+			return mustObject(t, mustEntry(t, "report", reconstructed)), nil
+		})
+		if !semanticallyEqual {
+			t.Fatal("reconstructed file was not semantically equal")
+		}
+		assertZeroCaptureError(t, candidate, err)
+	})
+
+	t.Run("tree", func(t *testing.T) {
+		ctx := context.Background()
+		repository, _ := content.NewRepository(content.NewMemory())
+		contract := mustContract(t, mustField(t, "result", value.Tree()))
+		leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+		environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = environment.Close() })
+		if _, err := environment.Output(value.Path{}.Field("result")); err != nil {
+			t.Fatal(err)
+		}
+
+		semanticallyEqual := false
+		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+			captured, err := outputs.Value(ctx, value.Path{}.Field("result"))
+			if err != nil {
+				return value.Value{}, err
+			}
+			tree, _ := captured.Tree()
+			reconstructed := value.NewTreeValue(tree)
+			semanticallyEqual = captured.Equal(reconstructed)
+			return mustObject(t, mustEntry(t, "result", reconstructed)), nil
+		})
+		if !semanticallyEqual {
+			t.Fatal("reconstructed tree was not semantically equal")
+		}
+		assertZeroCaptureError(t, candidate, err)
+	})
+}
+
+func TestCandidateRejectsEqualHandleFromPriorCaptureSession(t *testing.T) {
+	ctx := context.Background()
+	repository, _ := content.NewRepository(content.NewMemory())
+	fileType, _ := value.File("text/plain")
+	contract := mustContract(t, mustField(t, "report", fileType))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+	environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	path := value.Path{}.Field("report")
+	target, err := environment.Output(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteOutput(t, target, "unchanged between sessions")
+	prior, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		report, err := outputs.Value(ctx, path)
+		if err != nil {
+			return value.Value{}, err
+		}
+		return mustObject(t, mustEntry(t, "report", report)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorReport := objectMember(t, prior, "report")
+
+	semanticallyEqual := false
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		current, err := outputs.Value(ctx, path)
+		if err != nil {
+			return value.Value{}, err
+		}
+		semanticallyEqual = current.Equal(priorReport)
+		return mustObject(t, mustEntry(t, "report", priorReport)), nil
+	})
+	if !semanticallyEqual {
+		t.Fatal("prior-session handle was not semantically equal")
+	}
+	assertZeroCaptureError(t, candidate, err)
+}
+
+func TestAtomicCaptureRejectsSameSizeFileMutationDuringIngest(t *testing.T) {
 	ctx := context.Background()
 	store := &mutatingPutStore{Memory: content.NewMemory()}
 	repository, err := content.NewRepository(store)
@@ -226,7 +381,7 @@ func TestAtomicCaptureRejectsFileChangedAfterInspection(t *testing.T) {
 	}
 	mustWriteOutput(t, target, string(bytes.Repeat([]byte("a"), 600)))
 	store.target = target.Location()
-	store.replacement = append(bytes.Repeat([]byte("a"), 512), bytes.Repeat([]byte("b"), 288)...)
+	store.replacement = append(bytes.Repeat([]byte("c"), 512), bytes.Repeat([]byte("b"), 88)...)
 
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
 		report, err := outputs.Value(ctx, value.Path{}.Field("report"))
