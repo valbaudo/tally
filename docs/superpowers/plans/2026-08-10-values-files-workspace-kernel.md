@@ -263,7 +263,7 @@ Encode, decode, validate, and handle-detection walks use explicit stacks for use
 
 - [ ] **Step 6: Implement recursive contract validation**
 
-`Type.Validate` uses one closed switch. Enum values compare against the scalar's canonical ordinary representation. Integer may validate as number, required data may satisfy optional fields through the containing contract, and `any` recursively rejects every file/tree value. Parse a concrete file media value with `mime.ParseMediaType`; an exact `text/plain` constraint matches `text/plain; charset=utf-8`, while `type/*` matches the parsed base type. No conversion occurs and concrete parameters remain part of the file's semantic metadata.
+`Type.Validate` uses one closed switch. Enum membership compares both the scalar kind and its canonical ordinary representation, so integer `1` is distinct from number `1` even though integer values may still widen to `number`. Required data may satisfy optional fields through the containing contract, and `any` recursively rejects every file/tree value. Parse a concrete file media value with `mime.ParseMediaType`; an exact `text/plain` constraint matches `text/plain; charset=utf-8`, while `type/*` matches the parsed base type. No conversion occurs and concrete parameters remain part of the file's semantic metadata.
 
 `Contract.Validate` requires an object value and distinguishes an absent optional port from a present null port.
 
@@ -328,7 +328,7 @@ Expected: FAIL because repository file operations do not exist.
 
 - [ ] **Step 3: Implement streaming ingestion and media choice**
 
-`IngestFile` validates and canonically formats one concrete media type with `mime.ParseMediaType`/`mime.FormatMediaType` when supplied. Otherwise, buffer at most the first 512 bytes for `http.DetectContentType`, then stream the prefix plus remainder into `Store.Put`. Keep the logical name as opaque semantic text; never join it to a filesystem path.
+One concrete-media canonicalizer, based on `mime.ParseMediaType`/`mime.FormatMediaType`, is shared by `IngestFile`, `NewFile`, and `File.Valid`. It requires a nonempty type/subtype and rejects wildcard concrete values. `IngestFile` uses it for supplied media; otherwise, buffer at most the first 512 bytes for `http.DetectContentType`, then stream the prefix plus remainder into `Store.Put`. Keep the logical name as opaque semantic text; never join it to a filesystem path.
 
 `MaterializeFile` writes to a runtime-owned exact location via a same-directory temporary file, verifies the content digest while copying, closes, and renames. It never uses the logical filename as a destination.
 
@@ -625,14 +625,15 @@ git commit -m "feat(workspace): prepare private invocation roots"
 
 **Interfaces:**
 - Consumes: prepared `Environment`, output contract, `content.Repository`, `value.Path`, and runtime `value.Value` constructors.
-- Produces: `type Outputs` with `Value(context.Context, value.Path) (value.Value, error)` and `Workspace(context.Context) (value.Value, error)`.
+- Produces: `type Outputs` with `File(context.Context, value.Path, string, string) (value.Value, error)`, `Tree(context.Context, value.Path) (value.Value, error)`, and `Workspace(context.Context) (value.Value, error)`.
 - Produces: `func (*Environment) Capture(context.Context, func(Outputs) (value.Value, error)) (value.Value, error)`.
 
 - [ ] **Step 1: Add failing exact-slot capture tests**
 
 Use `Environment.Output(path)` to obtain runtime-owned targets. Assert:
 
-- a file target accepts exactly one regular file at its root and derives logical filename/media/length/content from it;
+- a file target accepts exactly one regular file at its root, derives length/content from its bytes, and uses the required `Outputs.File` logical name and concrete media as inherent semantic facts;
+- the Dawn-owned physical child named `value` never becomes the semantic filename, and exact or parameterized media need not agree with content sniffing;
 - an empty tree target captures a valid empty tree;
 - nested object, list, and map file/tree outputs resolve through structured concrete paths;
 - missing required outputs, extra files in a file slot, wrong kinds, special entries, escaping symlinks, undeclared output-root entries, and media mismatches fail; and
@@ -644,7 +645,7 @@ Build the candidate only inside `Capture`:
 
 ```go
 candidate, err := env.Capture(ctx, func(outputs Outputs) (value.Value, error) {
-	report, err := outputs.Value(ctx, value.RootPath().Field("report"))
+	report, err := outputs.File(ctx, value.RootPath().Field("report"), "report.json", "application/json")
 	if err != nil { return value.Value{}, err }
 	continued, err := outputs.Workspace(ctx)
 	if err != nil { return value.Value{}, err }
@@ -668,7 +669,7 @@ Expected: FAIL because all-or-nothing capture does not exist.
 
 - [ ] **Step 4: Implement lazy capture through one deep boundary**
 
-`Outputs.Value` validates the requested concrete path against the output contract and manifest, captures only its Dawn-owned slot, memoizes the immutable result, and never accepts an arbitrary host path. `Outputs.Workspace` exists only when the compiled leaf declares publication and captures exactly the workspace root.
+`Outputs.File` and `Outputs.Tree` validate the requested concrete path and kind against the output contract and manifest, capture only its Dawn-owned slot, memoize the immutable result, and never accept an arbitrary host path. `Outputs.File` requires a logical filename and canonicalizable concrete media; these are semantic data, not an author path or policy surface. `Outputs.Workspace` exists only when the compiled leaf declares publication and captures exactly the workspace root. Named trees and a published workspace are each captured twice through the same already-pinned root and must have identical tree identity before publication; this is an ordinary stable-snapshot check, not isolation from continuing external mutation.
 
 After the callback returns, `Capture`:
 

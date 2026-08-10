@@ -109,7 +109,7 @@ Type = string
 
 - `integer` and `number` are distinct; integers may widen safely to numbers.
 - `null` is a value. It is distinct from an absent optional field.
-- Enums constrain scalar literals and may widen to their scalar base type.
+- Enums constrain scalar literals by both scalar kind and canonical representation and may widen to their scalar base type. Integer `1` does not become number `1`, although integer-to-number widening remains valid.
 - Lists are homogeneous and ordered.
 - Maps have dynamic string keys and homogeneous values.
 - Objects declare named fields and reject undeclared fields by default.
@@ -166,7 +166,11 @@ At ingestion Dawn chooses media type in this order:
 2. deterministic content sniffing; or
 3. `application/octet-stream` as the honest fallback.
 
+Every stored file media value is one canonical concrete type/subtype. Bare tokens, empty type/subtype values, and wildcards are invalid; equivalent case and parameter spelling is canonicalized before storage.
+
 Filename extensions are hints for humans and tools, not media-type authority. A file contract may restrict accepted media using exact types or patterns such as `application/pdf` and `image/*`.
+
+Filesystem output capture is deliberately different from input sniffing: `Outputs.File` requires the file's logical name and concrete media, while `Outputs.Tree` captures a tree with no file metadata. Those arguments are inherent facts of the result, not author-selected host paths or policy knobs. Consequently, a JSON output can remain exactly `application/json` even when its current bytes would sniff differently, and the Dawn-owned physical child named `value` is never reused as its semantic filename.
 
 Media constraints are validated at ingestion, input binding, adapter preflight, and output capture as applicable. Dawn does not silently rename, convert, render, OCR, extract, or parse a file to make it satisfy a contract.
 
@@ -248,6 +252,8 @@ The runtime derives one collision-free namespace per top-level port. Object fiel
 - A declared file output slot must produce exactly one regular file.
 - A declared tree output slot contains the tree root and may be empty.
 - Composite outputs derive one slot for every nested file/tree leaf.
+
+The invocation-scoped output capability selects one declared semantic path with a kind-specific `File` or `Tree` method; it does not expose a generic capture method or arbitrary source path. File logical name and media are supplied to `File`, while length and digest come from the fixed slot's bytes. Repeated capture of a named tree, or capture of a published workspace, reads through the same pinned root twice and requires identical tree identity before candidate publication. This detects an unstable snapshot; it does not claim isolation from a process that continues mutating the tree.
 
 An agent or script that creates a result at another workspace location copies or moves it into its declared output slot. That visible operation replaces an author-level capture-path language.
 
@@ -405,7 +411,7 @@ The simplest viable defaults are:
 - no workspace publication unless declared;
 - immutable named side inputs;
 - one derived input/output namespace per port;
-- media inferred deterministically when not supplied;
+- run-input media inferred deterministically when not supplied; filesystem file outputs supply concrete semantic media at capture;
 - PDFs and images require visual raw-LLM delivery;
 - no workspace merge;
 - no implicit file conversion; and
@@ -570,6 +576,8 @@ The reviewed Task 1–7 implementation history is:
 - Task 6 reviewed fix: `ca87947ed44504ed68ec06b574ffdc7fcacec908` — `fix(workspace): remove invocation roots safely`
 - Task 7: `dc41ece9a8646af7b5633b7631fdfda71f3e3b0e` — `feat(workspace): capture one complete candidate`
 - Task 7 reviewed fix: `863388e786705675384d5d06988df3fe54c8e53a` — `fix(workspace): bind capture provenance and roots`
+- Final traversal review fix: `475e3c47d22cddea35d9b7f2d9cb12e1d6f23213` — `Make public finite traversals stack safe`
+- Final value/capture review fix: `a1e53243bc9da1586df2bd4e1b404e6cd93ea327` — `Fix value and capture boundary semantics`
 
 The syntax-independent Prestige-shaped tracer's first execution was already green, so Task 8 required no integration fix:
 
