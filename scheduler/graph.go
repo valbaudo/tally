@@ -31,7 +31,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 	}
 	state, err := applyGraphInputs(graph, input)
 	if err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, err), nil))
+		return r.finishGraph(ctx, path, graph, input, instance, state, resultFrom(failed(path, ContractFailure, err), nil))
 	}
 
 	completed := make(chan graphCompletion)
@@ -98,7 +98,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 				if ctx.Err() != nil && !contextObserved {
 					causes = append(causes, parentCancelled(path))
 				}
-				return r.settle(ctx, instance, normalize(causes, r.control.externalError()))
+				return r.finishGraph(ctx, path, graph, input, instance, state, normalize(causes, r.control.externalError()))
 			}
 			allDone := true
 			for _, node := range state.nodes {
@@ -113,18 +113,15 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 					outputErr = graph.Outputs().Validate(output)
 				}
 				if outputErr != nil {
-					return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, outputErr), nil))
-				}
-				if commitErr := r.scheduler.boundary.Commit(ctx, instance, output); commitErr != nil {
-					return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, commitErr), nil))
+					return r.finishGraph(ctx, path, graph, input, instance, state, resultFrom(failed(path, ContractFailure, outputErr), nil))
 				}
 				result, constructErr := NewSucceededResult(output)
 				if constructErr != nil {
-					return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, constructErr), nil))
+					return r.finishGraph(ctx, path, graph, input, instance, state, resultFrom(failed(path, MechanicalFailure, constructErr), nil))
 				}
-				return result
+				return r.finishGraph(ctx, path, graph, input, instance, state, result)
 			}
-			return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("graph scheduler stalled")), nil))
+			return r.finishGraph(ctx, path, graph, input, instance, state, resultFrom(failed(path, MechanicalFailure, errors.New("graph scheduler stalled")), nil))
 		}
 
 		select {
@@ -148,14 +145,15 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 				}
 				continue
 			}
-			if failFast {
-				continue
-			}
 			output, ok := completion.result.Output()
 			if !ok {
 				causes = append(causes, failed(path.AuthoredChild(nodeState.node.Name()), MechanicalFailure, errors.New("successful child omitted output")))
 				failFast = true
 				cancelActive()
+				continue
+			}
+			state.recordCommittedChild(nodeState.node.Name(), output)
+			if failFast {
 				continue
 			}
 			if applyErr := state.applyChildOutput(nodeState.node.Name(), output); applyErr != nil {

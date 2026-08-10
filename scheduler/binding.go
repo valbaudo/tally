@@ -53,18 +53,19 @@ type graphNodeState struct {
 }
 
 type graphState struct {
-	graph   workflow.Graph
-	input   value.Value
-	nodes   []graphNodeState
-	byName  map[string]int
-	outputs map[string]value.Value
+	graph     workflow.Graph
+	input     value.Value
+	nodes     []graphNodeState
+	byName    map[string]int
+	outputs   map[string]value.Value
+	committed map[string]value.Value
 }
 
 // applyGraphInputs resolves boundary bindings and typed literals. Child-source
 // bindings remain pending until that child's boundary has committed.
 func applyGraphInputs(graph workflow.Graph, input value.Value) (*graphState, error) {
 	state := &graphState{
-		graph: graph, input: input, byName: make(map[string]int), outputs: make(map[string]value.Value),
+		graph: graph, input: input, byName: make(map[string]int), outputs: make(map[string]value.Value), committed: make(map[string]value.Value),
 	}
 	for index, node := range graph.Nodes() {
 		state.byName[node.Name()] = index
@@ -151,6 +152,21 @@ func (s *graphState) applyChildOutput(name string, output value.Value) error {
 		}
 	}
 	return nil
+}
+
+func (s *graphState) recordCommittedChild(name string, output value.Value) {
+	if s == nil || !output.Valid() {
+		return
+	}
+	s.committed[name] = output
+}
+
+func (s *graphState) committedChild(name string) (value.Value, bool) {
+	if s == nil {
+		return value.Value{}, false
+	}
+	output, present := s.committed[name]
+	return output, present && output.Valid()
 }
 
 func nodeInputContract(node workflow.Node) (value.Contract, bool) {

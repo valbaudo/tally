@@ -54,6 +54,7 @@ func (e *Execution) finish(result Result) {
 
 type runController struct {
 	cancelContext context.CancelFunc
+	cancelled     chan struct{}
 	force         chan struct{}
 	finished      chan struct{}
 
@@ -67,6 +68,7 @@ type runController struct {
 func newRunController(cancel context.CancelFunc) *runController {
 	return &runController{
 		cancelContext: cancel,
+		cancelled:     make(chan struct{}),
 		force:         make(chan struct{}),
 		finished:      make(chan struct{}),
 	}
@@ -84,6 +86,7 @@ func (c *runController) cancel(err error) {
 		c.external = err
 		c.mu.Unlock()
 		c.cancelContext()
+		close(c.cancelled)
 	})
 }
 
@@ -103,4 +106,49 @@ func (c *runController) externalError() error {
 
 func (c *runController) finish() {
 	c.finishOnce.Do(func() { close(c.finished) })
+}
+
+// cleanupContext preserves execution values without inheriting a body
+// cancellation that was already recorded when unwinding began. A cancellation
+// first recorded after this snapshot still interrupts cleanup, and force-stop
+// always interrupts it.
+func (c *runController) cleanupContext(body context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(body))
+	c.mu.Lock()
+	previouslyCancelled := c.external != nil
+	c.mu.Unlock()
+
+	if channelClosed(c.force) || (!previouslyCancelled && channelClosed(c.cancelled)) {
+		cancel()
+		return ctx, cancel
+	}
+	if previouslyCancelled {
+		go func() {
+			select {
+			case <-c.force:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-c.cancelled:
+			cancel()
+		case <-c.force:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func channelClosed(channel <-chan struct{}) bool {
+	select {
+	case <-channel:
+		return true
+	default:
+		return false
+	}
 }
