@@ -17,6 +17,39 @@ func TestMemoryStore(t *testing.T) {
 	})
 }
 
+func TestMemoryPutChecksCancellationBeforePublication(t *testing.T) {
+	store := NewMemory()
+	content := []byte("canceled after streaming")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			store.mu.Unlock()
+		}
+	}()
+	streamed := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := store.Put(ctx, &signalEOFReader{reader: bytes.NewReader(content), streamed: streamed})
+		result <- err
+	}()
+	<-streamed
+	cancel()
+	store.mu.Unlock()
+	locked = false
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Put cancellation error = %v, want context.Canceled", err)
+	}
+	digest := Digest(sha256.Sum256(content))
+	if _, err := store.Copy(context.Background(), digest, io.Discard); err == nil {
+		t.Fatal("canceled Put published content after streaming")
+	}
+}
+
 func TestFSStore(t *testing.T) {
 	storeContract(t, func(t *testing.T) Store {
 		t.Helper()
@@ -171,6 +204,19 @@ type cancelAfterRead struct {
 	data   []byte
 	cancel context.CancelFunc
 	read   bool
+}
+
+type signalEOFReader struct {
+	reader   io.Reader
+	streamed chan<- struct{}
+}
+
+func (r *signalEOFReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err == io.EOF {
+		close(r.streamed)
+	}
+	return n, err
 }
 
 func (r *cancelAfterRead) Read(p []byte) (int, error) {

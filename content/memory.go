@@ -33,6 +33,10 @@ func (m *Memory) Put(ctx context.Context, source io.Reader) (Object, error) {
 	stored := append([]byte(nil), data.Bytes()...)
 
 	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return Object{}, fmt.Errorf("content: put: %w", err)
+	}
 	if m.contents == nil {
 		m.contents = make(map[Digest][]byte)
 	}

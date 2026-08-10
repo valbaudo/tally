@@ -64,6 +64,9 @@ func (s *FS) Put(ctx context.Context, source io.Reader) (object Object, err erro
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return Object{}, fmt.Errorf("content: inspect existing object: %w", statErr)
 	}
+	if err := ctx.Err(); err != nil {
+		return Object{}, fmt.Errorf("content: put: %w", err)
+	}
 	if err := os.Rename(temporaryName, finalName); err != nil {
 		return Object{}, fmt.Errorf("content: publish content: %w", err)
 	}
