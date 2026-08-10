@@ -10,30 +10,9 @@ import (
 
 const definitionFormat = "dawn.workflow/2"
 
-// These records are the private, captured definition format. They deliberately
-// mirror only semantic compiled data; diagnostics and authoring provenance do
-// not affect executable workflow identity.
-type definitionWire struct {
-	Format string    `json:"format"`
-	Root   graphWire `json:"root"`
-}
-
 // stringWire holds the original Go string bytes. Encoding JSON strings from
 // Go strings would replace invalid UTF-8 and collapse distinct definitions.
 type stringWire []byte
-
-type graphWire struct {
-	Inputs  contractWire `json:"inputs"`
-	Outputs contractWire `json:"outputs"`
-	Nodes   []nodeWire   `json:"nodes"`
-	Edges   []edgeWire   `json:"edges"`
-	Cleanup *finallyWire `json:"cleanup"`
-}
-
-type finallyWire struct {
-	Graph    graphWire            `json:"graph"`
-	Bindings []cleanupBindingWire `json:"bindings"`
-}
 
 type cleanupBindingWire struct {
 	Kind              CleanupSourceKind `json:"kind"`
@@ -72,13 +51,6 @@ type typeFieldWire struct {
 	Optional bool       `json:"optional"`
 }
 
-type nodeWire struct {
-	Name     stringWire    `json:"name"`
-	Leaf     *leafWire     `json:"leaf"`
-	Scope    *scopeWire    `json:"scope"`
-	Literals []literalWire `json:"literals"`
-}
-
 type leafWire struct {
 	Kind             stringWire       `json:"kind"`
 	Inputs           contractWire     `json:"inputs"`
@@ -91,42 +63,6 @@ type leafWire struct {
 type attachmentWire struct {
 	Input    []stringWire `json:"input"`
 	Fidelity Fidelity     `json:"fidelity"`
-}
-
-type scopeWire struct {
-	Kind   stringWire  `json:"kind"`
-	Graph  *graphWire  `json:"graph"`
-	Branch *branchWire `json:"branch"`
-	Map    *mapWire    `json:"map"`
-	Loop   *loopWire   `json:"loop"`
-}
-
-type branchWire struct {
-	Inputs   contractWire `json:"inputs"`
-	Outputs  contractWire `json:"outputs"`
-	Selector stringWire   `json:"selector"`
-	Cases    []caseWire   `json:"cases"`
-}
-
-type caseWire struct {
-	Name  stringWire `json:"name"`
-	Graph graphWire  `json:"graph"`
-}
-
-type mapWire struct {
-	Inputs     contractWire `json:"inputs"`
-	Outputs    contractWire `json:"outputs"`
-	Collection stringWire   `json:"collection"`
-	Result     stringWire   `json:"result"`
-	Body       graphWire    `json:"body"`
-}
-
-type loopWire struct {
-	Inputs      contractWire `json:"inputs"`
-	Outputs     contractWire `json:"outputs"`
-	Maximum     int          `json:"maximum"`
-	Termination []stringWire `json:"termination"`
-	Body        graphWire    `json:"body"`
 }
 
 type endpointWire struct {
@@ -152,36 +88,266 @@ type literalWire struct {
 }
 
 func encodeDefinition(def Definition) ([]byte, error) {
-	return json.Marshal(definitionWire{Format: definitionFormat, Root: encodeGraph(def.root)})
+	var encoded bytes.Buffer
+	encoded.WriteString(`{"format":"` + definitionFormat + `","root":`)
+	actions := []canonicalAction{
+		{kind: canonicalWriteText, text: `}`},
+		{kind: canonicalWriteGraph, graph: &def.root},
+	}
+	for len(actions) != 0 {
+		action := actions[len(actions)-1]
+		actions = actions[:len(actions)-1]
+		if err := action.write(&encoded, &actions); err != nil {
+			return nil, err
+		}
+	}
+	return encoded.Bytes(), nil
 }
 
-func encodeGraph(graph Graph) graphWire {
-	wire := graphWire{
-		Inputs:  encodeContract(graph.inputs),
-		Outputs: encodeContract(graph.outputs),
-		Nodes:   make([]nodeWire, len(graph.nodes)),
-		Edges:   make([]edgeWire, len(graph.edges)),
-	}
-	for index, node := range graph.nodes {
-		wire.Nodes[index] = encodeNode(node)
-	}
-	for index, edge := range graph.edges {
-		wire.Edges[index] = encodeEdge(edge)
-	}
-	if graph.cleanup != nil {
-		cleanup := finallyWire{
-			Graph:    encodeGraph(graph.cleanup.graph),
-			Bindings: make([]cleanupBindingWire, len(graph.cleanup.bindings)),
+type canonicalActionKind uint8
+
+const (
+	canonicalWriteText canonicalActionKind = iota
+	canonicalWriteGraph
+	canonicalWriteGraphNodes
+	canonicalWriteNode
+	canonicalWriteScope
+	canonicalWriteBranch
+	canonicalWriteBranchCases
+	canonicalWriteCase
+	canonicalWriteMap
+	canonicalWriteLoop
+	canonicalWriteFinally
+)
+
+type canonicalAction struct {
+	kind    canonicalActionKind
+	text    string
+	index   int
+	graph   *Graph
+	node    *Node
+	scope   *Scope
+	branch  *Branch
+	case_   *Case
+	mapped  *Map
+	loop    *Loop
+	cleanup *Finally
+}
+
+func (action canonicalAction) write(encoded *bytes.Buffer, actions *[]canonicalAction) error {
+	switch action.kind {
+	case canonicalWriteText:
+		encoded.WriteString(action.text)
+	case canonicalWriteGraph:
+		encoded.WriteString(`{"inputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.graph.inputs)); err != nil {
+			return err
 		}
-		for index, binding := range graph.cleanup.bindings {
-			cleanup.Bindings[index] = cleanupBindingWire{
+		encoded.WriteString(`,"outputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.graph.outputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"nodes":[`)
+		*actions = append(*actions, canonicalAction{kind: canonicalWriteGraphNodes, graph: action.graph})
+	case canonicalWriteGraphNodes:
+		if action.index < len(action.graph.nodes) {
+			if action.index != 0 {
+				encoded.WriteByte(',')
+			}
+			*actions = append(*actions,
+				canonicalAction{kind: canonicalWriteGraphNodes, graph: action.graph, index: action.index + 1},
+				canonicalAction{kind: canonicalWriteNode, node: &action.graph.nodes[action.index]},
+			)
+			return nil
+		}
+		encoded.WriteString(`],"edges":`)
+		edges := make([]edgeWire, len(action.graph.edges))
+		for index, edge := range action.graph.edges {
+			edges[index] = encodeEdge(edge)
+		}
+		if err := writeCanonicalJSON(encoded, edges); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"cleanup":`)
+		if action.graph.cleanup == nil {
+			encoded.WriteString(`null}`)
+			return nil
+		}
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteText, text: `}`},
+			canonicalAction{kind: canonicalWriteFinally, cleanup: action.graph.cleanup},
+		)
+	case canonicalWriteNode:
+		encoded.WriteString(`{"name":`)
+		if err := writeCanonicalJSON(encoded, encodeString(action.node.name)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"leaf":`)
+		if action.node.leaf == nil {
+			encoded.WriteString(`null`)
+		} else if err := writeCanonicalJSON(encoded, encodeLeaf(*action.node.leaf)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"scope":`)
+		literals := make([]literalWire, len(action.node.literals))
+		for index, literal := range action.node.literals {
+			literals[index] = literalWire{Input: encodeString(literal.input), Value: json.RawMessage(literal.value.Bytes())}
+		}
+		literalJSON, err := json.Marshal(literals)
+		if err != nil {
+			return err
+		}
+		tail := `,"literals":` + string(literalJSON) + `}`
+		if action.node.scope == nil {
+			encoded.WriteString(`null` + tail)
+			return nil
+		}
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteText, text: tail},
+			canonicalAction{kind: canonicalWriteScope, scope: action.node.scope},
+		)
+	case canonicalWriteScope:
+		encoded.WriteString(`{"kind":`)
+		if err := writeCanonicalJSON(encoded, encodeString(string(action.scope.kind))); err != nil {
+			return err
+		}
+		switch action.scope.kind {
+		case GraphScope:
+			encoded.WriteString(`,"graph":`)
+			*actions = append(*actions,
+				canonicalAction{kind: canonicalWriteText, text: `,"branch":null,"map":null,"loop":null}`},
+				canonicalAction{kind: canonicalWriteGraph, graph: action.scope.graph},
+			)
+		case BranchScope:
+			encoded.WriteString(`,"graph":null,"branch":`)
+			*actions = append(*actions,
+				canonicalAction{kind: canonicalWriteText, text: `,"map":null,"loop":null}`},
+				canonicalAction{kind: canonicalWriteBranch, branch: action.scope.branch},
+			)
+		case MapScope:
+			encoded.WriteString(`,"graph":null,"branch":null,"map":`)
+			*actions = append(*actions,
+				canonicalAction{kind: canonicalWriteText, text: `,"loop":null}`},
+				canonicalAction{kind: canonicalWriteMap, mapped: action.scope.map_},
+			)
+		case LoopScope:
+			encoded.WriteString(`,"graph":null,"branch":null,"map":null,"loop":`)
+			*actions = append(*actions,
+				canonicalAction{kind: canonicalWriteText, text: `}`},
+				canonicalAction{kind: canonicalWriteLoop, loop: action.scope.loop},
+			)
+		default:
+			encoded.WriteString(`,"graph":null,"branch":null,"map":null,"loop":null}`)
+		}
+	case canonicalWriteBranch:
+		encoded.WriteString(`{"inputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.branch.inputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"outputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.branch.outputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"selector":`)
+		if err := writeCanonicalJSON(encoded, encodeString(action.branch.selector)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"cases":[`)
+		*actions = append(*actions, canonicalAction{kind: canonicalWriteBranchCases, branch: action.branch})
+	case canonicalWriteBranchCases:
+		if action.index == len(action.branch.cases) {
+			encoded.WriteString(`]}`)
+			return nil
+		}
+		if action.index != 0 {
+			encoded.WriteByte(',')
+		}
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteBranchCases, branch: action.branch, index: action.index + 1},
+			canonicalAction{kind: canonicalWriteCase, case_: &action.branch.cases[action.index]},
+		)
+	case canonicalWriteCase:
+		encoded.WriteString(`{"name":`)
+		if err := writeCanonicalJSON(encoded, encodeString(action.case_.name)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"graph":`)
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteText, text: `}`},
+			canonicalAction{kind: canonicalWriteGraph, graph: &action.case_.graph},
+		)
+	case canonicalWriteMap:
+		encoded.WriteString(`{"inputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.mapped.inputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"outputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.mapped.outputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"collection":`)
+		if err := writeCanonicalJSON(encoded, encodeString(action.mapped.collection)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"result":`)
+		if err := writeCanonicalJSON(encoded, encodeString(action.mapped.result)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"body":`)
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteText, text: `}`},
+			canonicalAction{kind: canonicalWriteGraph, graph: &action.mapped.body},
+		)
+	case canonicalWriteLoop:
+		encoded.WriteString(`{"inputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.loop.inputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"outputs":`)
+		if err := writeCanonicalJSON(encoded, encodeContract(action.loop.outputs)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"maximum":`)
+		if err := writeCanonicalJSON(encoded, action.loop.maximum); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"termination":`)
+		if err := writeCanonicalJSON(encoded, encodeStrings(action.loop.termination)); err != nil {
+			return err
+		}
+		encoded.WriteString(`,"body":`)
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteText, text: `}`},
+			canonicalAction{kind: canonicalWriteGraph, graph: &action.loop.body},
+		)
+	case canonicalWriteFinally:
+		bindings := make([]cleanupBindingWire, len(action.cleanup.bindings))
+		for index, binding := range action.cleanup.bindings {
+			bindings[index] = cleanupBindingWire{
 				Kind: binding.from.kind, Child: encodeString(binding.from.child), Path: encodeStrings(binding.from.path),
 				To: encodeString(binding.to), RuntimeValidation: binding.runtimeValidation,
 			}
 		}
-		wire.Cleanup = &cleanup
+		bindingJSON, err := json.Marshal(bindings)
+		if err != nil {
+			return err
+		}
+		encoded.WriteString(`{"graph":`)
+		*actions = append(*actions,
+			canonicalAction{kind: canonicalWriteText, text: `,"bindings":` + string(bindingJSON) + `}`},
+			canonicalAction{kind: canonicalWriteGraph, graph: &action.cleanup.graph},
+		)
 	}
-	return wire
+	return nil
+}
+
+func writeCanonicalJSON(encoded *bytes.Buffer, source any) error {
+	data, err := json.Marshal(source)
+	if err != nil {
+		return err
+	}
+	encoded.Write(data)
+	return nil
 }
 
 func encodeContract(contract value.Contract) contractWire {
@@ -231,20 +397,6 @@ func encodeType(typ value.Type) typeWire {
 	return wire
 }
 
-func encodeNode(node Node) nodeWire {
-	wire := nodeWire{Name: encodeString(node.name), Literals: make([]literalWire, len(node.literals))}
-	for index, literal := range node.literals {
-		wire.Literals[index] = literalWire{Input: encodeString(literal.input), Value: json.RawMessage(literal.value.Bytes())}
-	}
-	if node.leaf != nil {
-		wire.Leaf = encodeLeaf(*node.leaf)
-	}
-	if node.scope != nil {
-		wire.Scope = encodeScope(*node.scope)
-	}
-	return wire
-}
-
 func encodeLeaf(leaf Leaf) *leafWire {
 	wire := &leafWire{
 		Kind: encodeString(string(leaf.kind)), Inputs: encodeContract(leaf.inputs), Outputs: encodeContract(leaf.outputs),
@@ -257,50 +409,6 @@ func encodeLeaf(leaf Leaf) *leafWire {
 		}
 	}
 	return wire
-}
-
-func encodeScope(scope Scope) *scopeWire {
-	wire := &scopeWire{Kind: encodeString(string(scope.kind))}
-	switch scope.kind {
-	case GraphScope:
-		graph := encodeGraph(*scope.graph)
-		wire.Graph = &graph
-	case BranchScope:
-		branch := encodeBranch(*scope.branch)
-		wire.Branch = &branch
-	case MapScope:
-		mapped := encodeMap(*scope.map_)
-		wire.Map = &mapped
-	case LoopScope:
-		loop := encodeLoop(*scope.loop)
-		wire.Loop = &loop
-	}
-	return wire
-}
-
-func encodeBranch(branch Branch) branchWire {
-	wire := branchWire{
-		Inputs: encodeContract(branch.inputs), Outputs: encodeContract(branch.outputs), Selector: encodeString(branch.selector),
-		Cases: make([]caseWire, len(branch.cases)),
-	}
-	for index, branchCase := range branch.cases {
-		wire.Cases[index] = caseWire{Name: encodeString(branchCase.name), Graph: encodeGraph(branchCase.graph)}
-	}
-	return wire
-}
-
-func encodeMap(mapped Map) mapWire {
-	return mapWire{
-		Inputs: encodeContract(mapped.inputs), Outputs: encodeContract(mapped.outputs),
-		Collection: encodeString(mapped.collection), Result: encodeString(mapped.result), Body: encodeGraph(mapped.body),
-	}
-}
-
-func encodeLoop(loop Loop) loopWire {
-	return loopWire{
-		Inputs: encodeContract(loop.inputs), Outputs: encodeContract(loop.outputs), Maximum: loop.maximum,
-		Termination: encodeStrings(loop.termination), Body: encodeGraph(loop.body),
-	}
 }
 
 func encodeEdge(edge Edge) edgeWire {
@@ -330,8 +438,55 @@ func encodeStrings(values []string) []stringWire {
 func normalizeDefinition(definition *Definition) { normalizeGraph(&definition.root) }
 
 func normalizeGraph(graph *Graph) {
+	type graphFrame struct {
+		graph    *Graph
+		expanded bool
+	}
+	stack := []graphFrame{{graph: graph}}
+	for len(stack) != 0 {
+		frame := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if !frame.expanded {
+			stack = append(stack, graphFrame{graph: frame.graph, expanded: true})
+			children := nestedGraphs(frame.graph)
+			for index := len(children) - 1; index >= 0; index-- {
+				stack = append(stack, graphFrame{graph: children[index]})
+			}
+			continue
+		}
+		normalizeGraphLocal(frame.graph)
+	}
+}
+
+func nestedGraphs(graph *Graph) []*Graph {
+	children := make([]*Graph, 0, len(graph.nodes)+1)
 	for index := range graph.nodes {
-		normalizeNode(&graph.nodes[index])
+		node := &graph.nodes[index]
+		if node.scope == nil {
+			continue
+		}
+		switch node.scope.kind {
+		case GraphScope:
+			children = append(children, node.scope.graph)
+		case BranchScope:
+			for caseIndex := range node.scope.branch.cases {
+				children = append(children, &node.scope.branch.cases[caseIndex].graph)
+			}
+		case MapScope:
+			children = append(children, &node.scope.map_.body)
+		case LoopScope:
+			children = append(children, &node.scope.loop.body)
+		}
+	}
+	if graph.cleanup != nil {
+		children = append(children, &graph.cleanup.graph)
+	}
+	return children
+}
+
+func normalizeGraphLocal(graph *Graph) {
+	for index := range graph.nodes {
+		normalizeNodeLocal(&graph.nodes[index])
 	}
 	sort.Slice(graph.nodes, func(i, j int) bool { return graph.nodes[i].name < graph.nodes[j].name })
 	for index := range graph.edges {
@@ -340,7 +495,6 @@ func normalizeGraph(graph *Graph) {
 	sort.Slice(graph.edges, func(i, j int) bool { return compareEdges(graph.edges[i], graph.edges[j]) < 0 })
 	graph.edges = coalesceEdges(graph.edges)
 	if graph.cleanup != nil {
-		normalizeGraph(&graph.cleanup.graph)
 		sort.Slice(graph.cleanup.bindings, func(i, j int) bool {
 			return compareCleanupBindings(graph.cleanup.bindings[i], graph.cleanup.bindings[j]) < 0
 		})
@@ -360,7 +514,7 @@ func compareCleanupBindings(left, right CleanupBinding) int {
 	return compareString(left.to, right.to)
 }
 
-func normalizeNode(node *Node) {
+func normalizeNodeLocal(node *Node) {
 	sort.Slice(node.literals, func(i, j int) bool {
 		if node.literals[i].input != node.literals[j].input {
 			return node.literals[i].input < node.literals[j].input
@@ -370,26 +524,11 @@ func normalizeNode(node *Node) {
 	if node.leaf != nil {
 		normalizeAttachments(&node.leaf.attachments)
 	}
-	if node.scope == nil {
-		return
+	if node.scope != nil && node.scope.kind == BranchScope {
+		sort.Slice(node.scope.branch.cases, func(i, j int) bool {
+			return node.scope.branch.cases[i].name < node.scope.branch.cases[j].name
+		})
 	}
-	switch node.scope.kind {
-	case GraphScope:
-		normalizeGraph(node.scope.graph)
-	case BranchScope:
-		normalizeBranch(node.scope.branch)
-	case MapScope:
-		normalizeGraph(&node.scope.map_.body)
-	case LoopScope:
-		normalizeGraph(&node.scope.loop.body)
-	}
-}
-
-func normalizeBranch(branch *Branch) {
-	for index := range branch.cases {
-		normalizeGraph(&branch.cases[index].graph)
-	}
-	sort.Slice(branch.cases, func(i, j int) bool { return branch.cases[i].name < branch.cases[j].name })
 }
 
 func normalizeEdge(edge *Edge) {

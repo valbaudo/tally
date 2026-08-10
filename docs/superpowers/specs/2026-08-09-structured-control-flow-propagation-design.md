@@ -358,3 +358,29 @@ The design is complete when:
 - cleanup runs during structured unwinding without becoming catch or recovery;
 - Prestige's control patterns lower by composition rather than special-purpose policy knobs; and
 - later identity, adapter, script, subworkflow, and syntax work has explicit boundaries.
+
+## Implementation Evidence — 2026-08-11
+
+Task 9 conformance is captured by the implementation range
+`7dfe848b3d60ee688dcdc0694ebdd5f1e64a8db5..HEAD` (ending at
+`test(scheduler): prove structured control conformance`). The Prestige-shaped
+trace, deterministic arbitration/cancellation permutations, deferred edge
+matrices, and 50,000-depth/50,000-item finite-execution subprocesses were
+verified with:
+
+```bash
+go test ./scheduler -run 'TestPrestigeStructuredControlTrace' -count=1
+go test ./scheduler -run 'Test(PrestigeStructuredControlTrace|StructuredControlArbitrationStress|StructuredControlGraphCancellationStress|StructuredControlMapCancellationStress|StructuredControlCleanupCancellationStress|BranchBooleanFalseIsStableAcrossTimingPermutations|MapObservedFailureLeavesLaterSentinelUninstantiated)' -count=10
+go test -race ./scheduler -run 'Test(PrestigeStructuredControlTrace|StructuredControl|BranchBooleanFalse|MapObservedFailure)' -count=1
+go test ./scheduler -run 'TestStructuredControlFiniteExecutionSubprocess' -count=1
+go test ./scheduler -count=1
+go test -race ./scheduler -count=1
+go test ./value ./workflow ./workspace ./scheduler -count=1
+go test -race ./value ./workflow ./workspace ./scheduler -count=1
+go test ./... -count=1
+go vet ./...
+git diff --check
+```
+
+This evidence implements and hardens only the structured-control runtime in
+this specification. It does not claim implementation of GitHub #8–#12.

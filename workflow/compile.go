@@ -146,7 +146,7 @@ func (c *compiler) compileGraph(draft *GraphDraft) (Graph, error) {
 }
 
 func (c *compiler) compileFinally(protected Graph, draft *FinallyDraft) (Finally, error) {
-	cleanup, err := c.compileGraph(&draft.Graph)
+	cleanup, err := c.compileNestedGraph(&draft.Graph)
 	if err != nil {
 		return Finally{}, err
 	}
@@ -210,7 +210,7 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 			baseTree: delivery.baseTree, publishWorkspace: delivery.publishWorkspace, attachments: delivery.attachments,
 		}
 	case draft.Graph != nil:
-		graph, err := c.compileGraph(draft.Graph)
+		graph, err := c.compileNestedGraph(draft.Graph)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q graph: %w", draft.Name, err)
 		}
@@ -234,7 +234,7 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		}
 		node.scope = &Scope{kind: LoopScope, loop: &loop}
 	case draft.Call != nil:
-		graph, err := c.compileModule(draft.Call.Module)
+		graph, err := c.compileNestedModule(draft.Call.Module)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q call: %w", draft.Name, err)
 		}
@@ -247,7 +247,7 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		if len(draft.Parallel.Graph.Nodes) < 2 {
 			return Node{}, fmt.Errorf("node %q parallel requires at least two immediate children", draft.Name)
 		}
-		graph, err := c.compileGraph(&draft.Parallel.Graph)
+		graph, err := c.compileNestedGraph(&draft.Parallel.Graph)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q parallel: %w", draft.Name, err)
 		}
@@ -276,7 +276,7 @@ func (c *compiler) compileBranch(draft *BranchDraft) (Branch, error) {
 	branch := Branch{inputs: inputs, outputs: outputs, selector: draft.Selector}
 	for index := range draft.Cases {
 		draftCase := &draft.Cases[index]
-		graph, err := c.compileGraph(&draftCase.Graph)
+		graph, err := c.compileNestedGraph(&draftCase.Graph)
 		if err != nil {
 			return Branch{}, fmt.Errorf("case %q: %w", draftCase.Name, err)
 		}
@@ -300,7 +300,7 @@ func (c *compiler) compileMap(draft *MapDraft) (Map, error) {
 	if err != nil {
 		return Map{}, fmt.Errorf("outputs: %w", err)
 	}
-	body, err := c.compileGraph(&draft.Body)
+	body, err := c.compileNestedGraph(&draft.Body)
 	if err != nil {
 		return Map{}, fmt.Errorf("body: %w", err)
 	}
@@ -322,7 +322,7 @@ func (c *compiler) compileLoop(draft *LoopDraft) (Loop, error) {
 	if err != nil {
 		return Loop{}, fmt.Errorf("outputs: %w", err)
 	}
-	body, err := c.compileGraph(&draft.Body)
+	body, err := c.compileNestedGraph(&draft.Body)
 	if err != nil {
 		return Loop{}, fmt.Errorf("body: %w", err)
 	}
@@ -330,6 +330,34 @@ func (c *compiler) compileLoop(draft *LoopDraft) (Loop, error) {
 		inputs: inputs, outputs: outputs, maximum: draft.Maximum,
 		termination: append([]string(nil), draft.Termination...), body: body,
 	}, nil
+}
+
+type graphCompileResult struct {
+	graph Graph
+	err   error
+}
+
+// compileNestedGraph keeps finite structured depth off the caller's Go stack.
+// Compilation remains sequential so active-pointer and module diagnostics keep
+// their existing meaning.
+func (c *compiler) compileNestedGraph(draft *GraphDraft) (Graph, error) {
+	done := make(chan graphCompileResult, 1)
+	go func() {
+		graph, err := c.compileGraph(draft)
+		done <- graphCompileResult{graph: graph, err: err}
+	}()
+	result := <-done
+	return result.graph, result.err
+}
+
+func (c *compiler) compileNestedModule(name string) (Graph, error) {
+	done := make(chan graphCompileResult, 1)
+	go func() {
+		graph, err := c.compileModule(name)
+		done <- graphCompileResult{graph: graph, err: err}
+	}()
+	result := <-done
+	return result.graph, result.err
 }
 
 func authoredProvenance(provenance Provenance, active []string) Provenance {

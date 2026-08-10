@@ -64,7 +64,14 @@ func (c Component) IsCleanup() bool { return c.kind == CleanupComponent }
 // Path is an immutable sequence of stable structured execution components.
 // The zero Path is the root path.
 type Path struct {
-	components []Component
+	tail *pathNode
+}
+
+type pathNode struct {
+	parent    *pathNode
+	component Component
+	depth     int
+	valid     bool
 }
 
 // AuthoredChild returns a copied path extended with an authored child name.
@@ -97,46 +104,46 @@ func (p Path) Cleanup() Path { return p.append(Component{kind: CleanupComponent}
 
 // Components returns a defensive copy of p's structured components.
 func (p Path) Components() []Component {
-	components := make([]Component, len(p.components))
-	for i, component := range p.components {
-		components[i] = copyComponent(component)
+	if p.tail == nil {
+		return nil
+	}
+	components := make([]Component, p.tail.depth)
+	for node, index := p.tail, p.tail.depth-1; node != nil; node, index = node.parent, index-1 {
+		components[index] = copyComponent(node.component)
 	}
 	return components
 }
 
 func (p Path) append(component Component) Path {
-	components := make([]Component, len(p.components)+1)
-	for i, existing := range p.components {
-		components[i] = copyComponent(existing)
+	parent := p.tail
+	depth := 1
+	valid := validComponent(component)
+	if parent != nil {
+		depth = parent.depth + 1
+		valid = parent.valid && valid
 	}
-	components[len(p.components)] = copyComponent(component)
-	return Path{components: components}
+	return Path{tail: &pathNode{parent: parent, component: copyComponent(component), depth: depth, valid: valid}}
 }
 
 func (p Path) valid() bool {
-	for _, component := range p.components {
-		switch component.kind {
-		case AuthoredChildComponent, BranchCaseComponent:
-			if component.item != nil || component.occurrence != 0 || component.iteration != 0 {
-				return false
-			}
-		case MapItemComponent:
-			if component.name != "" || component.iteration != 0 {
-				return false
-			}
-		case LoopIterationComponent:
-			if component.name != "" || component.item != nil || component.occurrence != 0 || component.iteration == 0 {
-				return false
-			}
-		case CleanupComponent:
-			if component.name != "" || component.item != nil || component.occurrence != 0 || component.iteration != 0 {
-				return false
-			}
-		default:
-			return false
-		}
+	return p.tail == nil || p.tail.valid
+}
+
+func (p Path) empty() bool { return p.tail == nil }
+
+func validComponent(component Component) bool {
+	switch component.kind {
+	case AuthoredChildComponent, BranchCaseComponent:
+		return component.item == nil && component.occurrence == 0 && component.iteration == 0
+	case MapItemComponent:
+		return component.name == "" && component.iteration == 0
+	case LoopIterationComponent:
+		return component.name == "" && component.item == nil && component.occurrence == 0 && component.iteration != 0
+	case CleanupComponent:
+		return component.name == "" && component.item == nil && component.occurrence == 0 && component.iteration == 0
+	default:
+		return false
 	}
-	return true
 }
 
 func copyComponent(component Component) Component {
@@ -147,16 +154,18 @@ func copyComponent(component Component) Component {
 // comparePath compares stable path components lexically. It deliberately does
 // not render or encode paths; representation is deferred to durable identity.
 func comparePath(left, right Path) int {
-	length := min(len(left.components), len(right.components))
+	leftComponents := left.Components()
+	rightComponents := right.Components()
+	length := min(len(leftComponents), len(rightComponents))
 	for i := 0; i < length; i++ {
-		if comparison := compareComponent(left.components[i], right.components[i]); comparison != 0 {
+		if comparison := compareComponent(leftComponents[i], rightComponents[i]); comparison != 0 {
 			return comparison
 		}
 	}
 	switch {
-	case len(left.components) < len(right.components):
+	case len(leftComponents) < len(rightComponents):
 		return -1
-	case len(left.components) > len(right.components):
+	case len(leftComponents) > len(rightComponents):
 		return 1
 	default:
 		return 0

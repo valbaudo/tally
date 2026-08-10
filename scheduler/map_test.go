@@ -413,28 +413,39 @@ type mapTestExecution struct {
 	forceObserved  chan struct{}
 	onQuiescent    func()
 
-	finishOnce sync.Once
-	cancelOnce sync.Once
-	forceOnce  sync.Once
+	finishOnce     sync.Once
+	cancelOnce     sync.Once
+	forceOnce      sync.Once
+	terminalCount  atomic.Int32
+	forceCallCount atomic.Int32
 }
 
 func (e *mapTestExecution) Done() <-chan LeafCompletion { return e.done }
 
 func (e *mapTestExecution) ForceStop() error {
+	e.forceCallCount.Add(1)
 	e.forceOnce.Do(func() {
 		close(e.forceObserved)
-		e.finishOnce.Do(e.onQuiescent)
+		e.finishOnce.Do(func() {
+			e.terminalCount.Add(1)
+			e.onQuiescent()
+		})
 	})
 	return nil
 }
 
 func (e *mapTestExecution) complete(completion LeafCompletion) {
 	e.finishOnce.Do(func() {
+		e.terminalCount.Add(1)
 		e.done <- completion
 		close(e.done)
 		e.onQuiescent()
 	})
 }
+
+func (e *mapTestExecution) terminalizations() int { return int(e.terminalCount.Load()) }
+
+func (e *mapTestExecution) forceCalls() int { return int(e.forceCallCount.Load()) }
 
 type mapFailFastBoundary struct {
 	base                 *pathRecordingBoundary

@@ -83,7 +83,7 @@ func (d Diagnostic) Valid() bool {
 	case Rejected:
 		return !d.external && d.failure == 0 && d.err == nil
 	case Cancelled:
-		return d.failure == 0 && d.err != nil && d.reason == "" && (!d.external || (!d.parentCancelled && !d.cleanup && len(d.path.components) == 0))
+		return d.failure == 0 && d.err != nil && d.reason == "" && (!d.external || (!d.parentCancelled && !d.cleanup && d.path.empty()))
 	default:
 		return false
 	}

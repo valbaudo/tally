@@ -368,7 +368,11 @@ func assertSelectedCaseEnteredFirst(t *testing.T, events []pathBoundaryEvent, ca
 			caseEnter = index
 		}
 		components := event.path.Components()
-		if event.kind == traceEnter && len(components) == 3 && comparePath(Path{components: components[:2]}, casePath) == 0 && firstChild == -1 {
+		prefix := Path{}
+		for _, component := range components[:min(2, len(components))] {
+			prefix = prefix.append(component)
+		}
+		if event.kind == traceEnter && len(components) == 3 && comparePath(prefix, casePath) == 0 && firstChild == -1 {
 			firstChild = index
 		}
 	}

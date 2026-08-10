@@ -26,7 +26,7 @@ func validateGraph(graph Graph, cleanupBoundary, cleanupContext bool) error {
 		if cleanupContext {
 			return fmt.Errorf("finally cannot contain finally")
 		}
-		if err := validateGraph(graph.cleanup.graph, true, true); err != nil {
+		if err := validateNestedGraph(graph.cleanup.graph, true, true); err != nil {
 			return fmt.Errorf("finally: %w", err)
 		}
 	}
@@ -136,7 +136,7 @@ func validateNode(node Node, cleanup bool) error {
 		if node.scope.graph == nil {
 			return fmt.Errorf("graph scope is missing its graph")
 		}
-		return validateGraph(*node.scope.graph, false, cleanup)
+		return validateNestedGraph(*node.scope.graph, false, cleanup)
 	case BranchScope:
 		if node.scope.branch == nil {
 			return fmt.Errorf("branch scope is missing its branch")
@@ -145,7 +145,7 @@ func validateNode(node Node, cleanup bool) error {
 			return err
 		}
 		for _, branchCase := range sortedBranchCases(node.scope.branch.cases) {
-			if err := validateGraph(branchCase.graph, false, cleanup); err != nil {
+			if err := validateNestedGraph(branchCase.graph, false, cleanup); err != nil {
 				return fmt.Errorf("branch case %q: %w", branchCase.name, err)
 			}
 		}
@@ -157,7 +157,7 @@ func validateNode(node Node, cleanup bool) error {
 		if err := validateMap(*node.scope.map_); err != nil {
 			return err
 		}
-		return validateGraph(node.scope.map_.body, false, cleanup)
+		return validateNestedGraph(node.scope.map_.body, false, cleanup)
 	case LoopScope:
 		if cleanup {
 			return fmt.Errorf("cleanup cannot contain loop")
@@ -168,10 +168,18 @@ func validateNode(node Node, cleanup bool) error {
 		if err := validateLoop(*node.scope.loop); err != nil {
 			return err
 		}
-		return validateGraph(node.scope.loop.body, false, false)
+		return validateNestedGraph(node.scope.loop.body, false, false)
 	default:
 		return fmt.Errorf("unknown scope kind %q", node.scope.kind)
 	}
+}
+
+// validateNestedGraph keeps finite structured depth off the caller's Go stack
+// while retaining the existing deterministic depth-first validation order.
+func validateNestedGraph(graph Graph, cleanupBoundary, cleanupContext bool) error {
+	done := make(chan error, 1)
+	go func() { done <- validateGraph(graph, cleanupBoundary, cleanupContext) }()
+	return <-done
 }
 
 func validateBranch(branch Branch) error {
