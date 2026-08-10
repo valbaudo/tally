@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // Execution is one asynchronously running workflow definition.
@@ -118,6 +119,9 @@ func (c *runController) cleanupContext(body context.Context) (context.Context, c
 	view := cancellationView{control: c, after: c.version}
 	parentAlreadyCancelled := body.Err() != nil
 	externalAlreadyCancelled := c.version != 0
+	if !parentAlreadyCancelled {
+		view.parent = &parentCancellationFact{done: body.Done()}
+	}
 	c.mu.Unlock()
 
 	if channelClosed(c.force) || (!externalAlreadyCancelled && channelClosed(c.cancelled)) {
@@ -135,6 +139,7 @@ func (c *runController) cleanupContext(body context.Context) (context.Context, c
 	go func() {
 		select {
 		case <-parentDone:
+			view.observeParentCancellation()
 			cancel()
 		case <-externalDone:
 			cancel()
@@ -152,6 +157,12 @@ func (c *runController) cleanupContext(body context.Context) (context.Context, c
 type cancellationView struct {
 	control *runController
 	after   uint64
+	parent  *parentCancellationFact
+}
+
+type parentCancellationFact struct {
+	done     <-chan struct{}
+	observed atomic.Bool
 }
 
 func (v cancellationView) externalError() error {
@@ -164,6 +175,23 @@ func (v cancellationView) externalError() error {
 		return nil
 	}
 	return v.control.external
+}
+
+func (v cancellationView) observeParentCancellation() {
+	if v.parent == nil || v.externalError() != nil {
+		return
+	}
+	v.parent.observed.Store(true)
+}
+
+func (v cancellationView) parentCancellationObserved() bool {
+	if v.parent == nil {
+		return false
+	}
+	if !v.parent.observed.Load() && channelClosed(v.parent.done) {
+		v.observeParentCancellation()
+	}
+	return v.parent.observed.Load()
 }
 
 func channelClosed(channel <-chan struct{}) bool {

@@ -15,7 +15,7 @@ func (r *runState) finishGraph(ctx context.Context, path Path, graph workflow.Gr
 		cleanupPath := path.Cleanup()
 		cleanupInput, inputErr := assembleCleanupInput(cleanup, protectedInput, state, body.Status())
 		if inputErr != nil {
-			result = applyCleanupPrecedence(body, resultFrom(cleanupFailed(cleanupPath, inputErr), nil), cleanupPath)
+			result = applyCleanupPrecedence(body, resultFrom(cleanupFailed(cleanupPath, inputErr), nil), cleanupPath, false)
 		} else {
 			cleanupContext, cancel, cancellation := r.control.cleanupContext(ctx)
 			cleanupRun := &runState{scheduler: r.scheduler, control: r.control, cancellation: cancellation}
@@ -27,7 +27,11 @@ func (r *runState) finishGraph(ctx context.Context, path Path, graph workflow.Gr
 			if !open || !cleanupResult.Valid() {
 				cleanupResult = resultFrom(cleanupFailed(cleanupPath, errors.New("cleanup graph returned a malformed result")), nil)
 			}
-			result = applyCleanupPrecedence(body, cleanupResult, cleanupPath)
+			parentInterrupted := cancellation.parentCancellationObserved()
+			if cancellation.externalError() != nil {
+				parentInterrupted = false
+			}
+			result = applyCleanupPrecedence(body, cleanupResult, cleanupPath, parentInterrupted)
 		}
 	}
 
@@ -102,7 +106,10 @@ func cleanupOutcome(status Status) (value.Value, error) {
 	}
 }
 
-func applyCleanupPrecedence(body, cleanup Result, cleanupPath Path) Result {
+func applyCleanupPrecedence(body, cleanup Result, cleanupPath Path, parentInterrupted bool) Result {
+	if parentInterrupted {
+		return applyParentCleanupInterruption(body, cleanup, cleanupPath)
+	}
 	if cleanup.Status() == Succeeded {
 		return body
 	}
@@ -129,6 +136,35 @@ func applyCleanupPrecedence(body, cleanup Result, cleanupPath Path) Result {
 	secondary := append(body.Secondary(), failure)
 	sortDiagnostics(secondary)
 	return resultFrom(primary, secondary)
+}
+
+func applyParentCleanupInterruption(body, cleanup Result, cleanupPath Path) Result {
+	interruption := parentCancelled(cleanupPath)
+	cleanupDiagnostics := contextualCleanupDiagnostics(cleanup)
+	if body.Status() == Succeeded {
+		sortDiagnostics(cleanupDiagnostics)
+		return resultFrom(interruption, cleanupDiagnostics)
+	}
+	primary, present := body.Primary()
+	if !present {
+		return resultFrom(interruption, cleanupDiagnostics)
+	}
+	secondary := appendUniqueDiagnostics(body.Secondary(), interruption)
+	secondary = appendUniqueDiagnostics(secondary, cleanupDiagnostics...)
+	sortDiagnostics(secondary)
+	return resultFrom(primary, secondary)
+}
+
+func contextualCleanupDiagnostics(result Result) []diagnostic {
+	diagnostics := make([]diagnostic, 0, 1+len(result.Secondary()))
+	for _, consequence := range resultDiagnostics(result) {
+		if consequence.status == Cancelled && consequence.parentCancelled && !consequence.external {
+			continue
+		}
+		consequence.cleanup = true
+		diagnostics = appendUniqueDiagnostics(diagnostics, consequence)
+	}
+	return diagnostics
 }
 
 func cleanupCancellationConsequence(result Result) bool {

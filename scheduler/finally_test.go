@@ -406,6 +406,113 @@ func TestFinallyLaterAncestorCancellationInterruptsCleanupWithoutChangingSibling
 	}
 }
 
+// Inferring a cleanup interruption only from the normalized cleanup primary
+// lets a noncooperative cleanup's mechanical or timeout completion outrank the
+// parent cancellation that first arrived while cleanup was active.
+func TestFinallyLaterAncestorCancellationOutranksCleanupFailure(t *testing.T) {
+	tests := []struct {
+		name            string
+		rejectedSibling bool
+		failure         FailureKind
+	}{
+		{name: "mechanical failure with failed sibling", failure: MechanicalFailure},
+		{name: "timeout with rejected sibling", rejectedSibling: true, failure: TimeoutFailure},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			definition := finallySiblingDefinition(t, testCase.rejectedSibling)
+			trace := &eventTrace{}
+			runner := newControlledRunner(trace)
+			boundary := newRecordingBoundary(trace)
+			execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 2, CancellationGrace: time.Second})
+			runner.waitStarts(t, 2)
+
+			runner.execution(t, "protected-body").complete(mustLeafSuccess(t, emptyValue(t)))
+			cleanup := runner.execution(t, "protected-cleanup")
+			siblingErr := errors.New("sibling failed")
+			if testCase.rejectedSibling {
+				runner.execution(t, "trigger").complete(mustLeafSuccess(t, emptyValue(t)))
+			} else {
+				runner.execution(t, "trigger").complete(mustLeafFailure(t, MechanicalFailure, siblingErr))
+			}
+			waitClosed(t, cleanup.cancelObserved, "active cleanup did not observe later ancestor cancellation")
+
+			cleanupErr := errors.New("cleanup ended after parent cancellation")
+			if testCase.failure == TimeoutFailure {
+				completion, err := NewLeafTimeout(cleanupErr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cleanup.complete(completion)
+			} else {
+				cleanup.complete(mustLeafFailure(t, testCase.failure, cleanupErr))
+			}
+
+			result := waitResult(t, execution)
+			rootPrimary, _ := result.Primary()
+			if testCase.rejectedSibling {
+				requireStatus(t, result, Rejected)
+				if reason, ok := rootPrimary.Reason(); !ok || reason != "sibling rejected" {
+					t.Fatalf("root primary = %#v, want sibling rejection", rootPrimary)
+				}
+			} else {
+				requireStatus(t, result, Failed)
+				if !errors.Is(rootPrimary.Error(), siblingErr) {
+					t.Fatalf("root primary = %#v, want sibling failure %v", rootPrimary, siblingErr)
+				}
+			}
+			if diagnostic, ok := anyCleanupFailure(result); ok {
+				t.Fatalf("later parent cancellation became cleanup failure %#v", diagnostic)
+			}
+			rootParentCancellations := 0
+			for _, diagnostic := range resultDiagnostics(result) {
+				if diagnostic.parentCancelled && !diagnostic.external {
+					rootParentCancellations++
+				}
+			}
+			if rootParentCancellations != 1 {
+				t.Fatalf("root parent-cancellation diagnostics = %d, want 1: %#v", rootParentCancellations, result)
+			}
+
+			protectedSettlements := boundary.settlements("protected")
+			if len(protectedSettlements) != 1 {
+				t.Fatalf("protected settlements = %d, want 1", len(protectedSettlements))
+			}
+			protected := protectedSettlements[0]
+			requireStatus(t, protected, Cancelled)
+			protectedPrimary, _ := protected.Primary()
+			if !protectedPrimary.parentCancelled || protectedPrimary.external {
+				t.Fatalf("protected primary = %#v, want parent-induced cancellation", protectedPrimary)
+			}
+			parentCancellations := 0
+			cleanupCauseSecondary := false
+			for _, diagnostic := range resultDiagnostics(protected) {
+				if diagnostic.parentCancelled && !diagnostic.external {
+					parentCancellations++
+				}
+			}
+			for _, diagnostic := range protected.Secondary() {
+				kind, failed := diagnostic.Failure()
+				if failed && kind == testCase.failure && errors.Is(diagnostic.Error(), cleanupErr) {
+					cleanupCauseSecondary = true
+				}
+			}
+			if parentCancellations != 1 {
+				t.Fatalf("protected parent-cancellation diagnostics = %d, want 1: %#v", parentCancellations, protected)
+			}
+			if !cleanupCauseSecondary {
+				t.Fatalf("protected secondaries = %#v, want cleanup %v cause %v", protected.Secondary(), testCase.failure, cleanupErr)
+			}
+
+			rootSettlements := boundary.settlements("root")
+			if len(rootSettlements) != 1 || !reflect.DeepEqual(rootSettlements[0], result) {
+				t.Fatalf("root settlement and Wait differ: settled = %#v, returned = %#v", rootSettlements, result)
+			}
+		})
+	}
+}
+
 // Treating every cancelled parent as new cleanup cancellation prevents a
 // protected child from unwinding after the parent's fail-fast has already
 // cancelled its body.
