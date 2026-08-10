@@ -3,7 +3,9 @@ package content
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -67,19 +69,18 @@ type treeCaptureRoot interface {
 	open(string) (treeReadFile, error)
 	readlink(string) (string, error)
 	openRoot(string) (treeCaptureRoot, error)
+	mkdir(string, fs.FileMode) (fs.FileInfo, error)
+	createTemp(string) (treeTempFile, error)
+	link(string, string) (fs.FileInfo, error)
+	symlink(string, string) (fs.FileInfo, error)
+	remove(string) error
+	removeAll(string) error
 	close() error
 }
 
 type treeFilesystem interface {
 	lstat(string) (fs.FileInfo, error)
 	openRoot(string) (treeCaptureRoot, error)
-	readDir(string) ([]os.DirEntry, error)
-	mkdir(string, fs.FileMode) error
-	createTemp(string, string) (treeTempFile, error)
-	link(string, string) error
-	symlink(string, string) error
-	remove(string) error
-	removeAll(string) error
 }
 
 type osTreeFilesystem struct{}
@@ -92,17 +93,6 @@ func (osTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
 	}
 	return osTreeCaptureRoot{root: root}, nil
 }
-func (osTreeFilesystem) readDir(name string) ([]os.DirEntry, error) { return os.ReadDir(name) }
-func (osTreeFilesystem) mkdir(name string, mode fs.FileMode) error  { return os.Mkdir(name, mode) }
-func (osTreeFilesystem) createTemp(dir, pattern string) (treeTempFile, error) {
-	return os.CreateTemp(dir, pattern)
-}
-func (osTreeFilesystem) link(oldname, newname string) error { return os.Link(oldname, newname) }
-func (osTreeFilesystem) symlink(oldname, newname string) error {
-	return os.Symlink(oldname, newname)
-}
-func (osTreeFilesystem) remove(name string) error    { return os.Remove(name) }
-func (osTreeFilesystem) removeAll(name string) error { return os.RemoveAll(name) }
 
 type osTreeCaptureRoot struct {
 	root *os.Root
@@ -121,7 +111,51 @@ func (r osTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
 	}
 	return osTreeCaptureRoot{root: root}, nil
 }
-func (r osTreeCaptureRoot) close() error { return r.root.Close() }
+func (r osTreeCaptureRoot) mkdir(name string, mode fs.FileMode) (fs.FileInfo, error) {
+	if err := r.root.Mkdir(name, mode); err != nil {
+		return nil, err
+	}
+	return r.root.Lstat(name)
+}
+func (r osTreeCaptureRoot) createTemp(pattern string) (treeTempFile, error) {
+	for {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, fmt.Errorf("generate temporary file name: %w", err)
+		}
+		name := pattern + hex.EncodeToString(random[:])
+		file, err := r.root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return treeRootTempFile{File: file, name: name}, nil
+	}
+}
+func (r osTreeCaptureRoot) link(oldname, newname string) (fs.FileInfo, error) {
+	if err := r.root.Link(oldname, newname); err != nil {
+		return nil, err
+	}
+	return r.root.Lstat(newname)
+}
+func (r osTreeCaptureRoot) symlink(oldname, newname string) (fs.FileInfo, error) {
+	if err := r.root.Symlink(oldname, newname); err != nil {
+		return nil, err
+	}
+	return r.root.Lstat(newname)
+}
+func (r osTreeCaptureRoot) remove(name string) error    { return r.root.Remove(name) }
+func (r osTreeCaptureRoot) removeAll(name string) error { return r.root.RemoveAll(name) }
+func (r osTreeCaptureRoot) close() error                { return r.root.Close() }
+
+type treeRootTempFile struct {
+	*os.File
+	name string
+}
+
+func (f treeRootTempFile) Name() string { return f.name }
 
 func (r *Repository) treeFilesystem() treeFilesystem {
 	if r != nil && r.treeFS != nil {
@@ -374,40 +408,73 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 	if err != nil {
 		return err
 	}
-	filesystem := r.treeFilesystem()
-	if _, statErr := filesystem.lstat(destination); statErr == nil {
-		return fmt.Errorf("content: tree materialization destination already exists")
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("content: inspect tree materialization destination: %w", statErr)
+	for _, entry := range entries {
+		if _, err := treeHostPath(".", entry.segments); err != nil {
+			return err
+		}
 	}
+	filesystem := r.treeFilesystem()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
 	}
-	if err := filesystem.mkdir(destination, 0o700); err != nil {
-		return fmt.Errorf("content: create tree materialization destination: %w", err)
+	cleanDestination := filepath.Clean(destination)
+	destinationName := filepath.Base(cleanDestination)
+	parent, err := filesystem.openRoot(filepath.Dir(cleanDestination))
+	if err != nil {
+		return fmt.Errorf("content: open tree materialization parent: %w", err)
 	}
-	removeDestination := true
+	var destinationRoot treeCaptureRoot
+	createdName := ""
+	removeDestination := false
 	defer func() {
-		if !removeDestination {
-			return
+		if destinationRoot != nil {
+			if closeErr := destinationRoot.close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("content: close tree materialization destination: %w", closeErr))
+			}
 		}
-		if cleanupErr := filesystem.removeAll(destination); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("content: remove failed tree materialization: %w", cleanupErr))
+		if removeDestination && createdName != "" {
+			if cleanupErr := parent.removeAll(createdName); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("content: remove failed tree materialization: %w", cleanupErr))
+			}
+		}
+		if closeErr := parent.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("content: close tree materialization parent: %w", closeErr))
 		}
 	}()
-	if err := verifyCreatedTreeName(filesystem, destination); err != nil {
+	if err := requireAbsentTreeName(parent, destinationName); err != nil {
 		return err
 	}
-
+	createdInfo, err := parent.mkdir(destinationName, 0o700)
+	if err != nil {
+		return fmt.Errorf("content: create tree materialization destination: %w", err)
+	}
+	createdName, exact, err := identifyCreatedTreeName(parent, destinationName, createdInfo)
+	if createdName != "" {
+		removeDestination = true
+	}
+	if err != nil {
+		return err
+	}
+	if !exact {
+		return fmt.Errorf("content: concrete filesystem did not reproduce exact tree entry name")
+	}
+	destinationRoot, err = parent.openRoot(createdName)
+	if err != nil {
+		return fmt.Errorf("content: open created tree materialization destination: %w", err)
+	}
+	openedInfo, err := destinationRoot.lstat(".")
+	if err != nil {
+		return fmt.Errorf("content: inspect created tree materialization destination: %w", err)
+	}
+	if !os.SameFile(createdInfo, openedInfo) {
+		return fmt.Errorf("content: created tree materialization destination identity changed")
+	}
+	directories := map[string]fs.FileInfo{treeSegmentsKey(nil): createdInfo}
 	for _, entry := range entries {
 		if entry.kind != directoryEntry {
 			continue
 		}
-		name, pathErr := treeHostPath(destination, entry.segments)
-		if pathErr != nil {
-			return pathErr
-		}
-		if err := createTreeDirectory(ctx, filesystem, name); err != nil {
+		if err := materializeTreeDirectory(ctx, destinationRoot, directories, entry); err != nil {
 			return err
 		}
 	}
@@ -415,11 +482,7 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 		if entry.kind != fileEntry && entry.kind != executableEntry {
 			continue
 		}
-		name, pathErr := treeHostPath(destination, entry.segments)
-		if pathErr != nil {
-			return pathErr
-		}
-		if err := r.materializeTreeFile(ctx, filesystem, entry, name); err != nil {
+		if err := r.materializeTreeFile(ctx, destinationRoot, directories, entry); err != nil {
 			return err
 		}
 	}
@@ -430,51 +493,86 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("content: materialize tree: %w", err)
 		}
-		name, pathErr := treeHostPath(destination, entry.segments)
-		if pathErr != nil {
-			return pathErr
-		}
-		if err := requireAbsentTreePath(filesystem, name); err != nil {
-			return err
-		}
-		if err := filesystem.symlink(entry.target, name); err != nil {
-			return fmt.Errorf("content: create tree symlink: %w", err)
-		}
-		if err := verifyCreatedTreeName(filesystem, name); err != nil {
+		if err := materializeTreeSymlink(destinationRoot, directories, entry); err != nil {
 			return err
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
 	}
+	if closeErr := destinationRoot.close(); closeErr != nil {
+		return fmt.Errorf("content: close tree materialization destination: %w", closeErr)
+	}
+	destinationRoot = nil
 	removeDestination = false
 	return nil
 }
 
-func createTreeDirectory(ctx context.Context, filesystem treeFilesystem, name string) error {
+func materializeTreeDirectory(ctx context.Context, root treeCaptureRoot, directories map[string]fs.FileInfo, entry treeEntry) (err error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
 	}
-	if err := requireAbsentTreePath(filesystem, name); err != nil {
+	parent, err := openMaterializedTreeDirectory(root, directories, entry.segments[:len(entry.segments)-1])
+	if err != nil {
 		return err
 	}
-	if err := filesystem.mkdir(name, 0o700); err != nil {
+	defer func() {
+		if closeErr := parent.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("content: close tree directory parent: %w", closeErr))
+		}
+	}()
+	name := entry.segments[len(entry.segments)-1]
+	if err := requireAbsentTreeName(parent, name); err != nil {
+		return err
+	}
+	created, err := parent.mkdir(name, 0o700)
+	if err != nil {
 		return fmt.Errorf("content: create tree directory: %w", err)
 	}
-	if err := verifyCreatedTreeName(filesystem, name); err != nil {
+	_, exact, err := identifyCreatedTreeName(parent, name, created)
+	if err != nil {
 		return err
 	}
+	if !exact {
+		return fmt.Errorf("content: concrete filesystem did not reproduce exact tree entry name")
+	}
+	child, err := parent.openRoot(name)
+	if err != nil {
+		return fmt.Errorf("content: open created tree directory: %w", err)
+	}
+	opened, inspectErr := child.lstat(".")
+	closeErr := child.close()
+	if inspectErr != nil {
+		return errors.Join(fmt.Errorf("content: inspect created tree directory: %w", inspectErr), closeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("content: close created tree directory: %w", closeErr)
+	}
+	if !os.SameFile(created, opened) {
+		return fmt.Errorf("content: created tree directory identity changed")
+	}
+	directories[treeSegmentsKey(entry.segments)] = created
 	return nil
 }
 
-func (r *Repository) materializeTreeFile(ctx context.Context, filesystem treeFilesystem, entry treeEntry, name string) (err error) {
+func (r *Repository) materializeTreeFile(ctx context.Context, root treeCaptureRoot, directories map[string]fs.FileInfo, entry treeEntry) (err error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
 	}
-	if err := requireAbsentTreePath(filesystem, name); err != nil {
+	parent, err := openMaterializedTreeDirectory(root, directories, entry.segments[:len(entry.segments)-1])
+	if err != nil {
 		return err
 	}
-	temporary, err := filesystem.createTemp(filepath.Dir(name), ".dawn-tree-*")
+	defer func() {
+		if closeErr := parent.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("content: close tree file parent: %w", closeErr))
+		}
+	}()
+	name := entry.segments[len(entry.segments)-1]
+	if err := requireAbsentTreeName(parent, name); err != nil {
+		return err
+	}
+	temporary, err := parent.createTemp(".dawn-tree-")
 	if err != nil {
 		return fmt.Errorf("content: create tree file temporary: %w", err)
 	}
@@ -489,7 +587,7 @@ func (r *Repository) materializeTreeFile(ctx context.Context, filesystem treeFil
 			}
 		}
 		if temporaryName != "" {
-			if removeErr := filesystem.remove(temporaryName); removeErr != nil {
+			if removeErr := parent.remove(temporaryName); removeErr != nil {
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("content: remove tree file temporary: %w", removeErr))
 			}
 		}
@@ -514,11 +612,48 @@ func (r *Repository) materializeTreeFile(ctx context.Context, filesystem treeFil
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
 	}
-	if err := filesystem.link(temporaryName, name); err != nil {
+	created, err := parent.link(temporaryName, name)
+	if err != nil {
 		return fmt.Errorf("content: publish tree file: %w", err)
 	}
-	if err := verifyCreatedTreeName(filesystem, name); err != nil {
+	if err := parent.remove(temporaryName); err != nil {
+		return fmt.Errorf("content: remove published tree file temporary: %w", err)
+	}
+	temporaryName = ""
+	_, exact, err := identifyCreatedTreeName(parent, name, created)
+	if err != nil {
 		return err
+	}
+	if !exact {
+		return fmt.Errorf("content: concrete filesystem did not reproduce exact tree entry name")
+	}
+	return nil
+}
+
+func materializeTreeSymlink(root treeCaptureRoot, directories map[string]fs.FileInfo, entry treeEntry) (err error) {
+	parent, err := openMaterializedTreeDirectory(root, directories, entry.segments[:len(entry.segments)-1])
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := parent.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("content: close tree symlink parent: %w", closeErr))
+		}
+	}()
+	name := entry.segments[len(entry.segments)-1]
+	if err := requireAbsentTreeName(parent, name); err != nil {
+		return err
+	}
+	created, err := parent.symlink(entry.target, name)
+	if err != nil {
+		return fmt.Errorf("content: create tree symlink: %w", err)
+	}
+	_, exact, err := identifyCreatedTreeName(parent, name, created)
+	if err != nil {
+		return err
+	}
+	if !exact {
+		return fmt.Errorf("content: concrete filesystem did not reproduce exact tree entry name")
 	}
 	return nil
 }
@@ -535,8 +670,8 @@ func (r *Repository) copyTreeObject(ctx context.Context, object Object, destinat
 	return nil
 }
 
-func requireAbsentTreePath(filesystem treeFilesystem, name string) error {
-	if _, err := filesystem.lstat(name); err == nil {
+func requireAbsentTreeName(root treeCaptureRoot, name string) error {
+	if _, err := root.lstat(name); err == nil {
 		return fmt.Errorf("content: tree materialization path already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("content: inspect tree materialization path: %w", err)
@@ -544,18 +679,67 @@ func requireAbsentTreePath(filesystem treeFilesystem, name string) error {
 	return nil
 }
 
-func verifyCreatedTreeName(filesystem treeFilesystem, name string) error {
-	entries, err := filesystem.readDir(filepath.Dir(name))
+func identifyCreatedTreeName(root treeCaptureRoot, requested string, created fs.FileInfo) (actual string, exact bool, err error) {
+	entries, err := root.readDir(".")
 	if err != nil {
-		return fmt.Errorf("content: enumerate created tree entry parent: %w", err)
+		return "", false, fmt.Errorf("content: enumerate created tree entry parent: %w", err)
 	}
-	want := filepath.Base(name)
+	matches := 0
 	for _, entry := range entries {
-		if entry.Name() == want {
-			return nil
+		info, statErr := root.lstat(entry.Name())
+		if statErr != nil {
+			return actual, false, fmt.Errorf("content: inspect enumerated tree entry: %w", statErr)
+		}
+		if !os.SameFile(created, info) {
+			continue
+		}
+		matches++
+		if actual == "" {
+			actual = entry.Name()
+		}
+		if entry.Name() == requested {
+			exact = true
 		}
 	}
-	return fmt.Errorf("content: concrete filesystem did not reproduce exact tree entry name")
+	if actual == "" {
+		return "", false, fmt.Errorf("content: concrete filesystem did not retain created tree entry identity")
+	}
+	if matches != 1 {
+		return actual, false, fmt.Errorf("content: concrete filesystem reproduced created tree entry under multiple names")
+	}
+	return actual, exact, nil
+}
+
+func openMaterializedTreeDirectory(root treeCaptureRoot, directories map[string]fs.FileInfo, segments []string) (treeCaptureRoot, error) {
+	current, err := root.openRoot(".")
+	if err != nil {
+		return nil, fmt.Errorf("content: pin tree materialization destination: %w", err)
+	}
+	openedSegments := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		child, openErr := current.openRoot(segment)
+		closeErr := current.close()
+		if openErr != nil {
+			return nil, errors.Join(fmt.Errorf("content: pin tree directory: %w", openErr), closeErr)
+		}
+		if closeErr != nil {
+			_ = child.close()
+			return nil, fmt.Errorf("content: close tree directory traversal handle: %w", closeErr)
+		}
+		openedSegments = append(openedSegments, segment)
+		info, inspectErr := child.lstat(".")
+		if inspectErr != nil {
+			_ = child.close()
+			return nil, fmt.Errorf("content: inspect pinned tree directory: %w", inspectErr)
+		}
+		expected, exists := directories[treeSegmentsKey(openedSegments)]
+		if !exists || !os.SameFile(expected, info) {
+			_ = child.close()
+			return nil, fmt.Errorf("content: pinned tree directory identity changed")
+		}
+		current = child
+	}
+	return current, nil
 }
 
 func treeHostPath(root string, segments []string) (string, error) {

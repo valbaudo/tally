@@ -247,6 +247,86 @@ func TestMaterializeTreeRejectsConcreteByteNameTransformation(t *testing.T) {
 	}
 }
 
+func TestMaterializeTreeRemovesTransformedDestinationRootByActualName(t *testing.T) {
+	repository, err := NewRepository(NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repository.CaptureTree(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	destination := filepath.Join(parent, "requested-root")
+	actual := filepath.Join(parent, "transformed-root")
+	repository.treeFS = rootTransformingTreeFilesystem{
+		treeFilesystem: repository.treeFilesystem(),
+		requested:      destination,
+		actual:         actual,
+	}
+
+	if err := repository.MaterializeTree(context.Background(), tree, destination); err == nil {
+		t.Fatal("MaterializeTree accepted a transformed destination root name")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("parent entries after rollback = %q, want none", treeDirEntryNames(entries))
+	}
+}
+
+func TestMaterializeTreeRejectsExactNameDecoyForCreatedObject(t *testing.T) {
+	for _, kind := range []string{"directory", "file", "file alias", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			source := t.TempDir()
+			switch kind {
+			case "directory":
+				if err := os.Mkdir(filepath.Join(source, "requested"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(source, "requested", "child"), []byte("must stay confined"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "file", "file alias":
+				if err := os.WriteFile(filepath.Join(source, "requested"), []byte("file bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.WriteFile(filepath.Join(source, "target"), []byte("target bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mustSymlink(t, "target", filepath.Join(source, "requested"))
+			}
+			repository, err := NewRepository(NewMemory())
+			if err != nil {
+				t.Fatal(err)
+			}
+			tree, err := repository.CaptureTree(context.Background(), source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "decoy")
+			decoyFS := &decoyTransformingTreeFilesystem{
+				treeFilesystem: repository.treeFilesystem(),
+				kind:           kind,
+			}
+			repository.treeFS = decoyFS
+
+			if err := repository.MaterializeTree(context.Background(), tree, destination); err == nil {
+				t.Fatal("MaterializeTree accepted an exact-name decoy for a transformed created object")
+			}
+			if decoyFS.descendantCreated {
+				t.Fatal("MaterializeTree wrote a descendant through the exact-name decoy directory")
+			}
+			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination after decoy failure = %v, want absent", err)
+			}
+		})
+	}
+}
+
 func TestMaterializeTreeHonorsCancellationBeforeCreation(t *testing.T) {
 	repository, err := NewRepository(NewMemory())
 	if err != nil {
@@ -279,32 +359,212 @@ type transformingTreeFilesystem struct {
 	kind string
 }
 
-func (f transformingTreeFilesystem) mkdir(name string, mode os.FileMode) error {
-	if f.kind == "directory" && filepath.Base(name) == "requested" {
-		name = filepath.Join(filepath.Dir(name), "transformed")
+func (f transformingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
 	}
-	return f.treeFilesystem.mkdir(name, mode)
+	return transformingTreeRoot{treeCaptureRoot: root, kind: f.kind}, nil
 }
 
-func (f transformingTreeFilesystem) link(oldname, newname string) error {
-	if f.kind == "file" && filepath.Base(newname) == "requested" {
-		newname = filepath.Join(filepath.Dir(newname), "transformed")
-	}
-	return f.treeFilesystem.link(oldname, newname)
+type transformingTreeRoot struct {
+	treeCaptureRoot
+	kind string
 }
 
-func (f transformingTreeFilesystem) symlink(oldname, newname string) error {
-	if f.kind == "symlink" && filepath.Base(newname) == "requested" {
-		newname = filepath.Join(filepath.Dir(newname), "transformed")
+func (r transformingTreeRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
 	}
-	return f.treeFilesystem.symlink(oldname, newname)
+	return transformingTreeRoot{treeCaptureRoot: root, kind: r.kind}, nil
 }
 
-func (f caseFoldingTreeFilesystem) lstat(name string) (os.FileInfo, error) {
-	if name == filepath.Join(f.destination, "a") {
-		return f.treeFilesystem.lstat(filepath.Join(f.destination, "A"))
+func (r transformingTreeRoot) mkdir(name string, mode os.FileMode) (os.FileInfo, error) {
+	if r.kind == "directory" && name == "requested" {
+		name = "transformed"
 	}
-	return f.treeFilesystem.lstat(name)
+	return r.treeCaptureRoot.mkdir(name, mode)
+}
+
+func (r transformingTreeRoot) link(oldname, newname string) (os.FileInfo, error) {
+	if r.kind == "file" && newname == "requested" {
+		newname = "transformed"
+	}
+	return r.treeCaptureRoot.link(oldname, newname)
+}
+
+func (r transformingTreeRoot) symlink(oldname, newname string) (os.FileInfo, error) {
+	if r.kind == "symlink" && newname == "requested" {
+		newname = "transformed"
+	}
+	return r.treeCaptureRoot.symlink(oldname, newname)
+}
+
+type rootTransformingTreeFilesystem struct {
+	treeFilesystem
+	requested string
+	actual    string
+}
+
+func (f rootTransformingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return rootTransformingTreeRoot{treeCaptureRoot: root, host: name, requested: f.requested, actual: f.actual}, nil
+}
+
+type rootTransformingTreeRoot struct {
+	treeCaptureRoot
+	host      string
+	requested string
+	actual    string
+}
+
+func (r rootTransformingTreeRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return rootTransformingTreeRoot{treeCaptureRoot: root, host: filepath.Join(r.host, name), requested: r.requested, actual: r.actual}, nil
+}
+
+func (r rootTransformingTreeRoot) mkdir(name string, mode os.FileMode) (os.FileInfo, error) {
+	if filepath.Join(r.host, name) == r.requested {
+		name = filepath.Base(r.actual)
+	}
+	return r.treeCaptureRoot.mkdir(name, mode)
+}
+
+type decoyTransformingTreeFilesystem struct {
+	treeFilesystem
+	kind              string
+	descendantCreated bool
+}
+
+func (f *decoyTransformingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &decoyTransformingTreeRoot{treeCaptureRoot: root, host: name, filesystem: f}, nil
+}
+
+type decoyTransformingTreeRoot struct {
+	treeCaptureRoot
+	host       string
+	filesystem *decoyTransformingTreeFilesystem
+}
+
+func (r *decoyTransformingTreeRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &decoyTransformingTreeRoot{treeCaptureRoot: root, host: filepath.Join(r.host, name), filesystem: r.filesystem}, nil
+}
+
+func (r *decoyTransformingTreeRoot) mkdir(name string, mode os.FileMode) (os.FileInfo, error) {
+	if r.filesystem.kind != "directory" || name != "requested" {
+		return r.treeCaptureRoot.mkdir(name, mode)
+	}
+	created, err := r.treeCaptureRoot.mkdir("transformed", mode)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.treeCaptureRoot.mkdir(name, mode); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (r *decoyTransformingTreeRoot) link(oldname, newname string) (os.FileInfo, error) {
+	if r.filesystem.kind == "directory" && newname == "child" && filepath.Base(r.host) == "requested" {
+		r.filesystem.descendantCreated = true
+	}
+	if (r.filesystem.kind != "file" && r.filesystem.kind != "file alias") || newname != "requested" {
+		return r.treeCaptureRoot.link(oldname, newname)
+	}
+	created, err := r.treeCaptureRoot.link(oldname, "transformed")
+	if err != nil {
+		return nil, err
+	}
+	if r.filesystem.kind == "file alias" {
+		if _, err := r.treeCaptureRoot.link(oldname, newname); err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	temporary, err := r.treeCaptureRoot.createTemp(".decoy-")
+	if err != nil {
+		return nil, err
+	}
+	temporaryName := temporary.Name()
+	if _, err := temporary.Write([]byte("decoy")); err != nil {
+		_ = temporary.Close()
+		_ = r.treeCaptureRoot.remove(temporaryName)
+		return nil, err
+	}
+	if err := temporary.Close(); err != nil {
+		_ = r.treeCaptureRoot.remove(temporaryName)
+		return nil, err
+	}
+	if _, err := r.treeCaptureRoot.link(temporaryName, newname); err != nil {
+		_ = r.treeCaptureRoot.remove(temporaryName)
+		return nil, err
+	}
+	if err := r.treeCaptureRoot.remove(temporaryName); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (r *decoyTransformingTreeRoot) symlink(oldname, newname string) (os.FileInfo, error) {
+	if r.filesystem.kind != "symlink" || newname != "requested" {
+		return r.treeCaptureRoot.symlink(oldname, newname)
+	}
+	created, err := r.treeCaptureRoot.symlink(oldname, "transformed")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.treeCaptureRoot.symlink(oldname, newname); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func treeDirEntryNames(entries []os.DirEntry) []string {
+	names := make([]string, len(entries))
+	for index, entry := range entries {
+		names[index] = entry.Name()
+	}
+	return names
+}
+
+func (f caseFoldingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return caseFoldingTreeRoot{treeCaptureRoot: root}, nil
+}
+
+type caseFoldingTreeRoot struct{ treeCaptureRoot }
+
+func (r caseFoldingTreeRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return caseFoldingTreeRoot{treeCaptureRoot: root}, nil
+}
+
+func (r caseFoldingTreeRoot) lstat(name string) (os.FileInfo, error) {
+	if name == "a" {
+		return r.treeCaptureRoot.lstat("A")
+	}
+	return r.treeCaptureRoot.lstat(name)
 }
 
 func TestTreeEntriesRejectsManifestWithTrailingData(t *testing.T) {
