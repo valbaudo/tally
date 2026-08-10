@@ -18,6 +18,117 @@ type resolvedSource struct {
 	optional bool
 }
 
+func validateCleanupBindings(protected, cleanup Graph, drafts []CleanupBindingDraft) ([]CleanupBinding, error) {
+	bound := make(map[string]struct{}, len(drafts))
+	bindings := make([]CleanupBinding, 0, len(drafts))
+	for _, draft := range drafts {
+		source, err := resolveCleanupSource(protected, draft.From)
+		if err != nil {
+			return nil, bindingError(protected, "cleanup source: %v", err)
+		}
+		target, ok := cleanup.inputs.Resolve(draft.To)
+		if !ok {
+			return nil, bindingError(protected, "cleanup target port %q: unknown target port %q", draft.To, draft.To)
+		}
+		if _, exists := bound[draft.To]; exists {
+			return nil, bindingError(protected, "cleanup target port %q: input %s is bound more than once", draft.To, draft.To)
+		}
+		targetOptional := contractPathOptional(cleanup.inputs, []string{draft.To})
+		if (draft.From.Kind == CleanupChild || source.optional) && !targetOptional {
+			return nil, bindingError(protected, "cleanup source cannot satisfy required target %q", draft.To)
+		}
+		if draft.From.Kind == CleanupOutcome && !target.Equal(cleanupOutcomeType()) {
+			return nil, bindingError(protected, "cleanup target port %q must use the exact outcome enum", draft.To)
+		}
+		assignment, err := value.CheckAssignable(source.typ, target)
+		if err != nil {
+			return nil, bindingError(protected, "cleanup source to target port %q cannot assign: %v", draft.To, err)
+		}
+		bound[draft.To] = struct{}{}
+		bindings = append(bindings, CleanupBinding{
+			from: CleanupSource{
+				kind: draft.From.Kind, child: draft.From.Child,
+				path: append([]string(nil), draft.From.Path...),
+			},
+			to: draft.To, runtimeValidation: assignment.RuntimeValidation,
+		})
+	}
+	for _, target := range cleanup.inputs.Ports() {
+		if target.Optional() {
+			continue
+		}
+		if _, exists := bound[target.Name()]; !exists {
+			return nil, bindingError(protected, "cleanup target port %q: required input is unbound", target.Name())
+		}
+	}
+	return bindings, nil
+}
+
+func resolveCleanupSource(protected Graph, draft CleanupSourceDraft) (resolvedSource, error) {
+	switch draft.Kind {
+	case CleanupInput:
+		if draft.Child != "" {
+			return resolvedSource{}, fmt.Errorf("input source must not name a child")
+		}
+		if len(draft.Path) == 0 {
+			return resolvedSource{}, fmt.Errorf("input source path is empty")
+		}
+		typ, ok := protected.inputs.Resolve(draft.Path...)
+		if !ok {
+			return resolvedSource{}, fmt.Errorf("unknown protected input %q", strings.Join(draft.Path, "."))
+		}
+		return resolvedSource{typ: typ, optional: contractPathOptional(protected.inputs, draft.Path)}, nil
+	case CleanupOutcome:
+		if draft.Child != "" {
+			return resolvedSource{}, fmt.Errorf("outcome source must not name a child")
+		}
+		if len(draft.Path) != 0 {
+			return resolvedSource{}, fmt.Errorf("outcome source must not have a path")
+		}
+		return resolvedSource{typ: cleanupOutcomeType()}, nil
+	case CleanupChild:
+		if draft.Child == "" {
+			return resolvedSource{}, fmt.Errorf("child source has an empty child name")
+		}
+		if len(draft.Path) == 0 {
+			return resolvedSource{}, fmt.Errorf("child source path is empty")
+		}
+		for _, node := range protected.nodes {
+			if node.name != draft.Child {
+				continue
+			}
+			_, outputs, ok := nodeContracts(node)
+			if !ok {
+				return resolvedSource{}, fmt.Errorf("child %q has no output contract", draft.Child)
+			}
+			typ, ok := outputs.Resolve(draft.Path...)
+			if !ok {
+				return resolvedSource{}, fmt.Errorf("unknown child %q output %q", draft.Child, strings.Join(draft.Path, "."))
+			}
+			return resolvedSource{typ: typ, optional: true}, nil
+		}
+		return resolvedSource{}, fmt.Errorf("unknown child %q", draft.Child)
+	default:
+		return resolvedSource{}, fmt.Errorf("unknown cleanup source kind %d", draft.Kind)
+	}
+}
+
+func cleanupOutcomeType() value.Type {
+	members := make([]value.Literal, 0, 4)
+	for _, status := range []Status{Succeeded, Rejected, Failed, Cancelled} {
+		literal, err := value.ParseLiteral([]byte(fmt.Sprintf("%q", status)))
+		if err != nil {
+			panic("fixed cleanup outcome literal is invalid")
+		}
+		members = append(members, literal)
+	}
+	typ, err := value.Enum(members...)
+	if err != nil {
+		panic("fixed cleanup outcome enum is invalid")
+	}
+	return typ
+}
+
 func resolveEndpoint(graph Graph, endpoint EndpointDraft) (resolvedEndpoint, error) {
 	switch endpoint.Kind {
 	case Boundary:

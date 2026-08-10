@@ -22,8 +22,36 @@ type GraphDraft struct {
 	Outputs    value.Contract
 	Nodes      []NodeDraft
 	Edges      []EdgeDraft
-	Finally    *GraphDraft
+	Finally    *FinallyDraft
 	Provenance Provenance
+}
+
+// CleanupSourceKind identifies one value available to cleanup.
+type CleanupSourceKind uint8
+
+const (
+	CleanupInput CleanupSourceKind = iota + 1
+	CleanupOutcome
+	CleanupChild
+)
+
+// FinallyDraft declares a cleanup graph and its explicit protected-value bindings.
+type FinallyDraft struct {
+	Graph    GraphDraft
+	Bindings []CleanupBindingDraft
+}
+
+// CleanupSourceDraft names one protected input, normalized outcome, or body-child output.
+type CleanupSourceDraft struct {
+	Kind  CleanupSourceKind
+	Child string
+	Path  []string
+}
+
+// CleanupBindingDraft maps one cleanup source onto a cleanup graph input.
+type CleanupBindingDraft struct {
+	From CleanupSourceDraft
+	To   string
 }
 
 // NodeDraft is one authored node variant.

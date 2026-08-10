@@ -172,7 +172,7 @@ func TestCanonicalDefinitionChangesWithSemantics(t *testing.T) {
 		{
 			name: "cleanup graph",
 			edit: func(draft *ProgramDraft) {
-				canonicalRoot(draft).Finally.Nodes[0].Leaf.Kind = Agent
+				canonicalRoot(draft).Finally.Graph.Nodes[0].Leaf.Kind = Agent
 			},
 		},
 	} {
@@ -274,7 +274,7 @@ func TestDefinitionImmutable(t *testing.T) {
 	canonicalNode(root, "repeat").Loop.Termination[0] = "changed"
 	canonicalNode(root, "repeat").Loop.Body.Nodes[0].Name = "changed"
 	canonicalNode(root, "repeat").Loop.Body.Edges[0].Bindings[0].From[0] = "changed"
-	root.Finally.Nodes[0].Name = "changed"
+	root.Finally.Graph.Nodes[0].Name = "changed"
 	draft.Modules[0], draft.Modules[1] = draft.Modules[1], draft.Modules[0]
 
 	canonical := def.Canonical()
@@ -390,7 +390,7 @@ func canonicalFixture(t *testing.T, reverse bool) ProgramDraft {
 	}
 	root := module("root", GraphDraft{
 		Inputs: inputs, Outputs: output, Nodes: nodes, Edges: edges,
-		Finally: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "cleanup", Leaf: scriptLeaf()}}},
+		Finally: &FinallyDraft{Graph: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "cleanup", Leaf: scriptLeaf()}}}},
 	})
 	library := module("library", GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "library-work", Leaf: scriptLeaf()}}})
 	modules := []ModuleDraft{root, library}
@@ -776,10 +776,10 @@ func canonicalNestedFixture(t *testing.T, reverse bool) ProgramDraft {
 			{From: EndpointDraft{Kind: Child, Child: "alpha"}, To: EndpointDraft{Kind: Child, Child: "beta"}},
 			{From: EndpointDraft{Kind: Child, Child: "alpha"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"two"}, To: "two"}, {From: []string{"one"}, To: "one"}}},
 		},
-		Finally: &GraphDraft{
+		Finally: &FinallyDraft{Graph: GraphDraft{
 			Inputs: value.EmptyContract(), Outputs: value.EmptyContract(),
 			Nodes: chain("cleanup").Nodes, Edges: chain("cleanup").Edges,
-		},
+		}},
 	}
 	if reverse {
 		reverseDraftCollections(&root)
@@ -864,7 +864,8 @@ func reverseDraftCollections(graph *GraphDraft) {
 		}
 	}
 	if graph.Finally != nil {
-		reverseDraftCollections(graph.Finally)
+		reverseDraftCollections(&graph.Finally.Graph)
+		reverseCleanupBindings(graph.Finally.Bindings)
 	}
 }
 

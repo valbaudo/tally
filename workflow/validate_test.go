@@ -346,13 +346,13 @@ func TestCompileRejectsMalformedFinally(t *testing.T) {
 		},
 		{
 			name:    "cleanup cannot contain nested finally",
-			cleanup: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}}},
+			cleanup: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "nested", Graph: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &FinallyDraft{Graph: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}}}},
 			want:    "finally",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cleanup := tc.cleanup
-			_, err := Compile(bindingProgram(GraphDraft{Finally: &cleanup}))
+			_, err := Compile(bindingProgram(GraphDraft{Finally: &FinallyDraft{Graph: cleanup}}))
 			assertValidationError(t, err, tc.want)
 		})
 	}
@@ -411,7 +411,17 @@ func TestCompileAllowsComposedCleanupWithInternalOutputs(t *testing.T) {
 			{From: EndpointDraft{Kind: Boundary}, To: validationChild("each"), Bindings: []BindingDraft{{From: []string{"items"}, To: "items"}}},
 		},
 	}
-	root := GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &cleanup}
+	root := GraphDraft{
+		Inputs: cleanupInputs, Outputs: value.EmptyContract(),
+		Finally: &FinallyDraft{
+			Graph: cleanup,
+			Bindings: []CleanupBindingDraft{
+				{From: CleanupSourceDraft{Kind: CleanupInput, Path: []string{"items"}}, To: "items"},
+				{From: CleanupSourceDraft{Kind: CleanupInput, Path: []string{"selected"}}, To: "selected"},
+				{From: CleanupSourceDraft{Kind: CleanupInput, Path: []string{"text"}}, To: "text"},
+			},
+		},
+	}
 	if _, err := Compile(bindingProgram(root)); err != nil {
 		t.Fatalf("Compile() error = %v", err)
 	}
@@ -438,7 +448,7 @@ func TestCompileRejectsUnconstructedGateAndCleanupOutputs(t *testing.T) {
 		{
 			name: "cleanup output",
 			draft: ProgramDraft{Root: "root", Modules: []ModuleDraft{module("root", GraphDraft{
-				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &GraphDraft{Inputs: value.EmptyContract()},
+				Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Finally: &FinallyDraft{Graph: GraphDraft{Inputs: value.EmptyContract()}},
 			})}},
 			want: "finally: graph outputs: contract is invalid",
 		},

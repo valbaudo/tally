@@ -144,13 +144,25 @@ func (c *compiler) compileGraphWithParallel(draft *GraphDraft, parallel bool) (G
 		graph.provenance.Source = ""
 	}
 	if draft.Finally != nil {
-		cleanup, err := c.compileGraph(draft.Finally)
+		cleanup, err := c.compileFinally(graph, draft.Finally)
 		if err != nil {
 			return Graph{}, fmt.Errorf("finally: %w", err)
 		}
-		graph.cleanup = &Finally{graph: cleanup}
+		graph.cleanup = &cleanup
 	}
 	return graph, nil
+}
+
+func (c *compiler) compileFinally(protected Graph, draft *FinallyDraft) (Finally, error) {
+	cleanup, err := c.compileGraph(&draft.Graph)
+	if err != nil {
+		return Finally{}, err
+	}
+	bindings, err := validateCleanupBindings(protected, cleanup, draft.Bindings)
+	if err != nil {
+		return Finally{}, err
+	}
+	return Finally{graph: cleanup, bindings: bindings}, nil
 }
 
 func (c *compiler) compileNode(draft NodeDraft) (Node, error) {

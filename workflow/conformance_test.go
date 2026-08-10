@@ -374,7 +374,7 @@ func prestigeDraft(t *testing.T, reverseReviewers bool) ProgramDraft {
 			{From: childEndpoint("aggregate"), To: boundaryEndpoint(), Bindings: []BindingDraft{{From: []string{"result"}, To: "result"}}},
 			{From: childEndpoint("revise"), To: childEndpoint("gate"), Bindings: []BindingDraft{{From: []string{"passed"}, To: "passed"}, {From: []string{"reason"}, To: "reason"}}},
 		},
-		Finally: &GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "cleanup", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}},
+		Finally: &FinallyDraft{Graph: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "cleanup", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: value.EmptyContract()}}}}},
 	}
 	return ProgramDraft{Root: "root", Modules: []ModuleDraft{
 		module("root", root),

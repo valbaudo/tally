@@ -205,7 +205,7 @@ func TestCompileCopiesDraftOwnedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	nested := GraphDraft{Inputs: groupInputs, Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "work", Leaf: scriptLeaf()}}}
-	cleanup := GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "clean", Leaf: scriptLeaf()}}}
+	cleanup := FinallyDraft{Graph: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{Name: "clean", Leaf: scriptLeaf()}}}}
 	draft := ProgramDraft{Root: "root", Modules: []ModuleDraft{
 		module("root", GraphDraft{
 			Inputs: contract(t, "input"),
@@ -229,7 +229,7 @@ func TestCompileCopiesDraftOwnedState(t *testing.T) {
 	draft.Modules[0].Graph.Nodes[0].Literals[0].Input = "changed"
 	draft.Modules[0].Graph.Edges[0].Bindings[0].From[0] = "changed"
 	nested.Nodes[0].Name = "changed"
-	cleanup.Nodes[0].Name = "changed"
+	cleanup.Graph.Nodes[0].Name = "changed"
 
 	root := def.Root()
 	group := mustNode(t, root, "group")
@@ -435,7 +435,9 @@ func recursiveGraphFixture(name string) ProgramDraft {
 	graph := GraphDraft{}
 	switch name {
 	case "finally":
-		graph.Finally = &graph
+		cleanup := &FinallyDraft{}
+		graph.Finally = cleanup
+		cleanup.Graph = graph
 	case "inline":
 		graph.Nodes = []NodeDraft{{Name: "self", Graph: &graph}}
 	default:

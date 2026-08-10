@@ -8,7 +8,7 @@ import (
 	"github.com/valbaudo/dawn/value"
 )
 
-const definitionFormat = "dawn.workflow/1"
+const definitionFormat = "dawn.workflow/2"
 
 // These records are the private, captured definition format. They deliberately
 // mirror only semantic compiled data; diagnostics and authoring provenance do
@@ -27,7 +27,20 @@ type graphWire struct {
 	Outputs contractWire `json:"outputs"`
 	Nodes   []nodeWire   `json:"nodes"`
 	Edges   []edgeWire   `json:"edges"`
-	Cleanup *graphWire   `json:"cleanup"`
+	Cleanup *finallyWire `json:"cleanup"`
+}
+
+type finallyWire struct {
+	Graph    graphWire            `json:"graph"`
+	Bindings []cleanupBindingWire `json:"bindings"`
+}
+
+type cleanupBindingWire struct {
+	Kind              CleanupSourceKind `json:"kind"`
+	Child             stringWire        `json:"child"`
+	Path              []stringWire      `json:"path"`
+	To                stringWire        `json:"to"`
+	RuntimeValidation bool              `json:"runtimeValidation"`
 }
 
 type contractWire struct {
@@ -156,7 +169,16 @@ func encodeGraph(graph Graph) graphWire {
 		wire.Edges[index] = encodeEdge(edge)
 	}
 	if graph.cleanup != nil {
-		cleanup := encodeGraph(graph.cleanup.graph)
+		cleanup := finallyWire{
+			Graph:    encodeGraph(graph.cleanup.graph),
+			Bindings: make([]cleanupBindingWire, len(graph.cleanup.bindings)),
+		}
+		for index, binding := range graph.cleanup.bindings {
+			cleanup.Bindings[index] = cleanupBindingWire{
+				Kind: binding.from.kind, Child: encodeString(binding.from.child), Path: encodeStrings(binding.from.path),
+				To: encodeString(binding.to), RuntimeValidation: binding.runtimeValidation,
+			}
+		}
 		wire.Cleanup = &cleanup
 	}
 	return wire
@@ -319,7 +341,23 @@ func normalizeGraph(graph *Graph) {
 	graph.edges = coalesceEdges(graph.edges)
 	if graph.cleanup != nil {
 		normalizeGraph(&graph.cleanup.graph)
+		sort.Slice(graph.cleanup.bindings, func(i, j int) bool {
+			return compareCleanupBindings(graph.cleanup.bindings[i], graph.cleanup.bindings[j]) < 0
+		})
 	}
+}
+
+func compareCleanupBindings(left, right CleanupBinding) int {
+	if result := compareInt(int(left.from.kind), int(right.from.kind)); result != 0 {
+		return result
+	}
+	if result := compareString(left.from.child, right.from.child); result != 0 {
+		return result
+	}
+	if result := compareStrings(left.from.path, right.from.path); result != 0 {
+		return result
+	}
+	return compareString(left.to, right.to)
 }
 
 func normalizeNode(node *Node) {

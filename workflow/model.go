@@ -303,13 +303,57 @@ func (l Loop) Termination() []string { return append([]string(nil), l.terminatio
 func (l Loop) Body() Graph { return l.body }
 
 // Finally is the sole protected cleanup scope attached to a graph.
-type Finally struct{ graph Graph }
+type Finally struct {
+	graph    Graph
+	bindings []CleanupBinding
+}
 
 // Kind returns FinallyScope.
 func (Finally) Kind() ScopeKind { return FinallyScope }
 
 // Graph returns the cleanup graph.
 func (f Finally) Graph() Graph { return f.graph }
+
+// Bindings returns a copy of the cleanup input bindings.
+func (f Finally) Bindings() []CleanupBinding {
+	bindings := append([]CleanupBinding(nil), f.bindings...)
+	for index := range bindings {
+		bindings[index].from.path = append([]string(nil), bindings[index].from.path...)
+	}
+	return bindings
+}
+
+// CleanupSource is one immutable value source available during cleanup.
+type CleanupSource struct {
+	kind  CleanupSourceKind
+	child string
+	path  []string
+}
+
+// Kind returns the cleanup source kind.
+func (s CleanupSource) Kind() CleanupSourceKind { return s.kind }
+
+// Child returns the immediate protected child name for a child source.
+func (s CleanupSource) Child() string { return s.child }
+
+// Path returns a copy of the protected input or child-output path.
+func (s CleanupSource) Path() []string { return append([]string(nil), s.path...) }
+
+// CleanupBinding is one validated binding into the cleanup graph.
+type CleanupBinding struct {
+	from              CleanupSource
+	to                string
+	runtimeValidation bool
+}
+
+// From returns the binding's immutable cleanup source.
+func (b CleanupBinding) From() CleanupSource { return b.from }
+
+// To returns the target cleanup input.
+func (b CleanupBinding) To() string { return b.to }
+
+// RuntimeValidation reports whether the value needs boundary validation.
+func (b CleanupBinding) RuntimeValidation() bool { return b.runtimeValidation }
 
 // Endpoint identifies one graph boundary or immediate child endpoint.
 type Endpoint struct {

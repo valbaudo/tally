@@ -316,11 +316,18 @@ func modelGraphForTest(draft GraphDraft) (Graph, error) {
 		graph.edges = append(graph.edges, edge)
 	}
 	if draft.Finally != nil {
-		cleanup, err := modelGraphForTest(*draft.Finally)
+		cleanup, err := modelGraphForTest(draft.Finally.Graph)
 		if err != nil {
 			return Graph{}, err
 		}
-		graph.cleanup = &Finally{graph: cleanup}
+		bindings := make([]CleanupBinding, len(draft.Finally.Bindings))
+		for index, binding := range draft.Finally.Bindings {
+			bindings[index] = CleanupBinding{
+				from: CleanupSource{kind: binding.From.Kind, child: binding.From.Child, path: append([]string(nil), binding.From.Path...)},
+				to:   binding.To,
+			}
+		}
+		graph.cleanup = &Finally{graph: cleanup, bindings: bindings}
 	}
 	return graph, nil
 }
