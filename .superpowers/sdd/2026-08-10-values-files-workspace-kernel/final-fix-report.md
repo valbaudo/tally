@@ -1,7 +1,7 @@
 # Final review fix report — values/files/workspace kernel
 
-Date: 2026-08-10  
-Branch: `codex/values-files-workspace-kernel`  
+Date: 2026-08-10
+Branch: `codex/values-files-workspace-kernel`
 Reviewed starting point: `fc52d02e48b12c7cb9b5bc4cffcb2da41f9186dd`
 
 ## Outcome
