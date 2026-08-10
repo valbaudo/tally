@@ -55,7 +55,7 @@ func (s *Scheduler) Start(ctx context.Context, definition workflow.Definition, i
 	runContext, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	control := newRunController(cancel)
 	execution := &Execution{control: control, done: make(chan struct{})}
-	run := &runState{scheduler: s, control: control}
+	run := &runState{scheduler: s, control: control, cancellation: control.rootCancellationView()}
 
 	if err := ctx.Err(); err != nil {
 		control.cancel(err)
@@ -88,8 +88,9 @@ func nilInterface(value any) bool {
 }
 
 type runState struct {
-	scheduler *Scheduler
-	control   *runController
+	scheduler    *Scheduler
+	control      *runController
+	cancellation cancellationView
 }
 
 func (r *runState) runScope(ctx context.Context, path Path, scope workflow.Scope, input value.Value) (Result, bool) {
@@ -140,9 +141,16 @@ func cancellationAwareDiagnostic(ctx context.Context, path Path, kind FailureKin
 }
 
 func (r *runState) withExternalCancellation(result Result) Result {
-	external := r.control.externalError()
+	external := r.externalError()
 	if external == nil || result.Status() == Succeeded {
 		return result
 	}
 	return normalize(resultDiagnostics(result), external)
+}
+
+func (r *runState) externalError() error {
+	if r.cancellation.control == nil && r.control != nil {
+		return r.control.rootCancellationView().externalError()
+	}
+	return r.cancellation.externalError()
 }

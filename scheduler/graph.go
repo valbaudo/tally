@@ -98,7 +98,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 				if ctx.Err() != nil && !contextObserved {
 					causes = append(causes, parentCancelled(path))
 				}
-				return r.finishGraph(ctx, path, graph, input, instance, state, normalize(causes, r.control.externalError()))
+				return r.finishGraph(ctx, path, graph, input, instance, state, normalize(causes, r.externalError()))
 			}
 			allDone := true
 			for _, node := range state.nodes {
@@ -204,7 +204,7 @@ func (r *runState) settle(ctx context.Context, instance Instance, result Result)
 	if err := r.scheduler.boundary.Settle(context.WithoutCancel(ctx), instance, result); err != nil {
 		causes := resultDiagnostics(result)
 		causes = append(causes, failed(instance.Path(), MechanicalFailure, err))
-		return normalize(causes, r.control.externalError())
+		return normalize(causes, r.externalError())
 	}
 	return result
 }

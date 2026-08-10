@@ -298,6 +298,150 @@ func TestFinallyFreshContextPreservesValuesAndIgnoresEarlierExternalCancel(t *te
 	}
 }
 
+// Reusing the protected run's unversioned external fact inside cleanup rewrites
+// the intrinsic cleanup failure to context.Canceled before precedence sees it.
+func TestFinallyHistoricalExternalCancelPreservesIntrinsicCleanupFailure(t *testing.T) {
+	definition := finallySimpleDefinition(t, testLeaf("body", value.EmptyContract(), value.EmptyContract()))
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	runner.cooperative["body"] = true
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 1})
+
+	body := runner.execution(t, "body")
+	execution.Cancel()
+	waitClosed(t, body.cancelObserved, "body did not observe external cancellation")
+	cleanupErr := errors.New("intrinsic cleanup failure")
+	runner.execution(t, "cleanup").complete(mustLeafFailure(t, MechanicalFailure, cleanupErr))
+
+	result := waitResult(t, execution)
+	requireStatus(t, result, Cancelled)
+	primary, _ := result.Primary()
+	if !primary.external || !errors.Is(primary.Error(), context.Canceled) {
+		t.Fatalf("primary = %#v, want historical external cancellation", primary)
+	}
+	cleanupFailure, ok := finallyCleanupDiagnostic(result, false)
+	if !ok || !errors.Is(cleanupFailure.Error(), cleanupErr) || errors.Is(cleanupFailure.Error(), context.Canceled) {
+		t.Fatalf("cleanup failure = %#v/%v, want intrinsic error %v and not context cancellation", cleanupFailure, ok, cleanupErr)
+	}
+	cleanupSettlements := boundary.settlements("cleanup")
+	if len(cleanupSettlements) != 1 {
+		t.Fatalf("cleanup leaf settlements = %d, want 1", len(cleanupSettlements))
+	}
+	requireStatus(t, cleanupSettlements[0], Failed)
+	cleanupPrimary, _ := cleanupSettlements[0].Primary()
+	if !errors.Is(cleanupPrimary.Error(), cleanupErr) || cleanupPrimary.external {
+		t.Fatalf("cleanup leaf settlement = %#v, want intrinsic cleanup failure", cleanupSettlements[0])
+	}
+	rootSettlements := boundary.settlements("root")
+	if len(rootSettlements) != 1 || !reflect.DeepEqual(rootSettlements[0], result) {
+		t.Fatalf("protected settlement and Wait differ: settled = %#v, returned = %#v", rootSettlements, result)
+	}
+}
+
+// Omitting the cleanup-entry parent snapshot leaves active cleanup insulated
+// from a sibling's later fail-fast cancellation and can let that consequence
+// replace the sibling's rejection through CleanupFailure precedence.
+func TestFinallyLaterAncestorCancellationInterruptsCleanupWithoutChangingSiblingPrimary(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		name := "failure"
+		if rejected {
+			name = "rejection"
+		}
+		t.Run(name, func(t *testing.T) {
+			definition := finallySiblingDefinition(t, rejected)
+			trace := &eventTrace{}
+			runner := newControlledRunner(trace)
+			runner.cooperative["protected-cleanup"] = true
+			boundary := newRecordingBoundary(trace)
+			execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 2})
+			runner.waitStarts(t, 2)
+
+			runner.execution(t, "protected-body").complete(mustLeafSuccess(t, emptyValue(t)))
+			cleanup := runner.execution(t, "protected-cleanup")
+			siblingErr := errors.New("sibling failed")
+			if rejected {
+				runner.execution(t, "trigger").complete(mustLeafSuccess(t, emptyValue(t)))
+			} else {
+				runner.execution(t, "trigger").complete(mustLeafFailure(t, MechanicalFailure, siblingErr))
+			}
+			waitClosed(t, cleanup.cancelObserved, "active cleanup did not observe later ancestor cancellation")
+
+			result := waitResult(t, execution)
+			primary, _ := result.Primary()
+			if rejected {
+				requireStatus(t, result, Rejected)
+				if reason, ok := primary.Reason(); !ok || reason != "sibling rejected" {
+					t.Fatalf("primary = %#v, want sibling rejection", primary)
+				}
+			} else {
+				requireStatus(t, result, Failed)
+				if !errors.Is(primary.Error(), siblingErr) {
+					t.Fatalf("primary = %#v, want sibling failure %v", primary, siblingErr)
+				}
+			}
+			if diagnostic, ok := anyCleanupFailure(result); ok {
+				t.Fatalf("ancestor cancellation became cleanup failure %#v", diagnostic)
+			}
+			protectedSettlements := boundary.settlements("protected")
+			if len(protectedSettlements) != 1 {
+				t.Fatalf("protected settlements = %d, want 1", len(protectedSettlements))
+			}
+			requireStatus(t, protectedSettlements[0], Cancelled)
+			protectedPrimary, _ := protectedSettlements[0].Primary()
+			if !protectedPrimary.parentCancelled || protectedPrimary.external {
+				t.Fatalf("protected settlement = %#v, want parent-induced cancellation", protectedSettlements[0])
+			}
+			rootSettlements := boundary.settlements("root")
+			if len(rootSettlements) != 1 || !reflect.DeepEqual(rootSettlements[0], result) {
+				t.Fatalf("root settlement and Wait differ: settled = %#v, returned = %#v", rootSettlements, result)
+			}
+			runner.mu.Lock()
+			active := runner.active
+			runner.mu.Unlock()
+			if active != 0 {
+				t.Fatalf("active runner leaves after quiescence = %d, want 0", active)
+			}
+		})
+	}
+}
+
+// Treating every cancelled parent as new cleanup cancellation prevents a
+// protected child from unwinding after the parent's fail-fast has already
+// cancelled its body.
+func TestFinallyHistoricalAncestorCancellationStillRunsCleanup(t *testing.T) {
+	definition := finallySiblingDefinition(t, false)
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	runner.cooperative["protected-body"] = true
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 2})
+	runner.waitStarts(t, 2)
+
+	siblingErr := errors.New("sibling failed before cleanup")
+	body := runner.execution(t, "protected-body")
+	runner.execution(t, "trigger").complete(mustLeafFailure(t, MechanicalFailure, siblingErr))
+	waitClosed(t, body.cancelObserved, "protected body did not observe parent fail-fast")
+	cleanup := runner.execution(t, "protected-cleanup")
+	if cleanupContextErr := finallyRunnerContextError(cleanup); cleanupContextErr != nil {
+		t.Fatalf("cleanup inherited historical parent cancellation: %v", cleanupContextErr)
+	}
+	cleanup.complete(mustLeafSuccess(t, emptyValue(t)))
+
+	result := waitResult(t, execution)
+	requireStatus(t, result, Failed)
+	primary, _ := result.Primary()
+	if !errors.Is(primary.Error(), siblingErr) {
+		t.Fatalf("primary = %#v, want sibling failure %v", primary, siblingErr)
+	}
+	if trace.index(traceCommit, "protected-cleanup") < 0 {
+		t.Fatal("historically cancelled protected body did not complete cleanup")
+	}
+	if diagnostic, ok := anyCleanupFailure(result); ok {
+		t.Fatalf("historical parent cancellation became cleanup failure %#v", diagnostic)
+	}
+}
+
 // Failing to subscribe the fresh context to post-start cancellation or to the
 // stronger force signal lets cleanup outlive an explicit later stop.
 func TestFinallyLaterExternalCancelAndForceStopInterruptCleanup(t *testing.T) {
@@ -491,6 +635,56 @@ func finallyCleanupDiagnostic(result Result, primary bool) (Diagnostic, bool) {
 		}
 	}
 	return Diagnostic{}, false
+}
+
+func anyCleanupFailure(result Result) (Diagnostic, bool) {
+	diagnostics := result.Secondary()
+	if primary, ok := result.Primary(); ok {
+		diagnostics = append([]Diagnostic{primary}, diagnostics...)
+	}
+	for _, diagnostic := range diagnostics {
+		if kind, ok := diagnostic.Failure(); ok && kind == CleanupFailure {
+			return diagnostic, true
+		}
+	}
+	return Diagnostic{}, false
+}
+
+func finallySiblingDefinition(t *testing.T, rejected bool) workflow.Definition {
+	t.Helper()
+	empty := value.EmptyContract()
+	protected := workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes:   []workflow.NodeDraft{testLeaf("protected-body", empty, empty)},
+		Finally: &workflow.FinallyDraft{Graph: finallyNamedCleanupGraph(t, empty, "protected-cleanup")},
+	}
+	sibling := workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{testLeaf("trigger", empty, empty)},
+	}
+	if rejected {
+		sibling.Nodes = append(sibling.Nodes, testGateNode(t, "deny", false, "sibling rejected"))
+		sibling.Edges = []workflow.EdgeDraft{{
+			From: workflow.EndpointDraft{Kind: workflow.Child, Child: "trigger"},
+			To:   workflow.EndpointDraft{Kind: workflow.Child, Child: "deny"},
+		}}
+	}
+	return testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{
+			{Name: "protected", Graph: &protected},
+			{Name: "sibling", Graph: &sibling},
+		},
+	})
+}
+
+func finallyRunnerContextError(execution *controlledLeafExecution) error {
+	select {
+	case <-execution.cancelObserved:
+		return context.Canceled
+	default:
+		return nil
+	}
 }
 
 func waitForTrace(t *testing.T, trace *eventTrace, kind traceKind, child string) {

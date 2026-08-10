@@ -17,9 +17,10 @@ func (r *runState) finishGraph(ctx context.Context, path Path, graph workflow.Gr
 		if inputErr != nil {
 			result = applyCleanupPrecedence(body, resultFrom(cleanupFailed(cleanupPath, inputErr), nil), cleanupPath)
 		} else {
-			cleanupContext, cancel := r.control.cleanupContext(ctx)
-			done := r.runNested(cleanupContext, func(nestedContext context.Context) Result {
-				return r.runGraph(nestedContext, cleanupPath, cleanup.Graph(), cleanupInput)
+			cleanupContext, cancel, cancellation := r.control.cleanupContext(ctx)
+			cleanupRun := &runState{scheduler: r.scheduler, control: r.control, cancellation: cancellation}
+			done := cleanupRun.runNested(cleanupContext, func(nestedContext context.Context) Result {
+				return cleanupRun.runGraph(nestedContext, cleanupPath, cleanup.Graph(), cleanupInput)
 			})
 			cleanupResult, open := <-done
 			cancel()
@@ -34,7 +35,7 @@ func (r *runState) finishGraph(ctx context.Context, path Path, graph workflow.Gr
 		return r.settle(ctx, instance, result)
 	}
 	if ctx.Err() != nil {
-		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.control.externalError()))
+		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 	}
 	output, present := result.Output()
 	if !present {
@@ -105,6 +106,18 @@ func applyCleanupPrecedence(body, cleanup Result, cleanupPath Path) Result {
 	if cleanup.Status() == Succeeded {
 		return body
 	}
+	if cleanupCancellationConsequence(cleanup) {
+		if body.Status() == Succeeded {
+			return cleanup
+		}
+		primary, present := body.Primary()
+		if !present {
+			return cleanup
+		}
+		secondary := appendUniqueDiagnostics(body.Secondary(), resultDiagnostics(cleanup)...)
+		sortDiagnostics(secondary)
+		return resultFrom(primary, secondary)
+	}
 	failure := cleanupFailed(cleanupPath, cleanupResultError(cleanup))
 	if body.Status() == Succeeded {
 		return resultFrom(failure, nil)
@@ -116,6 +129,38 @@ func applyCleanupPrecedence(body, cleanup Result, cleanupPath Path) Result {
 	secondary := append(body.Secondary(), failure)
 	sortDiagnostics(secondary)
 	return resultFrom(primary, secondary)
+}
+
+func cleanupCancellationConsequence(result Result) bool {
+	if result.Status() != Cancelled {
+		return false
+	}
+	primary, present := result.Primary()
+	return present && (primary.parentCancelled || primary.external)
+}
+
+func appendUniqueDiagnostics(existing []diagnostic, candidates ...diagnostic) []diagnostic {
+	result := append([]diagnostic(nil), existing...)
+	for _, candidate := range candidates {
+		duplicate := false
+		for _, current := range result {
+			if sameDiagnostic(current, candidate) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+func sameDiagnostic(left, right diagnostic) bool {
+	return comparePath(left.path, right.path) == 0 &&
+		left.status == right.status && left.failure == right.failure &&
+		left.reason == right.reason && compareError(left.err, right.err) == 0 &&
+		left.parentCancelled == right.parentCancelled && left.cleanup == right.cleanup && left.external == right.external
 }
 
 func cleanupResultError(result Result) error {

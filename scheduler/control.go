@@ -63,6 +63,7 @@ type runController struct {
 	finishOnce sync.Once
 	mu         sync.Mutex
 	external   error
+	version    uint64
 }
 
 func newRunController(cancel context.CancelFunc) *runController {
@@ -84,9 +85,10 @@ func (c *runController) cancel(err error) {
 		}
 		c.mu.Lock()
 		c.external = err
-		c.mu.Unlock()
+		c.version++
 		c.cancelContext()
 		close(c.cancelled)
+		c.mu.Unlock()
 	})
 }
 
@@ -98,10 +100,8 @@ func (c *runController) forceStop(err error) {
 	c.forceOnce.Do(func() { close(c.force) })
 }
 
-func (c *runController) externalError() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.external
+func (c *runController) rootCancellationView() cancellationView {
+	return cancellationView{control: c}
 }
 
 func (c *runController) finish() {
@@ -112,36 +112,58 @@ func (c *runController) finish() {
 // cancellation that was already recorded when unwinding began. A cancellation
 // first recorded after this snapshot still interrupts cleanup, and force-stop
 // always interrupts it.
-func (c *runController) cleanupContext(body context.Context) (context.Context, context.CancelFunc) {
+func (c *runController) cleanupContext(body context.Context) (context.Context, context.CancelFunc, cancellationView) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(body))
 	c.mu.Lock()
-	previouslyCancelled := c.external != nil
+	view := cancellationView{control: c, after: c.version}
+	parentAlreadyCancelled := body.Err() != nil
+	externalAlreadyCancelled := c.version != 0
 	c.mu.Unlock()
 
-	if channelClosed(c.force) || (!previouslyCancelled && channelClosed(c.cancelled)) {
+	if channelClosed(c.force) || (!externalAlreadyCancelled && channelClosed(c.cancelled)) {
 		cancel()
-		return ctx, cancel
+		return ctx, cancel, view
 	}
-	if previouslyCancelled {
-		go func() {
-			select {
-			case <-c.force:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-		return ctx, cancel
+	var parentDone <-chan struct{}
+	if !parentAlreadyCancelled {
+		parentDone = body.Done()
+	}
+	var externalDone <-chan struct{}
+	if !externalAlreadyCancelled {
+		externalDone = c.cancelled
 	}
 	go func() {
 		select {
-		case <-c.cancelled:
+		case <-parentDone:
+			cancel()
+		case <-externalDone:
 			cancel()
 		case <-c.force:
 			cancel()
 		case <-ctx.Done():
 		}
 	}()
-	return ctx, cancel
+	return ctx, cancel, view
+}
+
+// cancellationView exposes only external cancellation facts recorded after a
+// semantic execution boundary. Cleanup snapshots the current generation so a
+// historical protected-body cancellation cannot rewrite cleanup's own result.
+type cancellationView struct {
+	control *runController
+	after   uint64
+}
+
+func (v cancellationView) externalError() error {
+	if v.control == nil {
+		return nil
+	}
+	v.control.mu.Lock()
+	defer v.control.mu.Unlock()
+	if v.control.version <= v.after {
+		return nil
+	}
+	return v.control.external
 }
 
 func channelClosed(channel <-chan struct{}) bool {

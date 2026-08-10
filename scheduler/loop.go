@@ -21,13 +21,13 @@ func (r *runState) runLoop(ctx context.Context, path Path, loop workflow.Loop, i
 		return r.withExternalCancellation(resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 	}
 	if ctx.Err() != nil {
-		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.control.externalError()))
+		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 	}
 
 	var previous value.Value
 	for iteration := 1; iteration <= loop.Maximum(); iteration++ {
 		if ctx.Err() != nil {
-			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.control.externalError()))
+			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 		}
 		iterationPath, pathErr := path.LoopIteration(uint64(iteration))
 		if pathErr != nil {
@@ -63,7 +63,7 @@ func (r *runState) runLoop(ctx context.Context, path Path, loop workflow.Loop, i
 			return r.settle(ctx, instance, result)
 		}
 		if ctx.Err() != nil {
-			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.control.externalError()))
+			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 		}
 
 		output, present := result.Output()
@@ -87,7 +87,7 @@ func (r *runState) runLoop(ctx context.Context, path Path, loop workflow.Loop, i
 			return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, outputErr), nil))
 		}
 		if ctx.Err() != nil {
-			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.control.externalError()))
+			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 		}
 		if commitErr := r.scheduler.boundary.Commit(ctx, instance, output); commitErr != nil {
 			return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, commitErr), nil))
