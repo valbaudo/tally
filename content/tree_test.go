@@ -3,7 +3,9 @@ package content
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -145,13 +147,6 @@ func TestCaptureTreeRejectsInvalidSymlinks(t *testing.T) {
 		setup func(*testing.T, string)
 	}{
 		{"absolute", func(t *testing.T, root string) { mustSymlink(t, "/outside", filepath.Join(root, "link")) }},
-		{"portable Windows absolute", func(t *testing.T, root string) {
-			target := `C:\outside`
-			if err := os.WriteFile(filepath.Join(root, target), []byte("same bytes, unsafe target syntax"), 0o600); err != nil {
-				t.Skipf("host cannot create portable absolute-target fixture: %v", err)
-			}
-			mustSymlink(t, target, filepath.Join(root, "link"))
-		}},
 		{"lexical root escape", func(t *testing.T, root string) { mustSymlink(t, "../outside", filepath.Join(root, "link")) }},
 		{"dangling", func(t *testing.T, root string) { mustSymlink(t, "missing", filepath.Join(root, "link")) }},
 		{"file with directory suffix", func(t *testing.T, root string) {
@@ -181,6 +176,38 @@ func TestCaptureTreeRejectsInvalidSymlinks(t *testing.T) {
 				t.Fatalf("CaptureTree accepted %s symlink", test.name)
 			}
 		})
+	}
+}
+
+func TestCaptureTreePreservesDriveLikeRelativeSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("drive-like target syntax is absolute on Windows")
+	}
+	source := t.TempDir()
+	target := `C:\outside`
+	if err := os.WriteFile(filepath.Join(source, target), []byte("ordinary in-tree bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, target, filepath.Join(source, "link"))
+	repository, err := NewRepository(NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tree, err := repository.CaptureTree(context.Background(), source)
+	if err != nil {
+		t.Fatalf("CaptureTree rejected a relative raw-byte target: %v", err)
+	}
+	destination := filepath.Join(t.TempDir(), "materialized")
+	if err := repository.MaterializeTree(context.Background(), tree, destination); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Readlink(filepath.Join(destination, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != target {
+		t.Fatalf("materialized symlink target = %q, want %q", got, target)
 	}
 }
 
@@ -280,7 +307,7 @@ func TestCaptureTreeHonorsCancellationDuringWalk(t *testing.T) {
 	}
 }
 
-func TestCaptureTreeRejectsDirectoryReplacedBySymlinkDuringWalk(t *testing.T) {
+func TestCaptureTreeDoesNotFollowDirectoryReplacedBySymlinkDuringWalk(t *testing.T) {
 	parent := t.TempDir()
 	source := filepath.Join(parent, "source")
 	outside := filepath.Join(parent, "outside")
@@ -307,8 +334,64 @@ func TestCaptureTreeRejectsDirectoryReplacedBySymlinkDuringWalk(t *testing.T) {
 		target:         outside,
 	}
 
-	if _, err := repository.CaptureTree(context.Background(), source); err == nil {
-		t.Fatal("CaptureTree followed a directory replaced by a symlink")
+	tree, err := repository.CaptureTree(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := repository.Entries(context.Background(), tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !slices.Equal(entries[0].Segments(), []string{"nested"}) || entries[0].Kind() != "directory" {
+		t.Fatalf("captured entries = %#v, want only the pinned nested directory", entries)
+	}
+}
+
+func TestCaptureTreeConfinesDirectorySwappedAfterEnumerationVerification(t *testing.T) {
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(source, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(nested, "entry")
+	if err := os.WriteFile(entry, []byte("inside bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideBytes := []byte("outside bytes must never be captured")
+	if err := os.WriteFile(filepath.Join(outside, "entry"), outsideBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemory()
+	repository, err := NewRepository(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swappingFS := &postVerificationSwapTreeFilesystem{
+		treeFilesystem: repository.treeFilesystem(),
+		directory:      nested,
+		entry:          entry,
+		target:         outside,
+	}
+	repository.treeFS = swappingFS
+
+	_, captureErr := repository.CaptureTree(context.Background(), source)
+	if swappingFS.swapErr != nil {
+		t.Fatalf("swap fixture failed: %v", swappingFS.swapErr)
+	}
+	if captureErr == nil {
+		t.Error("CaptureTree accepted a directory swapped to an outside symlink after verification")
+	}
+	outsideDigest := Digest(sha256.Sum256(outsideBytes))
+	if _, err := store.Copy(context.Background(), outsideDigest, io.Discard); err == nil {
+		t.Error("CaptureTree stored bytes reached only through the outside symlink")
 	}
 }
 
@@ -426,10 +509,28 @@ var (
 
 type reversingTreeFilesystem struct{ treeFilesystem }
 
-func (f reversingTreeFilesystem) readDir(name string) ([]os.DirEntry, error) {
-	entries, err := f.treeFilesystem.readDir(name)
+func (f reversingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return reversingTreeCaptureRoot{treeCaptureRoot: root}, nil
+}
+
+type reversingTreeCaptureRoot struct{ treeCaptureRoot }
+
+func (r reversingTreeCaptureRoot) readDir(name string) ([]os.DirEntry, error) {
+	entries, err := r.treeCaptureRoot.readDir(name)
 	slices.Reverse(entries)
 	return entries, err
+}
+
+func (r reversingTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return reversingTreeCaptureRoot{treeCaptureRoot: root}, nil
 }
 
 type failingOpenTreeFilesystem struct {
@@ -438,11 +539,34 @@ type failingOpenTreeFilesystem struct {
 	err  error
 }
 
-func (f failingOpenTreeFilesystem) open(name string) (treeReadFile, error) {
-	if name == f.name {
-		return nil, f.err
+func (f failingOpenTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
 	}
-	return f.treeFilesystem.open(name)
+	return failingOpenTreeCaptureRoot{treeCaptureRoot: root, host: name, name: f.name, err: f.err}, nil
+}
+
+type failingOpenTreeCaptureRoot struct {
+	treeCaptureRoot
+	host string
+	name string
+	err  error
+}
+
+func (r failingOpenTreeCaptureRoot) open(name string) (treeReadFile, error) {
+	if filepath.Join(r.host, name) == r.name {
+		return nil, r.err
+	}
+	return r.treeCaptureRoot.open(name)
+}
+
+func (r failingOpenTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return failingOpenTreeCaptureRoot{treeCaptureRoot: root, host: filepath.Join(r.host, name), name: r.name, err: r.err}, nil
 }
 
 type failingReadDirTreeFilesystem struct {
@@ -451,11 +575,34 @@ type failingReadDirTreeFilesystem struct {
 	err  error
 }
 
-func (f failingReadDirTreeFilesystem) readDir(name string) ([]os.DirEntry, error) {
-	if name == f.name {
-		return nil, f.err
+func (f failingReadDirTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
 	}
-	return f.treeFilesystem.readDir(name)
+	return failingReadDirTreeCaptureRoot{treeCaptureRoot: root, host: name, name: f.name, err: f.err}, nil
+}
+
+type failingReadDirTreeCaptureRoot struct {
+	treeCaptureRoot
+	host string
+	name string
+	err  error
+}
+
+func (r failingReadDirTreeCaptureRoot) readDir(name string) ([]os.DirEntry, error) {
+	if r.host == r.name {
+		return nil, r.err
+	}
+	return r.treeCaptureRoot.readDir(name)
+}
+
+func (r failingReadDirTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return failingReadDirTreeCaptureRoot{treeCaptureRoot: root, host: filepath.Join(r.host, name), name: r.name, err: r.err}, nil
 }
 
 type cancelingTreeFilesystem struct {
@@ -463,10 +610,31 @@ type cancelingTreeFilesystem struct {
 	cancel context.CancelFunc
 }
 
-func (f cancelingTreeFilesystem) readDir(name string) ([]os.DirEntry, error) {
-	entries, err := f.treeFilesystem.readDir(name)
-	f.cancel()
+func (f cancelingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return cancelingTreeCaptureRoot{treeCaptureRoot: root, cancel: f.cancel}, nil
+}
+
+type cancelingTreeCaptureRoot struct {
+	treeCaptureRoot
+	cancel context.CancelFunc
+}
+
+func (r cancelingTreeCaptureRoot) readDir(name string) ([]os.DirEntry, error) {
+	entries, err := r.treeCaptureRoot.readDir(name)
+	r.cancel()
 	return entries, err
+}
+
+func (r cancelingTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return cancelingTreeCaptureRoot{treeCaptureRoot: root, cancel: r.cancel}, nil
 }
 
 type replacingDirectoryTreeFilesystem struct {
@@ -475,16 +643,93 @@ type replacingDirectoryTreeFilesystem struct {
 	target    string
 }
 
-func (f replacingDirectoryTreeFilesystem) readDir(name string) ([]os.DirEntry, error) {
-	if name == f.directory {
-		if err := os.Remove(name); err != nil {
+func (f replacingDirectoryTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return replacingDirectoryTreeCaptureRoot{treeCaptureRoot: root, host: name, directory: f.directory, target: f.target}, nil
+}
+
+type replacingDirectoryTreeCaptureRoot struct {
+	treeCaptureRoot
+	host      string
+	directory string
+	target    string
+}
+
+func (r replacingDirectoryTreeCaptureRoot) readDir(name string) ([]os.DirEntry, error) {
+	if r.host == r.directory {
+		if err := os.Remove(r.host); err != nil {
 			return nil, err
 		}
-		if err := os.Symlink(f.target, name); err != nil {
+		if err := os.Symlink(r.target, r.host); err != nil {
 			return nil, err
 		}
 	}
-	return f.treeFilesystem.readDir(name)
+	return r.treeCaptureRoot.readDir(name)
+}
+
+func (r replacingDirectoryTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return replacingDirectoryTreeCaptureRoot{treeCaptureRoot: root, host: filepath.Join(r.host, name), directory: r.directory, target: r.target}, nil
+}
+
+type postVerificationSwapTreeFilesystem struct {
+	treeFilesystem
+	directory  string
+	entry      string
+	target     string
+	lstatCalls int
+	swapErr    error
+}
+
+func (f *postVerificationSwapTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &postVerificationSwapTreeCaptureRoot{treeCaptureRoot: root, host: name, filesystem: f}, nil
+}
+
+type postVerificationSwapTreeCaptureRoot struct {
+	treeCaptureRoot
+	host       string
+	filesystem *postVerificationSwapTreeFilesystem
+}
+
+func (r *postVerificationSwapTreeCaptureRoot) lstat(name string) (os.FileInfo, error) {
+	info, err := r.treeCaptureRoot.lstat(name)
+	if r.host != r.filesystem.directory || name != "." || err != nil {
+		return info, err
+	}
+	r.filesystem.lstatCalls++
+	if r.filesystem.lstatCalls != 3 {
+		return info, nil
+	}
+	if removeErr := os.Remove(r.filesystem.entry); removeErr != nil {
+		r.filesystem.swapErr = removeErr
+		return info, nil
+	}
+	if removeErr := os.Remove(r.filesystem.directory); removeErr != nil {
+		r.filesystem.swapErr = removeErr
+		return info, nil
+	}
+	if symlinkErr := os.Symlink(r.filesystem.target, r.filesystem.directory); symlinkErr != nil {
+		r.filesystem.swapErr = symlinkErr
+	}
+	return info, nil
+}
+
+func (r *postVerificationSwapTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.treeCaptureRoot.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return &postVerificationSwapTreeCaptureRoot{treeCaptureRoot: root, host: filepath.Join(r.host, name), filesystem: r.filesystem}, nil
 }
 
 func requireErrorContains(t *testing.T, err error, fragment string) {

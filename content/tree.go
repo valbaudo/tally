@@ -61,11 +61,19 @@ type treeTempFile interface {
 	Close() error
 }
 
-type treeFilesystem interface {
+type treeCaptureRoot interface {
 	lstat(string) (fs.FileInfo, error)
 	readDir(string) ([]os.DirEntry, error)
 	open(string) (treeReadFile, error)
 	readlink(string) (string, error)
+	openRoot(string) (treeCaptureRoot, error)
+	close() error
+}
+
+type treeFilesystem interface {
+	lstat(string) (fs.FileInfo, error)
+	openRoot(string) (treeCaptureRoot, error)
+	readDir(string) ([]os.DirEntry, error)
 	mkdir(string, fs.FileMode) error
 	createTemp(string, string) (treeTempFile, error)
 	link(string, string) error
@@ -76,10 +84,15 @@ type treeFilesystem interface {
 
 type osTreeFilesystem struct{}
 
-func (osTreeFilesystem) lstat(name string) (fs.FileInfo, error)     { return os.Lstat(name) }
+func (osTreeFilesystem) lstat(name string) (fs.FileInfo, error) { return os.Lstat(name) }
+func (osTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := os.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return osTreeCaptureRoot{root: root}, nil
+}
 func (osTreeFilesystem) readDir(name string) ([]os.DirEntry, error) { return os.ReadDir(name) }
-func (osTreeFilesystem) open(name string) (treeReadFile, error)     { return os.Open(name) }
-func (osTreeFilesystem) readlink(name string) (string, error)       { return os.Readlink(name) }
 func (osTreeFilesystem) mkdir(name string, mode fs.FileMode) error  { return os.Mkdir(name, mode) }
 func (osTreeFilesystem) createTemp(dir, pattern string) (treeTempFile, error) {
 	return os.CreateTemp(dir, pattern)
@@ -90,6 +103,25 @@ func (osTreeFilesystem) symlink(oldname, newname string) error {
 }
 func (osTreeFilesystem) remove(name string) error    { return os.Remove(name) }
 func (osTreeFilesystem) removeAll(name string) error { return os.RemoveAll(name) }
+
+type osTreeCaptureRoot struct {
+	root *os.Root
+}
+
+func (r osTreeCaptureRoot) lstat(name string) (fs.FileInfo, error) { return r.root.Lstat(name) }
+func (r osTreeCaptureRoot) readDir(name string) ([]os.DirEntry, error) {
+	return fs.ReadDir(r.root.FS(), filepath.ToSlash(name))
+}
+func (r osTreeCaptureRoot) open(name string) (treeReadFile, error) { return r.root.Open(name) }
+func (r osTreeCaptureRoot) readlink(name string) (string, error)   { return r.root.Readlink(name) }
+func (r osTreeCaptureRoot) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := r.root.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return osTreeCaptureRoot{root: root}, nil
+}
+func (r osTreeCaptureRoot) close() error { return r.root.Close() }
 
 func (r *Repository) treeFilesystem() treeFilesystem {
 	if r != nil && r.treeFS != nil {
@@ -118,71 +150,21 @@ func (r *Repository) CaptureTree(ctx context.Context, source string) (Tree, erro
 	if !rootInfo.IsDir() {
 		return Tree{}, fmt.Errorf("content: tree source must be a directory")
 	}
-
-	type pendingDirectory struct {
-		host     string
-		segments []string
-		expected fs.FileInfo
+	root, err := filesystem.openRoot(source)
+	if err != nil {
+		return Tree{}, fmt.Errorf("content: open tree source: %w", err)
 	}
-	pending := []pendingDirectory{{host: source, expected: rootInfo}}
-	entries := make([]treeEntry, 0)
-	for len(pending) != 0 {
-		if err := ctx.Err(); err != nil {
-			return Tree{}, fmt.Errorf("content: capture tree: %w", err)
-		}
-		directory := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if err := verifyCapturedDirectory(filesystem, directory.host, directory.expected); err != nil {
-			return Tree{}, err
-		}
-		children, err := filesystem.readDir(directory.host)
+	openedRootInfo, err := root.lstat(".")
+	if err != nil || !openedRootInfo.IsDir() || !os.SameFile(rootInfo, openedRootInfo) {
+		_ = root.close()
 		if err != nil {
-			return Tree{}, fmt.Errorf("content: read tree directory: %w", err)
+			return Tree{}, fmt.Errorf("content: inspect opened tree source: %w", err)
 		}
-		if err := verifyCapturedDirectory(filesystem, directory.host, directory.expected); err != nil {
-			return Tree{}, err
-		}
-		if err := ctx.Err(); err != nil {
-			return Tree{}, fmt.Errorf("content: capture tree: %w", err)
-		}
-		for _, child := range children {
-			if err := ctx.Err(); err != nil {
-				return Tree{}, fmt.Errorf("content: capture tree: %w", err)
-			}
-			name := child.Name()
-			if name == "" || name == "." || name == ".." {
-				return Tree{}, fmt.Errorf("content: invalid filesystem entry name")
-			}
-			hostName := filepath.Join(directory.host, name)
-			info, err := filesystem.lstat(hostName)
-			if err != nil {
-				return Tree{}, fmt.Errorf("content: inspect tree entry: %w", err)
-			}
-			segments := append(slices.Clone(directory.segments), name)
-			switch mode := info.Mode(); {
-			case mode.IsDir():
-				entries = append(entries, treeEntry{segments: segments, kind: directoryEntry})
-				pending = append(pending, pendingDirectory{host: hostName, segments: segments, expected: info})
-			case mode.IsRegular():
-				object, err := r.captureTreeFile(ctx, filesystem, hostName, info)
-				if err != nil {
-					return Tree{}, err
-				}
-				kind := fileEntry
-				if mode.Perm()&0o111 != 0 {
-					kind = executableEntry
-				}
-				entries = append(entries, treeEntry{segments: segments, kind: kind, content: object})
-			case mode&os.ModeSymlink != 0:
-				target, err := filesystem.readlink(hostName)
-				if err != nil {
-					return Tree{}, fmt.Errorf("content: read tree symlink: %w", err)
-				}
-				entries = append(entries, treeEntry{segments: segments, kind: symlinkEntry, target: target})
-			default:
-				return Tree{}, fmt.Errorf("content: unsupported tree entry %q with mode %v", hostName, mode)
-			}
-		}
+		return Tree{}, fmt.Errorf("content: tree source changed while being opened")
+	}
+	entries, err := r.captureTreeEntries(ctx, root)
+	if err != nil {
+		return Tree{}, err
 	}
 	slices.SortFunc(entries, func(a, b treeEntry) int {
 		return compareTreeSegments(a.segments, b.segments)
@@ -202,19 +184,118 @@ func (r *Repository) CaptureTree(ctx context.Context, source string) (Tree, erro
 	return tree, nil
 }
 
-func verifyCapturedDirectory(filesystem treeFilesystem, name string, expected fs.FileInfo) error {
-	current, err := filesystem.lstat(name)
+type captureDirectoryFrame struct {
+	root       treeCaptureRoot
+	segments   []string
+	children   []os.DirEntry
+	nextChild  int
+	enumerated bool
+}
+
+func (r *Repository) captureTreeEntries(ctx context.Context, root treeCaptureRoot) (entries []treeEntry, err error) {
+	stack := []captureDirectoryFrame{{root: root}}
+	defer func() {
+		for index := len(stack) - 1; index >= 0; index-- {
+			if stack[index].root == nil {
+				continue
+			}
+			if closeErr := stack[index].root.close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("content: close captured tree directory: %w", closeErr))
+			}
+		}
+	}()
+	for len(stack) != 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("content: capture tree: %w", err)
+		}
+		frame := &stack[len(stack)-1]
+		if !frame.enumerated {
+			if err := verifyCapturedDirectory(frame.root); err != nil {
+				return nil, err
+			}
+			children, readErr := frame.root.readDir(".")
+			if readErr != nil {
+				return nil, fmt.Errorf("content: read tree directory: %w", readErr)
+			}
+			if err := verifyCapturedDirectory(frame.root); err != nil {
+				return nil, err
+			}
+			frame.children = children
+			frame.enumerated = true
+			continue
+		}
+		if frame.nextChild == len(frame.children) {
+			root := frame.root
+			frame.root = nil
+			if closeErr := root.close(); closeErr != nil {
+				return nil, fmt.Errorf("content: close captured tree directory: %w", closeErr)
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		child := frame.children[frame.nextChild]
+		frame.nextChild++
+		name := child.Name()
+		if name == "" || name == "." || name == ".." {
+			return nil, fmt.Errorf("content: invalid filesystem entry name")
+		}
+		info, statErr := frame.root.lstat(name)
+		if statErr != nil {
+			return nil, fmt.Errorf("content: inspect tree entry: %w", statErr)
+		}
+		segments := append(slices.Clone(frame.segments), name)
+		switch mode := info.Mode(); {
+		case mode.IsDir():
+			childRoot, openErr := frame.root.openRoot(name)
+			if openErr != nil {
+				return nil, fmt.Errorf("content: open tree directory: %w", openErr)
+			}
+			openedInfo, inspectErr := childRoot.lstat(".")
+			if inspectErr != nil || !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
+				_ = childRoot.close()
+				if inspectErr != nil {
+					return nil, fmt.Errorf("content: inspect opened tree directory: %w", inspectErr)
+				}
+				return nil, fmt.Errorf("content: tree directory changed while being opened")
+			}
+			entries = append(entries, treeEntry{segments: segments, kind: directoryEntry})
+			stack = append(stack, captureDirectoryFrame{root: childRoot, segments: segments})
+		case mode.IsRegular():
+			object, captureErr := r.captureTreeFile(ctx, frame.root, name, info)
+			if captureErr != nil {
+				return nil, captureErr
+			}
+			kind := fileEntry
+			if mode.Perm()&0o111 != 0 {
+				kind = executableEntry
+			}
+			entries = append(entries, treeEntry{segments: segments, kind: kind, content: object})
+		case mode&os.ModeSymlink != 0:
+			target, readErr := frame.root.readlink(name)
+			if readErr != nil {
+				return nil, fmt.Errorf("content: read tree symlink: %w", readErr)
+			}
+			entries = append(entries, treeEntry{segments: segments, kind: symlinkEntry, target: target})
+		default:
+			return nil, fmt.Errorf("content: unsupported tree entry %q with mode %v", name, mode)
+		}
+	}
+	return entries, nil
+}
+
+func verifyCapturedDirectory(root treeCaptureRoot) error {
+	current, err := root.lstat(".")
 	if err != nil {
 		return fmt.Errorf("content: inspect tree directory: %w", err)
 	}
-	if !current.IsDir() || !os.SameFile(expected, current) {
+	if !current.IsDir() {
 		return fmt.Errorf("content: tree directory changed while being captured")
 	}
 	return nil
 }
 
-func (r *Repository) captureTreeFile(ctx context.Context, filesystem treeFilesystem, name string, expected fs.FileInfo) (object Object, err error) {
-	file, err := filesystem.open(name)
+func (r *Repository) captureTreeFile(ctx context.Context, root treeCaptureRoot, name string, expected fs.FileInfo) (object Object, err error) {
+	file, err := root.open(name)
 	if err != nil {
 		return Object{}, fmt.Errorf("content: open tree file: %w", err)
 	}
@@ -314,6 +395,9 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 			err = errors.Join(err, fmt.Errorf("content: remove failed tree materialization: %w", cleanupErr))
 		}
 	}()
+	if err := verifyCreatedTreeName(filesystem, destination); err != nil {
+		return err
+	}
 
 	for _, entry := range entries {
 		if entry.kind != directoryEntry {
@@ -356,6 +440,9 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 		if err := filesystem.symlink(entry.target, name); err != nil {
 			return fmt.Errorf("content: create tree symlink: %w", err)
 		}
+		if err := verifyCreatedTreeName(filesystem, name); err != nil {
+			return err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
@@ -373,6 +460,9 @@ func createTreeDirectory(ctx context.Context, filesystem treeFilesystem, name st
 	}
 	if err := filesystem.mkdir(name, 0o700); err != nil {
 		return fmt.Errorf("content: create tree directory: %w", err)
+	}
+	if err := verifyCreatedTreeName(filesystem, name); err != nil {
+		return err
 	}
 	return nil
 }
@@ -427,6 +517,9 @@ func (r *Repository) materializeTreeFile(ctx context.Context, filesystem treeFil
 	if err := filesystem.link(temporaryName, name); err != nil {
 		return fmt.Errorf("content: publish tree file: %w", err)
 	}
+	if err := verifyCreatedTreeName(filesystem, name); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -449,6 +542,20 @@ func requireAbsentTreePath(filesystem treeFilesystem, name string) error {
 		return fmt.Errorf("content: inspect tree materialization path: %w", err)
 	}
 	return nil
+}
+
+func verifyCreatedTreeName(filesystem treeFilesystem, name string) error {
+	entries, err := filesystem.readDir(filepath.Dir(name))
+	if err != nil {
+		return fmt.Errorf("content: enumerate created tree entry parent: %w", err)
+	}
+	want := filepath.Base(name)
+	for _, entry := range entries {
+		if entry.Name() == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("content: concrete filesystem did not reproduce exact tree entry name")
 }
 
 func treeHostPath(root string, segments []string) (string, error) {

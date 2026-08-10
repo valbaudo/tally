@@ -204,6 +204,49 @@ func TestMaterializeTreeSurfacesConcreteNameCollision(t *testing.T) {
 	}
 }
 
+func TestMaterializeTreeRejectsConcreteByteNameTransformation(t *testing.T) {
+	for _, kind := range []string{"directory", "file", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			source := t.TempDir()
+			switch kind {
+			case "directory":
+				if err := os.Mkdir(filepath.Join(source, "requested"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				if err := os.WriteFile(filepath.Join(source, "requested"), []byte("file bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.WriteFile(filepath.Join(source, "target"), []byte("target bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mustSymlink(t, "target", filepath.Join(source, "requested"))
+			}
+			repository, err := NewRepository(NewMemory())
+			if err != nil {
+				t.Fatal(err)
+			}
+			tree, err := repository.CaptureTree(context.Background(), source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "transformed")
+			repository.treeFS = transformingTreeFilesystem{
+				treeFilesystem: repository.treeFilesystem(),
+				kind:           kind,
+			}
+
+			if err := repository.MaterializeTree(context.Background(), tree, destination); err == nil {
+				t.Fatal("MaterializeTree accepted a backend-transformed entry name")
+			}
+			if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination after name transformation = %v, want absent", err)
+			}
+		})
+	}
+}
+
 func TestMaterializeTreeHonorsCancellationBeforeCreation(t *testing.T) {
 	repository, err := NewRepository(NewMemory())
 	if err != nil {
@@ -229,6 +272,32 @@ func TestMaterializeTreeHonorsCancellationBeforeCreation(t *testing.T) {
 type caseFoldingTreeFilesystem struct {
 	treeFilesystem
 	destination string
+}
+
+type transformingTreeFilesystem struct {
+	treeFilesystem
+	kind string
+}
+
+func (f transformingTreeFilesystem) mkdir(name string, mode os.FileMode) error {
+	if f.kind == "directory" && filepath.Base(name) == "requested" {
+		name = filepath.Join(filepath.Dir(name), "transformed")
+	}
+	return f.treeFilesystem.mkdir(name, mode)
+}
+
+func (f transformingTreeFilesystem) link(oldname, newname string) error {
+	if f.kind == "file" && filepath.Base(newname) == "requested" {
+		newname = filepath.Join(filepath.Dir(newname), "transformed")
+	}
+	return f.treeFilesystem.link(oldname, newname)
+}
+
+func (f transformingTreeFilesystem) symlink(oldname, newname string) error {
+	if f.kind == "symlink" && filepath.Base(newname) == "requested" {
+		newname = filepath.Join(filepath.Dir(newname), "transformed")
+	}
+	return f.treeFilesystem.symlink(oldname, newname)
 }
 
 func (f caseFoldingTreeFilesystem) lstat(name string) (os.FileInfo, error) {

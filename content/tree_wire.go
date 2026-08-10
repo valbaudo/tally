@@ -226,10 +226,7 @@ func validateTreeEntries(entries []treeEntry) error {
 }
 
 func treeTargetIsAbsolute(target string) bool {
-	if path.IsAbs(target) || strings.HasPrefix(target, `\`) {
-		return true
-	}
-	return len(target) >= 2 && ((target[0] >= 'A' && target[0] <= 'Z') || (target[0] >= 'a' && target[0] <= 'z')) && target[1] == ':'
+	return path.IsAbs(target)
 }
 
 func compareTreeSegments(a, b []string) int {
