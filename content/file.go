@@ -22,7 +22,8 @@ const maxConsecutiveEmptyReads = 100
 
 // Repository manages semantic files whose immutable bytes are held by a Store.
 type Repository struct {
-	store Store
+	store  Store
+	treeFS treeFilesystem
 }
 
 type materializationTemp interface {
@@ -42,7 +43,7 @@ func NewRepository(store Store) (*Repository, error) {
 	if store == nil {
 		return nil, fmt.Errorf("content: file repository store must not be nil")
 	}
-	return &Repository{store: store}, nil
+	return &Repository{store: store, treeFS: osTreeFilesystem{}}, nil
 }
 
 // IngestFile streams source into the repository's Store and records immutable
