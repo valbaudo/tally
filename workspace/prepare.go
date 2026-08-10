@@ -20,22 +20,23 @@ import (
 
 // Environment owns all private filesystem state for one invocation.
 type Environment struct {
-	root                 string
-	workspace            string
-	manifest             Manifest
-	outputs              value.Contract
-	plans                map[string]outputPlan
-	targets              map[string]Target
-	members              map[string]*memberAllocation
-	namespaces           []outputNamespaceCapability
-	rootCapability       *pinnedInvocationRoot
-	mu                   sync.Mutex
-	closed               bool
-	namespacesClosed     bool
-	rootRemoved          bool
-	rootCleanupErr       error
-	rootCapabilityClosed bool
-	removeRoot           func(string) error
+	workspace             string
+	manifest              Manifest
+	outputs               value.Contract
+	plans                 map[string]outputPlan
+	targets               map[string]Target
+	members               map[string]*memberAllocation
+	namespaces            []outputNamespaceCapability
+	rootCapability        *pinnedInvocationRoot
+	mu                    sync.Mutex
+	closed                bool
+	namespacesClosed      bool
+	rootRemoved           bool
+	rootContentsRemoved   bool
+	rootCleanupErr        error
+	rootCapabilityClosed  bool
+	removeRootEntry       func() error
+	beforeRootEntryRemove func()
 }
 
 // Target is one writable declared file or tree output location.
@@ -84,8 +85,8 @@ func Prepare(ctx context.Context, repository *content.Repository, leaf workflow.
 	}
 	rootCapability, err := openPinnedInvocationRoot(root)
 	if err != nil {
-		if cleanupErr := removeRuntimeRoot(root); cleanupErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("workspace: remove unpinned runtime root: %w", cleanupErr))
+		if cleanupErr := os.Remove(root); cleanupErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("workspace: remove empty unpinned runtime root: %w", cleanupErr))
 		}
 		return nil, err
 	}
@@ -126,7 +127,6 @@ func Prepare(ctx context.Context, repository *content.Repository, leaf workflow.
 		return nil, err
 	}
 	environment := &Environment{
-		root:           root,
 		workspace:      working,
 		manifest:       Manifest{inputs: manifestInputs, outputs: manifestOutputs},
 		outputs:        leaf.Outputs(),
@@ -136,7 +136,7 @@ func Prepare(ctx context.Context, repository *content.Repository, leaf workflow.
 		namespaces:     namespaces,
 		rootCapability: rootCapability,
 	}
-	environment.removeRoot = func(string) error { return rootCapability.remove() }
+	environment.removeRootEntry = rootCapability.removeEntry
 	prepared = true
 	return environment, nil
 }
@@ -300,42 +300,69 @@ func (e *Environment) cleanupRuntimeRoot() error {
 		e.rootCleanupErr = fmt.Errorf("workspace: runtime root cleanup integrity: missing retained identity")
 		return e.rootCleanupErr
 	}
-	present, inspectErr := e.rootCapability.inspect()
+	present, inspectErr := e.rootCapability.inspectEntry()
 	if inspectErr != nil {
-		if errors.Is(inspectErr, errInvocationRootIdentityChanged) {
-			e.rootCleanupErr = fmt.Errorf("workspace: runtime root cleanup integrity: %w", inspectErr)
-			return e.rootCleanupErr
-		}
-		return fmt.Errorf("workspace: inspect runtime root for cleanup: %w", inspectErr)
+		return e.runtimeRootInspectionError("inspect runtime root for cleanup", inspectErr)
 	}
 	if !present {
 		e.rootRemoved = true
 		return nil
 	}
-	remove := e.removeRoot
-	if remove == nil {
-		remove = func(string) error { return e.rootCapability.remove() }
-	}
-	if removeErr := remove(e.root); removeErr != nil {
-		if errors.Is(removeErr, errInvocationRootIdentityChanged) {
-			e.rootCleanupErr = fmt.Errorf("workspace: runtime root cleanup integrity: %w", removeErr)
-			return e.rootCleanupErr
+	if !e.rootContentsRemoved {
+		if e.rootCapability.rootClosed {
+			if reopenErr := e.rootCapability.reopenRoot(); reopenErr != nil {
+				return e.runtimeRootInspectionError("reopen runtime root for cleanup", reopenErr)
+			}
 		}
-		return fmt.Errorf("workspace: remove runtime root: %w", removeErr)
+		if contentsErr := e.rootCapability.removeContents(); contentsErr != nil {
+			return e.runtimeRootInspectionError("remove runtime root contents", contentsErr)
+		}
+		e.rootContentsRemoved = true
 	}
-	present, inspectErr = e.rootCapability.inspect()
+	if !e.rootCapability.rootClosed {
+		if closeErr := e.rootCapability.closeRoot(); closeErr != nil {
+			return fmt.Errorf("workspace: close runtime root before entry removal: %w", closeErr)
+		}
+	}
+	present, inspectErr = e.rootCapability.inspectEntry()
 	if inspectErr != nil {
-		if errors.Is(inspectErr, errInvocationRootIdentityChanged) {
-			e.rootCleanupErr = fmt.Errorf("workspace: runtime root cleanup integrity: %w", inspectErr)
-			return e.rootCleanupErr
-		}
-		return fmt.Errorf("workspace: verify runtime root removal: %w", inspectErr)
+		return e.runtimeRootInspectionError("verify runtime root identity before entry removal", inspectErr)
 	}
-	if present {
-		return fmt.Errorf("workspace: remove runtime root: cleanup completed without removing the retained directory")
+	if !present {
+		e.rootRemoved = true
+		return nil
 	}
-	e.rootRemoved = true
-	return nil
+	if beforeRemove := e.beforeRootEntryRemove; beforeRemove != nil {
+		e.beforeRootEntryRemove = nil
+		beforeRemove()
+	}
+	remove := e.removeRootEntry
+	if remove == nil {
+		remove = e.rootCapability.removeEntry
+	}
+	removeErr := remove()
+	present, inspectErr = e.rootCapability.inspectEntry()
+	if inspectErr != nil {
+		return e.runtimeRootInspectionError("verify runtime root entry removal", inspectErr)
+	}
+	if !present {
+		e.rootRemoved = true
+		return nil
+	}
+	if removeErr != nil {
+		e.rootContentsRemoved = false
+		return fmt.Errorf("workspace: remove empty runtime root entry: %w", removeErr)
+	}
+	e.rootContentsRemoved = false
+	return fmt.Errorf("workspace: remove empty runtime root entry: cleanup completed without removing the retained directory")
+}
+
+func (e *Environment) runtimeRootInspectionError(action string, err error) error {
+	if errors.Is(err, errInvocationRootIdentityChanged) {
+		e.rootCleanupErr = fmt.Errorf("workspace: runtime root cleanup integrity: %w", err)
+		return e.rootCleanupErr
+	}
+	return fmt.Errorf("workspace: %s: %w", action, err)
 }
 
 type inputTask struct {
@@ -557,27 +584,6 @@ func bestEffortReadOnly(root string) {
 	}
 }
 
-func removeRuntimeRoot(root string) error {
-	if root == "" {
-		return nil
-	}
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if entry.IsDir() {
-			_ = os.Chmod(path, 0o700)
-		} else {
-			_ = os.Chmod(path, 0o600)
-		}
-		return nil
-	})
-	return os.RemoveAll(root)
-}
-
 var errInvocationRootIdentityChanged = errors.New("runtime root path identity changed")
 
 // pinnedInvocationRoot retains the directory allocated by Prepare and its
@@ -620,7 +626,7 @@ func openPinnedInvocationRoot(location string) (*pinnedInvocationRoot, error) {
 	return &pinnedInvocationRoot{parent: parent, root: root, name: name, identity: identity}, nil
 }
 
-func (r *pinnedInvocationRoot) inspect() (bool, error) {
+func (r *pinnedInvocationRoot) inspectEntry() (bool, error) {
 	if r == nil || r.parent == nil || r.parentClosed {
 		return false, fmt.Errorf("workspace: runtime root parent capability is closed")
 	}
@@ -634,6 +640,14 @@ func (r *pinnedInvocationRoot) inspect() (bool, error) {
 	if !info.IsDir() || !os.SameFile(r.identity, info) {
 		return false, errInvocationRootIdentityChanged
 	}
+	return true, nil
+}
+
+func (r *pinnedInvocationRoot) inspectRoot() (bool, error) {
+	present, err := r.inspectEntry()
+	if err != nil || !present {
+		return present, err
+	}
 	if r.root == nil || r.rootClosed {
 		return false, fmt.Errorf("workspace: runtime root capability is closed")
 	}
@@ -642,13 +656,34 @@ func (r *pinnedInvocationRoot) inspect() (bool, error) {
 		return false, err
 	}
 	if !opened.IsDir() || !os.SameFile(r.identity, opened) {
-		return false, fmt.Errorf("workspace: pinned runtime root identity changed")
+		return false, fmt.Errorf("workspace: pinned runtime root identity changed: %w", errInvocationRootIdentityChanged)
 	}
 	return true, nil
 }
 
-func (r *pinnedInvocationRoot) remove() error {
-	present, err := r.inspect()
+func (r *pinnedInvocationRoot) reopenRoot() error {
+	present, err := r.inspectEntry()
+	if err != nil || !present {
+		return err
+	}
+	root, err := r.parent.OpenRoot(r.name)
+	if err != nil {
+		return err
+	}
+	opened, err := root.Lstat(".")
+	if err != nil {
+		return errors.Join(err, root.Close())
+	}
+	if !opened.IsDir() || !os.SameFile(r.identity, opened) {
+		return errors.Join(errInvocationRootIdentityChanged, root.Close())
+	}
+	r.root = root
+	r.rootClosed = false
+	return nil
+}
+
+func (r *pinnedInvocationRoot) removeContents() error {
+	present, err := r.inspectRoot()
 	if err != nil || !present {
 		return err
 	}
@@ -663,11 +698,48 @@ func (r *pinnedInvocationRoot) remove() error {
 		}
 		return nil
 	})
-	present, err = r.inspect()
-	if err != nil || !present {
+	entries, err := fs.ReadDir(r.root.FS(), ".")
+	if err != nil {
 		return err
 	}
-	return r.parent.RemoveAll(r.name)
+	var removeErr error
+	for _, entry := range entries {
+		if err := r.root.RemoveAll(entry.Name()); err != nil {
+			removeErr = errors.Join(removeErr, fmt.Errorf("remove runtime root child: %w", err))
+		}
+	}
+	if removeErr != nil {
+		return removeErr
+	}
+	remaining, err := fs.ReadDir(r.root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("runtime root contents changed during cleanup")
+	}
+	return nil
+}
+
+func (r *pinnedInvocationRoot) removeEntry() error {
+	if r == nil || r.parent == nil || r.parentClosed {
+		return fmt.Errorf("workspace: runtime root parent capability is closed")
+	}
+	if !r.rootClosed {
+		return fmt.Errorf("workspace: runtime root capability must be closed before entry removal")
+	}
+	return r.parent.Remove(r.name)
+}
+
+func (r *pinnedInvocationRoot) closeRoot() error {
+	if r == nil || r.root == nil || r.rootClosed {
+		return nil
+	}
+	if err := r.root.Close(); err != nil {
+		return err
+	}
+	r.rootClosed = true
+	return nil
 }
 
 func (r *pinnedInvocationRoot) close() error {
@@ -675,12 +747,8 @@ func (r *pinnedInvocationRoot) close() error {
 		return nil
 	}
 	var err error
-	if r.root != nil && !r.rootClosed {
-		if closeErr := r.root.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		} else {
-			r.rootClosed = true
-		}
+	if closeErr := r.closeRoot(); closeErr != nil {
+		err = errors.Join(err, closeErr)
 	}
 	if r.parent != nil && !r.parentClosed {
 		if closeErr := r.parent.Close(); closeErr != nil {
@@ -693,11 +761,21 @@ func (r *pinnedInvocationRoot) close() error {
 }
 
 func removePinnedInvocationRoot(root *pinnedInvocationRoot) error {
-	present, err := root.inspect()
+	present, err := root.inspectRoot()
 	if err != nil || !present {
 		return err
 	}
-	return root.remove()
+	if err := root.removeContents(); err != nil {
+		return err
+	}
+	if err := root.closeRoot(); err != nil {
+		return err
+	}
+	present, err = root.inspectEntry()
+	if err != nil || !present {
+		return err
+	}
+	return root.removeEntry()
 }
 
 type schemaSegmentKind uint8

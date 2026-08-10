@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,12 +64,13 @@ func TestCloseRetriesTransientRootRemovalWhileOutputsStayClosed(t *testing.T) {
 	t.Cleanup(func() { _ = environment.Close() })
 	root := filepath.Dir(environment.Workspace())
 	removeCalls := 0
-	environment.removeRoot = func(path string) error {
+	realRemove := environment.removeRootEntry
+	environment.removeRootEntry = func() error {
 		removeCalls++
 		if removeCalls == 1 {
 			return errors.New("injected transient root removal failure")
 		}
-		return removeRuntimeRoot(path)
+		return realRemove()
 	}
 
 	if err := environment.Close(); err == nil || !strings.Contains(err.Error(), "injected transient root removal failure") {
@@ -103,13 +105,13 @@ func TestCloseRejectsReusedRuntimeRootPathWithoutTouchingReplacement(t *testing.
 		_ = os.RemoveAll(movedRoot)
 	})
 	removeCalls := 0
-	realRemove := environment.removeRoot
-	environment.removeRoot = func(path string) error {
+	realRemove := environment.removeRootEntry
+	environment.removeRootEntry = func() error {
 		removeCalls++
 		if removeCalls == 1 {
 			return errors.New("injected transient root removal failure")
 		}
-		return realRemove(path)
+		return realRemove()
 	}
 
 	if err := environment.Close(); err == nil || !strings.Contains(err.Error(), "injected transient root removal failure") {
@@ -145,6 +147,60 @@ func TestCloseRejectsReusedRuntimeRootPathWithoutTouchingReplacement(t *testing.
 	}
 	if removeCalls != 1 {
 		t.Fatalf("root removal calls = %d, want only the initial failed attempt", removeCalls)
+	}
+}
+
+func TestCloseDoesNotRecursivelyDeleteReplacementSwappedBeforeFinalRemove(t *testing.T) {
+	environment := prepareDynamicTreeEnvironment(t)
+	root := filepath.Dir(environment.Workspace())
+	movedRoot := root + ".moved"
+	t.Cleanup(func() {
+		_ = os.RemoveAll(root)
+		_ = os.RemoveAll(movedRoot)
+	})
+	const sentinelContents = "replacement must survive final removal"
+	sentinel := filepath.Join(root, "replacement-sentinel")
+	var swapErr error
+	swapCalls := 0
+	environment.beforeRootEntryRemove = func() {
+		swapCalls++
+		if err := os.Rename(root, movedRoot); err != nil {
+			swapErr = errors.Join(swapErr, fmt.Errorf("move original runtime root: %w", err))
+			return
+		}
+		if err := os.Mkdir(root, 0o700); err != nil {
+			swapErr = errors.Join(swapErr, fmt.Errorf("create replacement runtime root: %w", err))
+			return
+		}
+		if err := os.WriteFile(sentinel, []byte(sentinelContents), 0o600); err != nil {
+			swapErr = errors.Join(swapErr, fmt.Errorf("write replacement sentinel: %w", err))
+		}
+	}
+
+	closeErr := environment.Close()
+	if swapErr != nil {
+		t.Fatal(swapErr)
+	}
+	movedEntries, movedErr := os.ReadDir(movedRoot)
+	if movedErr != nil || len(movedEntries) != 0 {
+		t.Fatalf("original runtime root at final removal seam = (%v, %v), want empty directory", movedEntries, movedErr)
+	}
+	contents, readErr := os.ReadFile(sentinel)
+	if readErr != nil || string(contents) != sentinelContents {
+		t.Fatalf("replacement sentinel after final removal gap = (%q, %v), want preserved bytes", contents, readErr)
+	}
+	if closeErr == nil || !strings.Contains(closeErr.Error(), "cleanup integrity") || !strings.Contains(closeErr.Error(), "identity changed") {
+		t.Fatalf("Close error = %v, want runtime-root cleanup integrity error", closeErr)
+	}
+	if err := environment.Close(); err == nil || !strings.Contains(err.Error(), "cleanup integrity") {
+		t.Fatalf("repeated Close error = %v, want retained cleanup integrity error", err)
+	}
+	contents, readErr = os.ReadFile(sentinel)
+	if readErr != nil || string(contents) != sentinelContents {
+		t.Fatalf("replacement sentinel after repeated Close = (%q, %v), want preserved bytes", contents, readErr)
+	}
+	if swapCalls != 1 {
+		t.Fatalf("final removal seam calls = %d, want exactly one", swapCalls)
 	}
 }
 
