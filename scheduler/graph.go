@@ -20,14 +20,14 @@ type activeNode struct {
 
 func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph, input value.Value) Result {
 	if err := graph.Inputs().Validate(input); err != nil {
-		return resultFrom(failed(path, ContractFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(failed(path, ContractFailure, err), nil))
 	}
 	instance, err := NewInstance(path)
 	if err != nil {
-		return resultFrom(failed(path, MechanicalFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(failed(path, MechanicalFailure, err), nil))
 	}
 	if err := r.scheduler.boundary.Enter(ctx, instance); err != nil {
-		return resultFrom(failed(path, MechanicalFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 	}
 	state, err := applyGraphInputs(graph, input)
 	if err != nil {
@@ -116,7 +116,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 					return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, outputErr), nil))
 				}
 				if commitErr := r.scheduler.boundary.Commit(ctx, instance, output); commitErr != nil {
-					return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, commitErr), nil))
+					return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, commitErr), nil))
 				}
 				result, constructErr := NewSucceededResult(output)
 				if constructErr != nil {
@@ -202,10 +202,11 @@ func resultDiagnostics(result Result) []diagnostic {
 }
 
 func (r *runState) settle(ctx context.Context, instance Instance, result Result) Result {
+	result = r.withExternalCancellation(result)
 	if err := r.scheduler.boundary.Settle(context.WithoutCancel(ctx), instance, result); err != nil {
 		causes := resultDiagnostics(result)
 		causes = append(causes, failed(instance.Path(), MechanicalFailure, err))
 		return normalize(causes, r.control.externalError())
 	}
-	return result
+	return r.withExternalCancellation(result)
 }

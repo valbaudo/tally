@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,6 +268,87 @@ func TestFailFastCancelsSiblingsWaitsGraceForceStopsAndQuiesces(t *testing.T) {
 	}
 }
 
+func TestFailFastForceStopErrorDoesNotReleaseQuiescenceOrCapacity(t *testing.T) {
+	empty := value.EmptyContract()
+	definition := testDefinition(t, workflow.GraphDraft{Inputs: empty, Outputs: empty, Nodes: []workflow.NodeDraft{testLeaf("work", empty, empty)}})
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	runner.forceErrors["work"] = errors.New("force request failed")
+	boundary := &forceStopObservationBoundary{base: newRecordingBoundary(trace), settled: make(chan struct{})}
+	scheduler, err := New(runner, boundary, Policy{Capacity: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRun, err := scheduler.Start(context.Background(), definition, emptyValue(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started := runner.waitStarts(t, 1); len(started) != 1 || started[0] != "work" {
+		t.Fatalf("first starts = %v", started)
+	}
+	firstLeaf := runner.execution(t, "work")
+	secondRun, err := scheduler.Start(context.Background(), definition, emptyValue(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstResult := make(chan Result, 1)
+	go func() { firstResult <- firstRun.Wait() }()
+	firstRun.ForceStop()
+	waitClosed(t, firstLeaf.forceObserved, "backend force-stop was not attempted")
+
+	var first Result
+	waitedForDone := false
+	select {
+	case <-firstLeaf.doneAfterForce:
+		waitedForDone = true
+	case <-boundary.settled:
+		first = <-firstResult
+		if started := runner.waitStarts(t, 1); len(started) != 1 || started[0] != "work" {
+			t.Fatalf("premature second starts = %v", started)
+		}
+	}
+
+	firstLeaf.complete(mustLeafCancelled(context.Canceled))
+	if waitedForDone {
+		first = <-firstResult
+		if started := runner.waitStarts(t, 1); len(started) != 1 || started[0] != "work" {
+			t.Fatalf("second starts = %v", started)
+		}
+	}
+	secondLeaf := runner.execution(t, "work")
+	secondLeaf.complete(mustLeafSuccess(t, emptyValue(t)))
+	second := waitResult(t, secondRun)
+
+	if !waitedForDone {
+		t.Error("Wait returned before the failed force-stop execution closed Done")
+		t.Error("global capacity was reused before the failed force-stop execution closed Done")
+	}
+	requireStatus(t, first, Cancelled)
+	requireStatus(t, second, Succeeded)
+}
+
+type forceStopObservationBoundary struct {
+	base       *recordingBoundary
+	settled    chan struct{}
+	settleOnce sync.Once
+}
+
+func (b *forceStopObservationBoundary) Enter(ctx context.Context, instance Instance) error {
+	return b.base.Enter(ctx, instance)
+}
+
+func (b *forceStopObservationBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
+	return b.base.Commit(ctx, instance, output)
+}
+
+func (b *forceStopObservationBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
+	if instanceName(instance) == "work" {
+		b.settleOnce.Do(func() { close(b.settled) })
+	}
+	return b.base.Settle(ctx, instance, result)
+}
+
 func TestExternalCancelWinsIntrinsicFailure(t *testing.T) {
 	empty := value.EmptyContract()
 	definition := testDefinition(t, workflow.GraphDraft{Inputs: empty, Outputs: empty, Nodes: []workflow.NodeDraft{testLeaf("failure", empty, empty), testLeaf("stuck", empty, empty)}})
@@ -284,6 +366,116 @@ func TestExternalCancelWinsIntrinsicFailure(t *testing.T) {
 	if !errors.Is(primary.Error(), context.Canceled) {
 		t.Fatalf("primary = %#v", primary)
 	}
+}
+
+func TestExternalCancelWinsDirectRootTerminalPaths(t *testing.T) {
+	for _, mode := range []rootCancellationMode{rootEnterCancellation, rootCommitCancellation, rootOutputSettlementCancellation} {
+		t.Run(string(mode), func(t *testing.T) {
+			trace := &eventTrace{}
+			boundary := &rootCancellationBoundary{
+				mode: mode, blocked: make(chan struct{}), release: make(chan struct{}), base: newRecordingBoundary(trace),
+			}
+			runner := newControlledRunner(trace)
+			definition, input := rootCancellationDefinition(t, mode)
+			scheduler, err := New(runner, boundary, Policy{Capacity: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution, err := scheduler.Start(context.Background(), definition, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitClosed(t, boundary.blocked, "root terminal path did not block")
+			execution.Cancel()
+			close(boundary.release)
+			result := waitResult(t, execution)
+			if !result.Valid() || result.Status() != Cancelled {
+				t.Fatalf("status = %v (valid %v), want %v", result.Status(), result.Valid(), Cancelled)
+			}
+			primary, _ := result.Primary()
+			if !errors.Is(primary.Error(), context.Canceled) {
+				t.Fatalf("primary = %#v", primary)
+			}
+			if mode == rootCommitCancellation {
+				settled := false
+				for _, event := range trace.snapshot() {
+					if event.kind == traceSettle && event.child == "root" {
+						settled = true
+						if event.status != Cancelled {
+							t.Fatalf("root settled as %v instead of its externally normalized outcome", event.status)
+						}
+					}
+				}
+				if !settled {
+					t.Fatal("root did not publish its normalized settlement")
+				}
+			}
+		})
+	}
+}
+
+type rootCancellationMode string
+
+const (
+	rootEnterCancellation            rootCancellationMode = "enter"
+	rootCommitCancellation           rootCancellationMode = "commit"
+	rootOutputSettlementCancellation rootCancellationMode = "output settlement"
+)
+
+type rootCancellationBoundary struct {
+	mode    rootCancellationMode
+	blocked chan struct{}
+	release chan struct{}
+	base    *recordingBoundary
+	once    sync.Once
+}
+
+func (b *rootCancellationBoundary) Enter(ctx context.Context, instance Instance) error {
+	if b.mode != rootEnterCancellation || instanceName(instance) != "root" {
+		return b.base.Enter(ctx, instance)
+	}
+	b.signalBlocked()
+	<-ctx.Done()
+	return errors.New("commit failed independently after cancellation")
+}
+
+func (b *rootCancellationBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
+	if b.mode != rootCommitCancellation || instanceName(instance) != "root" {
+		return b.base.Commit(ctx, instance, output)
+	}
+	b.signalBlocked()
+	<-ctx.Done()
+	return errors.New("commit failed independently after cancellation")
+}
+
+func (b *rootCancellationBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
+	if b.mode == rootOutputSettlementCancellation && instanceName(instance) == "root" {
+		b.signalBlocked()
+		<-b.release
+	}
+	return b.base.Settle(ctx, instance, result)
+}
+
+func (b *rootCancellationBoundary) signalBlocked() {
+	b.once.Do(func() { close(b.blocked) })
+}
+
+func rootCancellationDefinition(t *testing.T, mode rootCancellationMode) (workflow.Definition, value.Value) {
+	t.Helper()
+	if mode != rootOutputSettlementCancellation {
+		empty := value.EmptyContract()
+		return testDefinition(t, workflow.GraphDraft{Inputs: empty, Outputs: empty}), emptyValue(t)
+	}
+	inputs := testContract(t, testRequired(t, "source", value.Any()))
+	outputs := testContract(t, testRequired(t, "target", value.String()))
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: inputs, Outputs: outputs,
+		Edges: []workflow.EdgeDraft{{
+			From: workflow.EndpointDraft{Kind: workflow.Boundary}, To: workflow.EndpointDraft{Kind: workflow.Boundary},
+			Bindings: []workflow.BindingDraft{{From: []string{"source"}, To: "target"}},
+		}},
+	})
+	return definition, testValue(t, map[string]value.Value{"source": value.NewBoolean(true)})
 }
 
 func TestExternalForceStopImmediatelyStopsActiveLeaves(t *testing.T) {

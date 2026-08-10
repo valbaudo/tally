@@ -100,3 +100,18 @@ func (r *runState) runNested(ctx context.Context, fn func(context.Context) Resul
 	}()
 	return done
 }
+
+func cancellationAwareDiagnostic(ctx context.Context, path Path, kind FailureKind, err error) diagnostic {
+	if ctx != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return parentCancelled(path)
+	}
+	return failed(path, kind, err)
+}
+
+func (r *runState) withExternalCancellation(result Result) Result {
+	external := r.control.externalError()
+	if external == nil || result.Status() == Succeeded {
+		return result
+	}
+	return normalize(resultDiagnostics(result), external)
+}

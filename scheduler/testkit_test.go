@@ -116,6 +116,7 @@ type controlledRunner struct {
 	mu           sync.Mutex
 	executions   map[string]*controlledLeafExecution
 	startErrors  map[string]error
+	forceErrors  map[string]error
 	cooperative  map[string]bool
 	started      chan string
 	startCount   int
@@ -128,6 +129,7 @@ func newControlledRunner(trace *eventTrace) *controlledRunner {
 		trace:       trace,
 		executions:  make(map[string]*controlledLeafExecution),
 		startErrors: make(map[string]error),
+		forceErrors: make(map[string]error),
 		cooperative: make(map[string]bool),
 		started:     make(chan string, 64),
 	}
@@ -142,8 +144,8 @@ func (r *controlledRunner) Start(ctx context.Context, request LeafRequest) (Leaf
 	}
 	execution := &controlledLeafExecution{
 		name: name, trace: r.trace, done: make(chan LeafCompletion, 1),
-		cancelObserved: make(chan struct{}), forceObserved: make(chan struct{}),
-		onQuiescent: r.quiescent, input: request.Input(),
+		cancelObserved: make(chan struct{}), forceObserved: make(chan struct{}), doneAfterForce: make(chan struct{}),
+		onQuiescent: r.quiescent, input: request.Input(), forceError: r.forceErrors[name],
 	}
 	r.executions[name] = execution
 	r.startCount++
@@ -223,14 +225,18 @@ type controlledLeafExecution struct {
 	done           chan LeafCompletion
 	cancelObserved chan struct{}
 	forceObserved  chan struct{}
+	doneAfterForce chan struct{}
 	onQuiescent    func()
 
-	completeOnce sync.Once
-	cancelOnce   sync.Once
-	forceOnce    sync.Once
-	mu           sync.Mutex
-	input        value.Value
-	forceAt      time.Time
+	completeOnce  sync.Once
+	cancelOnce    sync.Once
+	forceOnce     sync.Once
+	doneAfterOnce sync.Once
+	mu            sync.Mutex
+	input         value.Value
+	forceAt       time.Time
+	forceError    error
+	forceReturned bool
 }
 
 // completionOnForcePathRunner makes the completion channel become ready only
@@ -298,18 +304,29 @@ func (e *completionOnForcePathExecution) wasForced() bool {
 	return e.forced
 }
 
-func (e *controlledLeafExecution) Done() <-chan LeafCompletion { return e.done }
+func (e *controlledLeafExecution) Done() <-chan LeafCompletion {
+	e.mu.Lock()
+	forceReturned := e.forceReturned
+	e.mu.Unlock()
+	if forceReturned {
+		e.doneAfterOnce.Do(func() { close(e.doneAfterForce) })
+	}
+	return e.done
+}
 
 func (e *controlledLeafExecution) ForceStop() error {
 	e.forceOnce.Do(func() {
 		e.mu.Lock()
 		e.forceAt = time.Now()
+		e.forceReturned = true
 		e.mu.Unlock()
 		e.trace.record(traceEvent{kind: traceForceStop, child: e.name})
 		close(e.forceObserved)
-		e.completeOnce.Do(func() { e.onQuiescent() })
+		if e.forceError == nil {
+			e.completeOnce.Do(func() { e.onQuiescent() })
+		}
 	})
-	return nil
+	return e.forceError
 }
 
 func (e *controlledLeafExecution) complete(completion LeafCompletion) {

@@ -19,7 +19,7 @@ func (r *runState) runLeaf(ctx context.Context, path Path, leaf workflow.Leaf, i
 		return resultFrom(failed(path, MechanicalFailure, err), nil)
 	}
 	if err := r.scheduler.boundary.Enter(ctx, instance); err != nil {
-		return resultFrom(failed(path, MechanicalFailure, err), nil)
+		return resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil)
 	}
 
 	select {
@@ -42,7 +42,7 @@ func (r *runState) runLeaf(ctx context.Context, path Path, leaf workflow.Leaf, i
 	}
 	execution, err := r.scheduler.runner.Start(leafContext, request)
 	if err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
+		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 	}
 	if nilInterface(execution) || execution.Done() == nil {
 		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("leaf runner returned an invalid execution")), nil))
@@ -81,7 +81,11 @@ func (r *runState) forceLeaf(ctx context.Context, instance Instance, leaf workfl
 		return r.completeLeaf(ctx, instance, leaf, completion, ok)
 	}
 	if err := execution.ForceStop(); err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(instance.Path(), MechanicalFailure, fmt.Errorf("force stop leaf: %w", err)), nil))
+		completion, channelOpen := <-execution.Done()
+		result := r.completeLeaf(ctx, instance, leaf, completion, channelOpen)
+		consequence := failed(instance.Path(), MechanicalFailure, fmt.Errorf("force stop leaf: %w", err))
+		consequence.parentCancelled = true
+		return appendSecondaryConsequence(result, consequence)
 	}
 	return r.settle(ctx, instance, resultFrom(parentCancelled(instance.Path()), nil))
 }
@@ -110,7 +114,7 @@ func (r *runState) completeLeaf(ctx context.Context, instance Instance, leaf wor
 			return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, err), nil))
 		}
 		if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-			return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
+			return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 		}
 		result, err := NewSucceededResult(output)
 		if err != nil {
@@ -138,7 +142,7 @@ func (r *runState) runGate(ctx context.Context, path Path, leaf workflow.Leaf, i
 		return resultFrom(failed(path, MechanicalFailure, err), nil)
 	}
 	if err := r.scheduler.boundary.Enter(ctx, instance); err != nil {
-		return resultFrom(failed(path, MechanicalFailure, err), nil)
+		return resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil)
 	}
 	if ctx.Err() != nil {
 		return r.settle(ctx, instance, resultFrom(parentCancelled(path), nil))
@@ -163,11 +167,20 @@ func (r *runState) runGate(ctx context.Context, path Path, leaf workflow.Leaf, i
 		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
 	}
 	if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
+		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 	}
 	result, err := NewSucceededResult(output)
 	if err != nil {
 		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
 	}
+	return result
+}
+
+func appendSecondaryConsequence(result Result, consequence diagnostic) Result {
+	if result.Status() == Succeeded || !consequence.Valid() {
+		return result
+	}
+	result.secondary = append(result.Secondary(), consequence)
+	sortDiagnostics(result.secondary)
 	return result
 }
