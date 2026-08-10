@@ -362,8 +362,11 @@ The design is complete when:
 ## Implementation Evidence — 2026-08-11
 
 Task 9 conformance is captured by the implementation range
-`7dfe848b3d60ee688dcdc0694ebdd5f1e64a8db5..HEAD` (ending at
-`test(scheduler): prove structured control conformance`). The Prestige-shaped
+`7dfe848b3d60ee688dcdc0694ebdd5f1e64a8db5..c8245169bcebb7b8c26cb810a033850baa1e51df`.
+The original conformance commit is
+`92cde7d574a066a6513c3bfcdcab2fa0ad78e496`; the endpoint is the focused
+conformance-hardening commit `c8245169bcebb7b8c26cb810a033850baa1e51df`.
+The Prestige-shaped
 trace, deterministic arbitration/cancellation permutations, deferred edge
 matrices, and 50,000-depth/50,000-item finite-execution subprocesses were
 verified with:
