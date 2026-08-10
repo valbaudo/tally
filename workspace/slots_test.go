@@ -229,6 +229,47 @@ func TestManifestSlotLayoutIsDeterministicAcrossFreshEnvironments(t *testing.T) 
 	}
 }
 
+func TestSlotsRejectReplacedDynamicNamespaceWithoutCreatingOutsideRoot(t *testing.T) {
+	fileType, err := value.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := value.List(fileType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs := mustContract(t, mustField(t, "files", files))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), outputs, nil, nil)
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment, err := workspace.Prepare(context.Background(), repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	namespace := environment.Manifest().Outputs()[0].Location()
+	displaced := namespace + ".displaced"
+	outside := t.TempDir()
+	if err := os.Rename(namespace, displaced); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, namespace); err != nil {
+		t.Skipf("symlink replacement is unavailable: %v", err)
+	}
+
+	if target, err := environment.Output(value.Path{}.Field("files").ListIndex(0)); err == nil {
+		t.Fatalf("Output accepted a replaced namespace and returned %q", target.Location())
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Fatalf("outside directory after rejected allocation = (%v, %v), want empty", entries, err)
+	}
+	if entries, err := os.ReadDir(displaced); err != nil || len(entries) != 0 {
+		t.Fatalf("pinned namespace after rejected replacement = (%v, %v), want empty", entries, err)
+	}
+}
+
 func relativeInputs(manifest workspace.Manifest) []string {
 	records := manifest.Inputs()
 	result := make([]string, len(records))

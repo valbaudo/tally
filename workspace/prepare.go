@@ -20,15 +20,19 @@ import (
 
 // Environment owns all private filesystem state for one invocation.
 type Environment struct {
-	root      string
-	workspace string
-	manifest  Manifest
-	outputs   value.Contract
-	plans     map[string]outputPlan
-	targets   map[string]Target
-	members   map[string]string
-	mu        sync.Mutex
-	closed    bool
+	root             string
+	workspace        string
+	manifest         Manifest
+	outputs          value.Contract
+	plans            map[string]outputPlan
+	targets          map[string]Target
+	members          map[string]*memberAllocation
+	namespaces       []outputNamespaceCapability
+	mu               sync.Mutex
+	closed           bool
+	namespacesClosed bool
+	rootRemoved      bool
+	removeRoot       func(string) error
 }
 
 // Target is one writable declared file or tree output location.
@@ -104,15 +108,21 @@ func Prepare(ctx context.Context, repository *content.Repository, leaf workflow.
 			return nil, fmt.Errorf("workspace: create working directory: %w", err)
 		}
 	}
-	manifestOutputs, plans, targets, err := prepareOutputs(ctx, leaf.Outputs(), leaf.PublishWorkspace(), outputRoot)
+	manifestOutputs, plans, targets, namespaces, err := prepareOutputs(ctx, leaf.Outputs(), leaf.PublishWorkspace(), outputRoot)
 	if err != nil {
 		return nil, err
 	}
 	prepared = true
 	return &Environment{
-		root: root, workspace: working,
-		manifest: Manifest{inputs: manifestInputs, outputs: manifestOutputs},
-		outputs:  leaf.Outputs(), plans: plans, targets: targets, members: make(map[string]string),
+		root:       root,
+		workspace:  working,
+		manifest:   Manifest{inputs: manifestInputs, outputs: manifestOutputs},
+		outputs:    leaf.Outputs(),
+		plans:      plans,
+		targets:    targets,
+		members:    make(map[string]*memberAllocation),
+		namespaces: namespaces,
+		removeRoot: removeRuntimeRoot,
 	}, nil
 }
 
@@ -163,26 +173,40 @@ func (e *Environment) Output(path value.Path) (Target, error) {
 		return Target{}, fmt.Errorf("workspace: static output target is unavailable")
 	}
 	memberID := pathSlotIdentity("dawn.workspace.output.member/1", concrete)
-	physicalIdentity := plan.location + "\x00" + memberID
+	physicalIdentity := plan.identity + "\x00" + memberID
 	if prior, exists := e.members[physicalIdentity]; exists {
-		if prior != key {
+		if prior.concrete != key {
 			return Target{}, fmt.Errorf("workspace: internal dynamic output slot identity collision")
 		}
-		return Target{}, fmt.Errorf("workspace: duplicate dynamic output slot identity")
-	}
-	e.members[physicalIdentity] = key
-	memberRoot := filepath.Join(plan.location, memberID)
-	if err := os.Mkdir(memberRoot, 0o700); err != nil {
-		delete(e.members, physicalIdentity)
-		return Target{}, fmt.Errorf("workspace: create dynamic output member: %w", err)
-	}
-	targetPath := filepath.Join(memberRoot, "value")
-	if plan.kind == value.TreeKind {
-		if err := os.Mkdir(targetPath, 0o700); err != nil {
-			delete(e.members, physicalIdentity)
-			_ = os.RemoveAll(memberRoot)
-			return Target{}, fmt.Errorf("workspace: create dynamic tree output target: %w", err)
+		if prior.failure == nil || !prior.cleanupPending {
+			return Target{}, fmt.Errorf("workspace: duplicate dynamic output slot identity")
 		}
+		if cleanupErr := plan.namespace.removeMember(prior.memberID); cleanupErr != nil {
+			return Target{}, errors.Join(prior.failure, fmt.Errorf("workspace: retry dynamic output member cleanup: %w", cleanupErr))
+		}
+		delete(e.members, physicalIdentity)
+	}
+	allocation := &memberAllocation{concrete: key, memberID: memberID}
+	e.members[physicalIdentity] = allocation
+	memberRoot, created, err := plan.namespace.createMemberRoot(memberID)
+	if err != nil {
+		return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, created, fmt.Errorf("workspace: create dynamic output member: %w", err))
+	}
+	if !created || memberRoot == nil {
+		return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, created, fmt.Errorf("workspace: dynamic output member creation returned no directory"))
+	}
+	targetPath := filepath.Join(plan.location, memberID, "value")
+	if plan.kind == value.TreeKind {
+		if err := memberRoot.mkdir("value", 0o700); err != nil {
+			cause := errors.Join(fmt.Errorf("workspace: create dynamic tree output target: %w", err), memberRoot.close())
+			return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, true, cause)
+		}
+	}
+	if err := memberRoot.close(); err != nil {
+		return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, true, fmt.Errorf("workspace: close dynamic output member: %w", err))
+	}
+	if err := plan.namespace.verify(); err != nil {
+		return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, true, fmt.Errorf("workspace: verify dynamic output namespace: %w", err))
 	}
 	target := Target{
 		valuePath: cloneValuePath(path), kind: plan.kind, location: targetPath,
@@ -192,6 +216,27 @@ func (e *Environment) Output(path value.Path) (Target, error) {
 	return target, nil
 }
 
+type memberAllocation struct {
+	concrete       string
+	memberID       string
+	failure        error
+	cleanupPending bool
+}
+
+func (e *Environment) failDynamicMember(plan outputPlan, physicalIdentity string, allocation *memberAllocation, created bool, cause error) error {
+	allocation.failure = cause
+	if !created {
+		delete(e.members, physicalIdentity)
+		return cause
+	}
+	if cleanupErr := plan.namespace.removeMember(allocation.memberID); cleanupErr != nil {
+		allocation.cleanupPending = true
+		return errors.Join(cause, fmt.Errorf("workspace: clean failed dynamic output member: %w", cleanupErr))
+	}
+	delete(e.members, physicalIdentity)
+	return cause
+}
+
 // Close removes all private state. It is safe to call repeatedly.
 func (e *Environment) Close() error {
 	if e == nil {
@@ -199,11 +244,33 @@ func (e *Environment) Close() error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed {
+	if e.rootRemoved && e.namespacesClosed {
 		return nil
 	}
 	e.closed = true
-	return removeRuntimeRoot(e.root)
+	var err error
+	if !e.namespacesClosed {
+		closeFailed := false
+		for _, namespace := range e.namespaces {
+			if closeErr := namespace.close(); closeErr != nil {
+				closeFailed = true
+				err = errors.Join(err, fmt.Errorf("workspace: close dynamic output namespace: %w", closeErr))
+			}
+		}
+		e.namespacesClosed = !closeFailed
+	}
+	if !e.rootRemoved {
+		remove := e.removeRoot
+		if remove == nil {
+			remove = removeRuntimeRoot
+		}
+		if removeErr := remove(e.root); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("workspace: remove runtime root: %w", removeErr))
+		} else {
+			e.rootRemoved = true
+		}
+	}
+	return err
 }
 
 type inputTask struct {
@@ -466,16 +533,171 @@ type outputTask struct {
 	dynamic bool
 }
 
+type rootedDirectory interface {
+	lstat(string) (fs.FileInfo, error)
+	mkdir(string, fs.FileMode) error
+	openRoot(string) (rootedDirectory, error)
+	removeAll(string) error
+	close() error
+}
+
+type osRootedDirectory struct{ root *os.Root }
+
+func (r osRootedDirectory) lstat(name string) (fs.FileInfo, error) {
+	return r.root.Lstat(name)
+}
+
+func (r osRootedDirectory) mkdir(name string, mode fs.FileMode) error {
+	return r.root.Mkdir(name, mode)
+}
+
+func (r osRootedDirectory) openRoot(name string) (rootedDirectory, error) {
+	root, err := r.root.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return osRootedDirectory{root: root}, nil
+}
+
+func (r osRootedDirectory) removeAll(name string) error { return r.root.RemoveAll(name) }
+func (r osRootedDirectory) close() error                { return r.root.Close() }
+
+type outputNamespaceCapability interface {
+	createMemberRoot(string) (rootedDirectory, bool, error)
+	removeMember(string) error
+	verify() error
+	close() error
+}
+
+// pinnedOutputNamespace confines Dawn's own dynamic-slot creation to the
+// directory opened during Prepare. It is not a sandbox for the invoked process.
+type pinnedOutputNamespace struct {
+	location string
+	root     rootedDirectory
+	identity fs.FileInfo
+	closed   bool
+}
+
+func openPinnedOutputNamespace(location string) (outputNamespaceCapability, error) {
+	identity, err := os.Lstat(location)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: inspect dynamic output namespace: %w", err)
+	}
+	if !identity.IsDir() {
+		return nil, fmt.Errorf("workspace: dynamic output namespace is not a directory")
+	}
+	root, err := os.OpenRoot(location)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: pin dynamic output namespace: %w", err)
+	}
+	namespace := &pinnedOutputNamespace{location: location, root: osRootedDirectory{root: root}, identity: identity}
+	if err := namespace.verify(); err != nil {
+		return nil, errors.Join(err, namespace.close())
+	}
+	return namespace, nil
+}
+
+func (n *pinnedOutputNamespace) verify() error {
+	if n == nil || n.root == nil || n.closed {
+		return fmt.Errorf("workspace: dynamic output namespace capability is closed")
+	}
+	pathInfo, err := os.Lstat(n.location)
+	if err != nil {
+		return fmt.Errorf("workspace: inspect dynamic output namespace path: %w", err)
+	}
+	if !pathInfo.IsDir() || !os.SameFile(n.identity, pathInfo) {
+		return fmt.Errorf("workspace: dynamic output namespace path identity changed")
+	}
+	rootInfo, err := n.root.lstat(".")
+	if err != nil {
+		return fmt.Errorf("workspace: inspect pinned dynamic output namespace: %w", err)
+	}
+	if !rootInfo.IsDir() || !os.SameFile(n.identity, rootInfo) {
+		return fmt.Errorf("workspace: pinned dynamic output namespace identity changed")
+	}
+	return nil
+}
+
+func (n *pinnedOutputNamespace) createMemberRoot(name string) (rootedDirectory, bool, error) {
+	if err := n.verify(); err != nil {
+		return nil, false, err
+	}
+	if err := n.root.mkdir(name, 0o700); err != nil {
+		return nil, false, err
+	}
+	created, err := n.root.lstat(name)
+	if err != nil {
+		return nil, true, err
+	}
+	if !created.IsDir() {
+		return nil, true, fmt.Errorf("workspace: dynamic output member is not a directory")
+	}
+	member, err := n.root.openRoot(name)
+	if err != nil {
+		return nil, true, err
+	}
+	opened, err := member.lstat(".")
+	if err != nil || !opened.IsDir() || !os.SameFile(created, opened) {
+		closeErr := member.close()
+		if err != nil {
+			return nil, true, errors.Join(err, closeErr)
+		}
+		return nil, true, errors.Join(fmt.Errorf("workspace: dynamic output member identity changed while opening"), closeErr)
+	}
+	pathInfo, err := os.Lstat(filepath.Join(n.location, name))
+	if err != nil || !pathInfo.IsDir() || !os.SameFile(created, pathInfo) {
+		closeErr := member.close()
+		if err != nil {
+			return nil, true, errors.Join(err, closeErr)
+		}
+		return nil, true, errors.Join(fmt.Errorf("workspace: dynamic output member path identity changed"), closeErr)
+	}
+	if err := n.verify(); err != nil {
+		return nil, true, errors.Join(err, member.close())
+	}
+	return member, true, nil
+}
+
+func (n *pinnedOutputNamespace) removeMember(name string) error {
+	if n == nil || n.root == nil || n.closed {
+		return fmt.Errorf("workspace: dynamic output namespace capability is closed")
+	}
+	return n.root.removeAll(name)
+}
+
+func (n *pinnedOutputNamespace) close() error {
+	if n == nil || n.closed {
+		return nil
+	}
+	err := n.root.close()
+	if err == nil {
+		n.closed = true
+	}
+	return err
+}
+
 type outputPlan struct {
 	kind             value.Kind
 	dynamic          bool
+	identity         string
 	location         string
 	relativeLocation string
+	namespace        outputNamespaceCapability
 }
 
-func prepareOutputs(ctx context.Context, contract value.Contract, published []string, outputRoot string) ([]Output, map[string]outputPlan, map[string]Target, error) {
+func prepareOutputs(ctx context.Context, contract value.Contract, published []string, outputRoot string) (records []Output, plans map[string]outputPlan, targets map[string]Target, namespaces []outputNamespaceCapability, err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, namespace := range namespaces {
+			if closeErr := namespace.close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("workspace: close failed output namespace: %w", closeErr))
+			}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("workspace: prepare outputs: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("workspace: prepare outputs: %w", err)
 	}
 	ports := contract.Ports()
 	tasks := make([]outputTask, 0, len(ports))
@@ -487,13 +709,13 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 		})
 	}
 	publishedCanonical := canonicalPath(pathFromFields(published))
-	records := make([]Output, 0)
-	plans := make(map[string]outputPlan)
-	targets := make(map[string]Target)
+	records = make([]Output, 0)
+	plans = make(map[string]outputPlan)
+	targets = make(map[string]Target)
 	identities := make(map[string]string)
 	for len(tasks) != 0 {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, fmt.Errorf("workspace: prepare outputs: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("workspace: prepare outputs: %w", err)
 		}
 		last := len(tasks) - 1
 		task := tasks[last]
@@ -515,7 +737,7 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 		case value.ListKind, value.MapKind:
 			element, ok := task.typ.Element()
 			if !ok {
-				return nil, nil, nil, fmt.Errorf("workspace: invalid compiled dynamic output type")
+				return nil, nil, nil, nil, fmt.Errorf("workspace: invalid compiled dynamic output type")
 			}
 			kind := schemaListMember
 			if task.typ.Kind() == value.MapKind {
@@ -532,7 +754,7 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 			schemaCanonical := canonicalSchema(task.schema)
 			schemaKey := string(schemaCanonical)
 			if _, exists := plans[schemaKey]; exists {
-				return nil, nil, nil, fmt.Errorf("workspace: duplicate output schema position")
+				return nil, nil, nil, nil, fmt.Errorf("workspace: duplicate output schema position")
 			}
 			var id, identity string
 			if task.dynamic {
@@ -545,17 +767,25 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 			}
 			if prior, exists := identities[id]; exists {
 				if prior == identity {
-					return nil, nil, nil, fmt.Errorf("workspace: duplicate output slot identity")
+					return nil, nil, nil, nil, fmt.Errorf("workspace: duplicate output slot identity")
 				}
-				return nil, nil, nil, fmt.Errorf("workspace: internal output slot identity collision")
+				return nil, nil, nil, nil, fmt.Errorf("workspace: internal output slot identity collision")
 			}
 			identities[id] = identity
 			slot := filepath.Join(outputRoot, id)
 			if err := os.Mkdir(slot, 0o700); err != nil {
-				return nil, nil, nil, fmt.Errorf("workspace: create output slot: %w", err)
+				return nil, nil, nil, nil, fmt.Errorf("workspace: create output slot: %w", err)
 			}
 			relativeSlot := filepath.ToSlash(filepath.Join("outputs", id))
-			plan := outputPlan{kind: task.typ.Kind(), dynamic: task.dynamic, location: slot, relativeLocation: relativeSlot}
+			plan := outputPlan{kind: task.typ.Kind(), dynamic: task.dynamic, identity: schemaKey, location: slot, relativeLocation: relativeSlot}
+			if task.dynamic {
+				namespace, openErr := openPinnedOutputNamespace(slot)
+				if openErr != nil {
+					return nil, nil, nil, nil, openErr
+				}
+				plan.namespace = namespace
+				namespaces = append(namespaces, namespace)
+			}
 			record := Output{
 				valuePath: cloneValuePath(task.static), schemaPath: renderSchema(task.schema), kind: task.typ.Kind(),
 				dynamic: task.dynamic, location: slot, relativeLocation: relativeSlot,
@@ -564,7 +794,7 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 				targetPath := filepath.Join(slot, "value")
 				if task.typ.Kind() == value.TreeKind {
 					if err := os.Mkdir(targetPath, 0o700); err != nil {
-						return nil, nil, nil, fmt.Errorf("workspace: create static tree output target: %w", err)
+						return nil, nil, nil, nil, fmt.Errorf("workspace: create static tree output target: %w", err)
 					}
 				}
 				relativeTarget := filepath.ToSlash(filepath.Join(relativeSlot, "value"))
@@ -579,13 +809,13 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 			records = append(records, record)
 		case value.StringKind, value.IntegerKind, value.NumberKind, value.BooleanKind, value.NullKind, value.EnumKind, value.AnyKind:
 		default:
-			return nil, nil, nil, fmt.Errorf("workspace: invalid compiled output type")
+			return nil, nil, nil, nil, fmt.Errorf("workspace: invalid compiled output type")
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("workspace: prepare outputs: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("workspace: prepare outputs: %w", err)
 	}
-	return records, plans, targets, nil
+	return records, plans, targets, namespaces, nil
 }
 
 func resolveOutputSchema(contract value.Contract, path value.Path) (value.Type, []schemaSegment, error) {
