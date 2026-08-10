@@ -386,41 +386,74 @@ func TestCompileCompletionReferenceErrorHasNoPort(t *testing.T) {
 	}
 }
 
-// This catches ParallelDraft lowering retaining dependency edges between its
-// immediate branches, whether they carry data or only completion ordering.
-func TestCompileParallelRejectsChildOrderingEdges(t *testing.T) {
+// This catches ParallelDraft lowering inventing a narrower dependency model
+// than the ordinary graph it becomes.
+func TestCompileParallelRetainsOrdinaryChildDependencies(t *testing.T) {
 	text := bindingContract(t, false, "text", value.String())
 	empty := value.EmptyContract()
 	for _, tc := range []struct {
-		name  string
-		graph GraphDraft
-		wants []string
+		name         string
+		graph        GraphDraft
+		wantFrom     string
+		wantTo       string
+		wantBindings int
 	}{
 		{
 			name: "data edge",
-			graph: GraphDraft{Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{
+			graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{
 				bindingLeaf("read", empty, text),
 				bindingLeaf("write", text, empty),
 			}, Edges: []EdgeDraft{{
 				From: EndpointDraft{Kind: Child, Child: "read"}, To: EndpointDraft{Kind: Child, Child: "write"},
 				Bindings: []BindingDraft{{From: []string{"text"}, To: "text"}},
 			}}}}}}},
-			wants: []string{"root", "workflow.dawn", "read", "write", "text", "parallel", "ordering"},
+			wantFrom: "read", wantTo: "write", wantBindings: 1,
 		},
 		{
 			name: "completion edge",
-			graph: GraphDraft{Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{
+			graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{{Name: "parallel", Parallel: &ParallelDraft{Graph: GraphDraft{Inputs: empty, Outputs: empty, Nodes: []NodeDraft{
 				bindingLeaf("first", empty, empty),
 				bindingLeaf("second", empty, empty),
 			}, Edges: []EdgeDraft{{
 				From: EndpointDraft{Kind: Child, Child: "first"}, To: EndpointDraft{Kind: Child, Child: "second"},
 			}}}}}}},
-			wants: []string{"root", "workflow.dawn", "first", "second", "parallel", "ordering"},
+			wantFrom: "first", wantTo: "second",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Compile(bindingProgram(tc.graph))
-			assertBindingError(t, err, tc.wants...)
+			definition, err := Compile(bindingProgram(tc.graph))
+			if err != nil {
+				t.Fatalf("Compile() error = %v", err)
+			}
+			node := mustNode(t, definition.Root(), "parallel")
+			if node.Provenance().Origin != OriginParallel {
+				t.Fatalf("parallel node origin = %q, want %q", node.Provenance().Origin, OriginParallel)
+			}
+			scope, ok := node.Scope()
+			if !ok {
+				t.Fatal("parallel node did not lower to a scope")
+			}
+			graph, ok := scope.Graph()
+			if !ok || graph.Provenance().Origin != OriginParallel {
+				t.Fatalf("parallel graph = %#v/%v, want OriginParallel graph", graph.Provenance(), ok)
+			}
+			edges := graph.Edges()
+			if len(edges) != 1 {
+				t.Fatalf("compiled edges = %d, want 1", len(edges))
+			}
+			if edges[0].From().Kind() != Child || edges[0].From().Child() != tc.wantFrom ||
+				edges[0].To().Kind() != Child || edges[0].To().Child() != tc.wantTo {
+				t.Fatalf("compiled edge endpoints = %#v -> %#v, want %q -> %q", edges[0].From(), edges[0].To(), tc.wantFrom, tc.wantTo)
+			}
+			if got := len(edges[0].Bindings()); got != tc.wantBindings {
+				t.Fatalf("compiled binding count = %d, want %d", got, tc.wantBindings)
+			}
+			if tc.wantBindings == 1 {
+				binding := edges[0].Bindings()[0]
+				if got := binding.From(); len(got) != 1 || got[0] != "text" || binding.To() != "text" {
+					t.Fatalf("compiled binding = %#v -> %q, want exact text binding", got, binding.To())
+				}
+			}
 		})
 	}
 }
@@ -467,7 +500,7 @@ func TestCompileParallelAllowsBoundaryFanOutAndFanIn(t *testing.T) {
 	}
 }
 
-// This catches applying ParallelDraft's no-ordering rule to ordinary graphs.
+// This catches ordinary graphs losing the same dependency behavior.
 func TestCompileOrdinaryGraphAllowsChildOrdering(t *testing.T) {
 	text := bindingContract(t, false, "text", value.String())
 	def, err := Compile(bindingProgram(GraphDraft{Nodes: []NodeDraft{

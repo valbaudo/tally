@@ -152,7 +152,7 @@ A graph starts every child whose required inputs exist and whose incoming depend
 
 The graph succeeds after all required children succeed and all declared graph outputs can be committed. Source order does not add edges.
 
-Author-facing `parallel` creates a clear grouping and join boundary, then lowers to a graph whose branches have no ordering edges between them. It does not have separate scheduler semantics or failure-policy knobs.
+Author-facing `parallel` creates a clear grouping and join boundary, then lowers to an ordinary graph. Independent ready children may overlap, while declared child-to-child data or completion dependencies delay their consumers exactly as in any other graph. It does not have separate scheduler semantics or failure-policy knobs.
 
 ### Branch
 

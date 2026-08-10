@@ -192,7 +192,7 @@ func bindTarget(bound map[targetKey]struct{}, key targetKey) error {
 	return nil
 }
 
-func validateBindings(graph Graph, drafts []EdgeDraft, parallel bool) ([]Edge, error) {
+func validateBindings(graph Graph, drafts []EdgeDraft) ([]Edge, error) {
 	bound := make(map[targetKey]struct{})
 	edges := make([]Edge, 0, len(drafts))
 	for _, draft := range drafts {
@@ -210,13 +210,6 @@ func validateBindings(graph Graph, drafts []EdgeDraft, parallel bool) ([]Edge, e
 			}
 			return nil, bindingError(graph, "edge target endpoint %s port %q: %v", describeEndpoint(draft.To), endpointBindingPort(draft, false), err)
 		}
-		if parallel && from.kind == Child && to.kind == Child {
-			if len(draft.Bindings) == 0 {
-				return nil, bindingError(graph, "parallel edge from %s to %s: child-to-child ordering is not allowed", describeEndpoint(draft.From), describeEndpoint(draft.To))
-			}
-			return nil, bindingError(graph, "parallel edge from %s port %q to %s port %q: child-to-child ordering is not allowed", describeEndpoint(draft.From), endpointBindingPort(draft, true), describeEndpoint(draft.To), endpointBindingPort(draft, false))
-		}
-
 		edge := Edge{
 			from: endpointFromDraft(draft.From),
 			to:   endpointFromDraft(draft.To),

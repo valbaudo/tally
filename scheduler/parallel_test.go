@@ -90,6 +90,105 @@ func TestParallelUsesOrdinaryGraphConcurrencyBarrierAndExplicitOutputs(t *testin
 	}
 }
 
+func TestParallelRetainsOrdinaryDependenciesAtRuntime(t *testing.T) {
+	payload := testContract(t, testRequired(t, "payload", value.String()))
+	selected := testContract(t, testRequired(t, "selected", value.String()))
+	consumerOutput := testContract(t, testRequired(t, "answer", value.String()))
+	rootOutput := testContract(t, testRequired(t, "result", value.String()))
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: value.EmptyContract(), Outputs: rootOutput,
+		Nodes: []workflow.NodeDraft{{
+			Name: "review",
+			Parallel: &workflow.ParallelDraft{Graph: workflow.GraphDraft{
+				Inputs: value.EmptyContract(), Outputs: consumerOutput,
+				Nodes: []workflow.NodeDraft{
+					testLeaf("producer", value.EmptyContract(), payload),
+					testLeaf("consumer", selected, consumerOutput),
+					testLeaf("after", value.EmptyContract(), value.EmptyContract()),
+					testLeaf("independent", value.EmptyContract(), value.EmptyContract()),
+				},
+				Edges: []workflow.EdgeDraft{
+					{
+						From: workflow.EndpointDraft{Kind: workflow.Child, Child: "producer"}, To: workflow.EndpointDraft{Kind: workflow.Child, Child: "consumer"},
+						Bindings: []workflow.BindingDraft{{From: []string{"payload"}, To: "selected"}},
+					},
+					{From: workflow.EndpointDraft{Kind: workflow.Child, Child: "consumer"}, To: workflow.EndpointDraft{Kind: workflow.Child, Child: "after"}},
+					{
+						From: workflow.EndpointDraft{Kind: workflow.Child, Child: "consumer"}, To: workflow.EndpointDraft{Kind: workflow.Boundary},
+						Bindings: []workflow.BindingDraft{{From: []string{"answer"}, To: "answer"}},
+					},
+				},
+			}},
+		}},
+		Edges: []workflow.EdgeDraft{{
+			From: workflow.EndpointDraft{Kind: workflow.Child, Child: "review"}, To: workflow.EndpointDraft{Kind: workflow.Boundary},
+			Bindings: []workflow.BindingDraft{{From: []string{"answer"}, To: "result"}},
+		}},
+	})
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	boundary := newPathRecordingBoundary(trace)
+	execution := startPathExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 4})
+
+	if got := sortedStrings(runner.waitStarts(t, 2)); got[0] != "independent" || got[1] != "producer" {
+		t.Fatalf("initial starts = %v, want producer and independent", got)
+	}
+	if runner.maximum() != 2 {
+		t.Fatalf("initial maximum active = %d, want independent overlap", runner.maximum())
+	}
+	assertNoStart(t, runner, 25*time.Millisecond)
+
+	wantPayload := value.NewString("exact bound data")
+	producerOutput := testValue(t, map[string]value.Value{"payload": wantPayload})
+	runner.execution(t, "producer").complete(mustLeafSuccess(t, producerOutput))
+	if got := runner.waitStarts(t, 1); len(got) != 1 || got[0] != "consumer" {
+		t.Fatalf("start after producer = %v, want consumer", got)
+	}
+	wantConsumerInput := testValue(t, map[string]value.Value{"selected": wantPayload})
+	if got := runnerInput(t, runner, "consumer"); !got.Equal(wantConsumerInput) {
+		t.Fatalf("consumer input = %x, want exact binding %x", got.Canonical(), wantConsumerInput.Canonical())
+	}
+	assertNoStart(t, runner, 25*time.Millisecond)
+
+	wantConsumerOutput := testValue(t, map[string]value.Value{"answer": value.NewString("bound result")})
+	runner.execution(t, "consumer").complete(mustLeafSuccess(t, wantConsumerOutput))
+	if got := runner.waitStarts(t, 1); len(got) != 1 || got[0] != "after" {
+		t.Fatalf("start after consumer = %v, want completion-dependent child", got)
+	}
+	runner.execution(t, "after").complete(mustLeafSuccess(t, emptyValue(t)))
+
+	waited := make(chan Result, 1)
+	go func() { waited <- execution.Wait() }()
+	select {
+	case result := <-waited:
+		t.Fatalf("parallel barrier returned before independent work quiesced: %#v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+	parallelPath := Path{}.AuthoredChild("review")
+	if hasPathEvent(boundary.snapshot(), traceCommit, parallelPath) {
+		t.Fatal("parallel committed before all ordinary graph children succeeded")
+	}
+
+	runner.execution(t, "independent").complete(mustLeafSuccess(t, emptyValue(t)))
+	var result Result
+	select {
+	case result = <-waited:
+	case <-time.After(testTimeout):
+		t.Fatal("parallel did not finish after every child quiesced")
+	}
+	requireStatus(t, result, Succeeded)
+	wantRoot := testValue(t, map[string]value.Value{"result": value.NewString("bound result")})
+	output, _ := result.Output()
+	if !output.Equal(wantRoot) {
+		t.Fatalf("root output = %x, want %x", output.Canonical(), wantRoot.Canonical())
+	}
+	wantParallel := testValue(t, map[string]value.Value{"answer": value.NewString("bound result")})
+	parallelCommit, ok := committedAt(boundary.snapshot(), parallelPath)
+	if !ok || !parallelCommit.Equal(wantParallel) {
+		t.Fatalf("parallel commit = %x/%v, want %x", parallelCommit.Canonical(), ok, wantParallel.Canonical())
+	}
+}
+
 func TestParallelWaitsForQuiescenceThenFailureOutranksRejection(t *testing.T) {
 	empty := value.EmptyContract()
 	definition := testDefinition(t, workflow.GraphDraft{

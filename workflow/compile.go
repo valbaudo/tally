@@ -89,14 +89,6 @@ func (c *compiler) compileModule(name string) (Graph, error) {
 }
 
 func (c *compiler) compileGraph(draft *GraphDraft) (Graph, error) {
-	return c.compileGraphWithParallel(draft, false)
-}
-
-func (c *compiler) compileParallelGraph(draft *GraphDraft) (Graph, error) {
-	return c.compileGraphWithParallel(draft, true)
-}
-
-func (c *compiler) compileGraphWithParallel(draft *GraphDraft, parallel bool) (Graph, error) {
 	if draft == nil {
 		return Graph{}, fmt.Errorf("graph draft is nil")
 	}
@@ -135,7 +127,7 @@ func (c *compiler) compileGraphWithParallel(draft *GraphDraft, parallel bool) (G
 		childNames[node.name] = struct{}{}
 		graph.nodes = append(graph.nodes, node)
 	}
-	edges, err := validateBindings(graph, draft.Edges, parallel)
+	edges, err := validateBindings(graph, draft.Edges)
 	if err != nil {
 		return Graph{}, err
 	}
@@ -255,7 +247,7 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		if len(draft.Parallel.Graph.Nodes) < 2 {
 			return Node{}, fmt.Errorf("node %q parallel requires at least two immediate children", draft.Name)
 		}
-		graph, err := c.compileParallelGraph(&draft.Parallel.Graph)
+		graph, err := c.compileGraph(&draft.Parallel.Graph)
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q parallel: %w", draft.Name, err)
 		}
