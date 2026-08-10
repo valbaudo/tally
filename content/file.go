@@ -21,6 +21,18 @@ type Repository struct {
 	store Store
 }
 
+type materializationTemp interface {
+	io.Writer
+	Name() string
+	Close() error
+}
+
+var createMaterializationTemp = func(directory, pattern string) (materializationTemp, error) {
+	return os.CreateTemp(directory, pattern)
+}
+
+var removeMaterializationTemp = os.Remove
+
 // NewRepository constructs a file repository backed by store.
 func NewRepository(store Store) (*Repository, error) {
 	if store == nil {
@@ -46,19 +58,20 @@ func (r *Repository) IngestFile(ctx context.Context, name, explicitMedia string,
 	if err != nil {
 		return File{}, err
 	}
-	prefix, err := readMediaPrefix(source)
-	if err != nil {
-		return File{}, fmt.Errorf("content: read file prefix: %w", err)
-	}
-	media := explicit
-	if media == "" {
-		media, err = canonicalMedia(http.DetectContentType(prefix))
-		if err != nil {
-			return File{}, fmt.Errorf("content: detect file media: %w", err)
-		}
+	if explicit != "" {
+		return r.storeFile(ctx, name, explicit, source)
 	}
 
-	object, err := r.store.Put(ctx, io.MultiReader(bytes.NewReader(prefix), source))
+	prefix, terminalErr := readMediaPrefix(source)
+	media, err := canonicalMedia(http.DetectContentType(prefix))
+	if err != nil {
+		return File{}, fmt.Errorf("content: detect file media: %w", err)
+	}
+	return r.storeFile(ctx, name, media, sourceWithPrefix(prefix, source, terminalErr))
+}
+
+func (r *Repository) storeFile(ctx context.Context, name, media string, source io.Reader) (File, error) {
+	object, err := r.store.Put(ctx, source)
 	if err != nil {
 		return File{}, fmt.Errorf("content: ingest file: %w", err)
 	}
@@ -85,7 +98,7 @@ func (r *Repository) CopyFile(ctx context.Context, file File, destination io.Wri
 }
 
 // MaterializeFile copies a file to the caller's absent runtime-owned target.
-// It writes a same-directory temporary file and atomically renames it only
+// It writes a same-directory temporary file and atomically publishes it only
 // after the copied bytes match file's authoritative content identity.
 func (r *Repository) MaterializeFile(ctx context.Context, file File, target string) (err error) {
 	if r == nil || r.store == nil {
@@ -103,31 +116,43 @@ func (r *Repository) MaterializeFile(ctx context.Context, file File, target stri
 		return fmt.Errorf("content: inspect materialization target: %w", statErr)
 	}
 
-	temporary, err := os.CreateTemp(filepath.Dir(target), ".dawn-materialize-*")
+	temporary, err := createMaterializationTemp(filepath.Dir(target), ".dawn-materialize-*")
 	if err != nil {
 		return fmt.Errorf("content: create materialization temporary file: %w", err)
 	}
 	temporaryName := temporary.Name()
+	temporaryClosed := false
 	defer func() {
+		var cleanupErr error
+		if !temporaryClosed {
+			temporaryClosed = true
+			if closeErr := temporary.Close(); closeErr != nil {
+				cleanupErr = fmt.Errorf("content: close materialization temporary file during cleanup: %w", closeErr)
+			}
+		}
 		if temporaryName != "" {
-			_ = temporary.Close()
-			_ = os.Remove(temporaryName)
+			if removeErr := removeMaterializationTemp(temporaryName); removeErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("content: remove materialization temporary file: %w", removeErr))
+			}
+		}
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
 		}
 	}()
 
 	if err := r.copyVerified(ctx, file, temporary); err != nil {
 		return fmt.Errorf("content: materialize file: %w", err)
 	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("content: close materialization temporary file: %w", err)
+	temporaryClosed = true
+	if closeErr := temporary.Close(); closeErr != nil {
+		return fmt.Errorf("content: close materialization temporary file: %w", closeErr)
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize file: %w", err)
 	}
-	if err := os.Rename(temporaryName, target); err != nil {
+	if err := os.Link(temporaryName, target); err != nil {
 		return fmt.Errorf("content: publish materialized file: %w", err)
 	}
-	temporaryName = ""
 	return nil
 }
 
@@ -148,11 +173,36 @@ func (r *Repository) copyVerified(ctx context.Context, file File, destination io
 
 func readMediaPrefix(source io.Reader) ([]byte, error) {
 	prefix := make([]byte, mediaSniffSize)
-	n, err := io.ReadFull(source, prefix)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return nil, err
+	n := 0
+	for n < len(prefix) {
+		read, err := source.Read(prefix[n:])
+		n += read
+		if err != nil {
+			return prefix[:n], err
+		}
+		if read == 0 {
+			return prefix[:n], io.ErrNoProgress
+		}
 	}
-	return prefix[:n], nil
+	return prefix, nil
+}
+
+func sourceWithPrefix(prefix []byte, source io.Reader, terminalErr error) io.Reader {
+	if terminalErr == nil {
+		return io.MultiReader(bytes.NewReader(prefix), source)
+	}
+	if errors.Is(terminalErr, io.EOF) {
+		return bytes.NewReader(prefix)
+	}
+	return io.MultiReader(bytes.NewReader(prefix), readerError{err: terminalErr})
+}
+
+type readerError struct {
+	err error
+}
+
+func (r readerError) Read([]byte) (int, error) {
+	return 0, r.err
 }
 
 func canonicalMedia(media string) (string, error) {

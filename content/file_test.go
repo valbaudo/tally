@@ -55,6 +55,40 @@ func TestIngestFileCanonicalizesExplicitMedia(t *testing.T) {
 	}
 }
 
+func TestIngestFilePassesExplicitMediaSourceDirectlyToStore(t *testing.T) {
+	source := bytes.NewReader([]byte("plain"))
+	store := &sourceCapturingStore{source: source, backing: NewMemory()}
+	repository, err := NewRepository(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repository.IngestFile(context.Background(), "logical-input", "application/x-custom", source); err != nil {
+		t.Fatal(err)
+	}
+	if !store.receivedSource {
+		t.Fatal("explicit-media source was buffered instead of passed directly to Store.Put")
+	}
+}
+
+func TestIngestFilePreservesExactPrefixReadError(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), mediaSniffSize)
+	store := NewMemory()
+	repository, err := NewRepository(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = repository.IngestFile(context.Background(), "logical-input", "", &exactPrefixErrorReader{data: data})
+	if !errors.Is(err, errExactPrefixRead) {
+		t.Fatalf("IngestFile error = %v, want exact prefix read error", err)
+	}
+	digest := Digest(sha256.Sum256(data))
+	if _, err := store.Copy(context.Background(), digest, io.Discard); err == nil {
+		t.Fatal("ingestion published bytes returned with a read error")
+	}
+}
+
 func TestIngestFileCommitsBytesIndependentOfHostFile(t *testing.T) {
 	sourceName := filepath.Join(t.TempDir(), "source.txt")
 	want := []byte("original committed bytes")
@@ -183,6 +217,39 @@ func TestMaterializeFileRequiresAbsentTarget(t *testing.T) {
 	}
 }
 
+func TestMaterializeFileDoesNotOverwriteTargetCreatedDuringCopy(t *testing.T) {
+	committed := []byte("committed")
+	digest := Digest(sha256.Sum256(committed))
+	file, err := NewFile(digest, int64(len(committed)), "logical.txt", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "runtime-owned-output")
+	store := &collidingStore{data: committed, target: target, collision: []byte("racing owner"), created: make(chan struct{}), release: make(chan struct{})}
+	repository, err := NewRepository(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- repository.MaterializeFile(context.Background(), file, target)
+	}()
+	<-store.created
+	close(store.release)
+	err = <-result
+	if err == nil {
+		t.Fatal("MaterializeFile overwrote a target created during copying")
+	}
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "racing owner" {
+		t.Fatalf("racing target = %q, want %q", got, "racing owner")
+	}
+}
+
 func TestMaterializeFileRejectsStoreBytesWithWrongDigest(t *testing.T) {
 	committed := []byte("committed")
 	digest := Digest(sha256.Sum256(committed))
@@ -201,6 +268,38 @@ func TestMaterializeFileRejectsStoreBytesWithWrongDigest(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("target after failed materialization = %v, want absent", err)
+	}
+}
+
+func TestMaterializeFileJoinsTemporaryCleanupErrors(t *testing.T) {
+	committed := []byte("committed")
+	digest := Digest(sha256.Sum256(committed))
+	file, err := NewFile(digest, int64(len(committed)), "logical.txt", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(&lyingStore{data: []byte("tampered")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalCreate := createMaterializationTemp
+	originalRemove := removeMaterializationTemp
+	createMaterializationTemp = func(string, string) (materializationTemp, error) {
+		return &failingMaterializationTemp{name: filepath.Join(t.TempDir(), "temporary"), closeErr: errTemporaryClose}, nil
+	}
+	removeMaterializationTemp = func(string) error { return errTemporaryRemove }
+	t.Cleanup(func() {
+		createMaterializationTemp = originalCreate
+		removeMaterializationTemp = originalRemove
+	})
+
+	err = repository.MaterializeFile(context.Background(), file, filepath.Join(t.TempDir(), "runtime-owned-output"))
+	if !errors.Is(err, errTemporaryClose) {
+		t.Fatalf("MaterializeFile error = %v, want joined close error", err)
+	}
+	if !errors.Is(err, errTemporaryRemove) {
+		t.Fatalf("MaterializeFile error = %v, want joined remove error", err)
 	}
 }
 
@@ -240,3 +339,73 @@ func (s *lyingStore) Copy(_ context.Context, _ Digest, destination io.Writer) (i
 	n, err := destination.Write(s.data)
 	return int64(n), err
 }
+
+type sourceCapturingStore struct {
+	source         io.Reader
+	backing        Store
+	receivedSource bool
+}
+
+func (s *sourceCapturingStore) Put(ctx context.Context, source io.Reader) (Object, error) {
+	s.receivedSource = source == s.source
+	return s.backing.Put(ctx, source)
+}
+
+func (s *sourceCapturingStore) Copy(ctx context.Context, digest Digest, destination io.Writer) (int64, error) {
+	return s.backing.Copy(ctx, digest, destination)
+}
+
+var errExactPrefixRead = errors.New("injected exact prefix read error")
+
+type exactPrefixErrorReader struct {
+	data []byte
+	read bool
+}
+
+func (r *exactPrefixErrorReader) Read(destination []byte) (int, error) {
+	if r.read {
+		return 0, io.EOF
+	}
+	r.read = true
+	return copy(destination, r.data), errExactPrefixRead
+}
+
+type collidingStore struct {
+	data      []byte
+	target    string
+	collision []byte
+	created   chan struct{}
+	release   chan struct{}
+}
+
+func (s *collidingStore) Put(context.Context, io.Reader) (Object, error) {
+	return Object{}, errors.New("Put is not used")
+}
+
+func (s *collidingStore) Copy(_ context.Context, _ Digest, destination io.Writer) (int64, error) {
+	n, err := destination.Write(s.data)
+	if err != nil {
+		return int64(n), err
+	}
+	if err := os.WriteFile(s.target, s.collision, 0o600); err != nil {
+		return int64(n), err
+	}
+	close(s.created)
+	<-s.release
+	return int64(n), nil
+}
+
+var (
+	errTemporaryClose  = errors.New("injected temporary close error")
+	errTemporaryRemove = errors.New("injected temporary remove error")
+)
+
+type failingMaterializationTemp struct {
+	bytes.Buffer
+	name     string
+	closeErr error
+}
+
+func (f *failingMaterializationTemp) Name() string { return f.name }
+
+func (f *failingMaterializationTemp) Close() error { return f.closeErr }
