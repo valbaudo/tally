@@ -84,8 +84,50 @@ func sortDiagnostics(diagnostics []diagnostic) {
 		if leftRank, rightRank := diagnosticRank(left), diagnosticRank(right); leftRank != rightRank {
 			return leftRank < rightRank
 		}
-		return comparePath(left.path, right.path) < 0
+		if pathComparison := comparePath(left.path, right.path); pathComparison != 0 {
+			return pathComparison < 0
+		}
+		return compareDiagnosticTie(left, right) < 0
 	})
+}
+
+func compareDiagnosticTie(left, right diagnostic) int {
+	if left.status < right.status {
+		return -1
+	}
+	if left.status > right.status {
+		return 1
+	}
+	if left.failure < right.failure {
+		return -1
+	}
+	if left.failure > right.failure {
+		return 1
+	}
+	if left.reason < right.reason {
+		return -1
+	}
+	if left.reason > right.reason {
+		return 1
+	}
+	return compareError(left.err, right.err)
+}
+
+func compareError(left, right error) int {
+	switch {
+	case left == nil && right == nil:
+		return 0
+	case left == nil:
+		return -1
+	case right == nil:
+		return 1
+	case left.Error() < right.Error():
+		return -1
+	case left.Error() > right.Error():
+		return 1
+	default:
+		return 0
+	}
 }
 
 func diagnosticRank(diagnostic diagnostic) int {

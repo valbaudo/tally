@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -76,6 +77,25 @@ func TestNormalizeUsesLexicalPathForEqualPrecedence(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsesDeterministicTieBreakForSamePathAndPrecedence(t *testing.T) {
+	causes := []diagnostic{
+		failed(testPath("same"), MechanicalFailure, errors.New("zeta")),
+		failed(testPath("same"), MechanicalFailure, errors.New("alpha")),
+		failed(testPath("same"), MechanicalFailure, errors.New("middle")),
+	}
+	want := []string{
+		"3/1/alpha",
+		"3/1/middle",
+		"3/1/zeta",
+	}
+	for seed := int64(0); seed < 100; seed++ {
+		got := normalize(shuffled(seed, causes), nil)
+		if identity := diagnosticIdentities(got); !reflect.DeepEqual(identity, want) {
+			t.Fatalf("seed %d diagnostics = %#v, want %#v", seed, identity, want)
+		}
+	}
+}
+
 func TestNormalizeUsesParentCancellationOnlyWhenItIsTheOnlyCause(t *testing.T) {
 	got := normalize([]diagnostic{
 		parentCancelled(testPath("a")),
@@ -119,4 +139,22 @@ func diagnosticPaths(result Result) []string {
 		paths[i] = lastAuthoredName(diagnostic.Path())
 	}
 	return paths
+}
+
+func diagnosticIdentities(result Result) []string {
+	all := result.Secondary()
+	if primary, ok := result.Primary(); ok {
+		all = append([]Diagnostic{primary}, all...)
+	}
+	identities := make([]string, len(all))
+	for i, diagnostic := range all {
+		failure, _ := diagnostic.Failure()
+		err := diagnostic.Error()
+		if err == nil {
+			identities[i] = fmt.Sprintf("%d/%d/", diagnostic.Status(), failure)
+			continue
+		}
+		identities[i] = fmt.Sprintf("%d/%d/%s", diagnostic.Status(), failure, err)
+	}
+	return identities
 }

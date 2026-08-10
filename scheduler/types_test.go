@@ -53,19 +53,19 @@ func TestPathComponentsRetainArbitraryBytesAndDefensiveCopies(t *testing.T) {
 	}
 }
 
-func TestMapItemUsesOccurrenceOnlyForIdenticalCanonicalBytes(t *testing.T) {
-	first, err := (Path{}).MapItem([]byte{0, 0xff, '/'}, 1)
+func TestMapItemUsesZeroBasedOccurrenceOnlyForIdenticalCanonicalBytes(t *testing.T) {
+	first, err := (Path{}).MapItem([]byte{0, 0xff, '/'}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := (Path{}).MapItem([]byte{0, 0xff, '/'}, 2)
+	second, err := (Path{}).MapItem([]byte{0, 0xff, '/'}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	firstItem, firstOccurrence, _ := first.Components()[0].MapItem()
 	secondItem, secondOccurrence, _ := second.Components()[0].MapItem()
-	if string(firstItem) != string(secondItem) || firstOccurrence != 1 || secondOccurrence != 2 {
+	if string(firstItem) != string(secondItem) || firstOccurrence != 0 || secondOccurrence != 1 {
 		t.Fatalf("map identity = (%q, %d), (%q, %d)", firstItem, firstOccurrence, secondItem, secondOccurrence)
 	}
 	if comparePath(first, second) >= 0 || comparePath(second, first) <= 0 {

@@ -41,7 +41,7 @@ func (c Component) BranchCase() (string, bool) {
 	return c.name, true
 }
 
-// MapItem returns copied canonical item bytes and its one-based duplicate
+// MapItem returns copied canonical item bytes and its zero-based duplicate
 // occurrence for a map-item component.
 func (c Component) MapItem() ([]byte, uint64, bool) {
 	if c.kind != MapItemComponent {
@@ -78,11 +78,8 @@ func (p Path) BranchCase(name string) Path {
 }
 
 // MapItem returns a copied path extended with canonical map item bytes and a
-// one-based occurrence among byte-identical input items.
+// zero-based occurrence among byte-identical input items.
 func (p Path) MapItem(item []byte, occurrence uint64) (Path, error) {
-	if occurrence == 0 {
-		return Path{}, errInvalidMapOccurrence
-	}
 	return p.append(Component{kind: MapItemComponent, item: append([]byte(nil), item...), occurrence: occurrence}), nil
 }
 
@@ -124,7 +121,7 @@ func (p Path) valid() bool {
 				return false
 			}
 		case MapItemComponent:
-			if component.name != "" || component.occurrence == 0 || component.iteration != 0 {
+			if component.name != "" || component.iteration != 0 {
 				return false
 			}
 		case LoopIterationComponent:

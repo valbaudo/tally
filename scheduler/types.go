@@ -9,7 +9,6 @@ import (
 )
 
 var (
-	errInvalidMapOccurrence = errors.New("map occurrence must be one-based")
 	errInvalidLoopIteration = errors.New("loop iteration must be one-based")
 )
 
