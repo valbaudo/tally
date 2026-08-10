@@ -112,6 +112,12 @@ func (r *runState) runScope(ctx context.Context, path Path, scope workflow.Scope
 			return Result{}, false
 		}
 		return r.runMap(ctx, path, mapped, input), true
+	case workflow.LoopScope:
+		loop, present := scope.Loop()
+		if !present {
+			return Result{}, false
+		}
+		return r.runLoop(ctx, path, loop, input), true
 	default:
 		return Result{}, false
 	}
