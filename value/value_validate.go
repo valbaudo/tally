@@ -62,9 +62,13 @@ type validationTask struct {
 
 // Validate checks a runtime value without coercion or object projection.
 func (t Type) Validate(value Value) error {
-	if !t.Valid() {
+	if !validTypeForValidation(t) {
 		return fmt.Errorf("invalid type")
 	}
+	return validateValue(t, value)
+}
+
+func validateValue(t Type, value Value) error {
 	if !value.Valid() {
 		return fmt.Errorf("invalid value")
 	}
@@ -228,6 +232,60 @@ func (t Type) Validate(value Value) error {
 	return nil
 }
 
+func validTypeForValidation(root Type) bool {
+	return validTypesForValidation([]Type{root})
+}
+
+func validTypesForValidation(roots []Type) bool {
+	stack := append([]Type(nil), roots...)
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		switch current.kind {
+		case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, TreeKind, AnyKind:
+			if current.elem != nil || len(current.fields) != 0 || len(current.enum) != 0 || len(current.media) != 0 {
+				return false
+			}
+		case FileKind:
+			if current.elem != nil || len(current.fields) != 0 || len(current.enum) != 0 {
+				return false
+			}
+			for _, constraint := range current.media {
+				if !mediaConstraint.MatchString(constraint) {
+					return false
+				}
+			}
+		case EnumKind:
+			if current.elem != nil || len(current.fields) != 0 || len(current.media) != 0 || len(current.enum) == 0 {
+				return false
+			}
+			for _, member := range current.enum {
+				if !member.valid() || !member.scalar() {
+					return false
+				}
+			}
+		case ObjectKind:
+			if current.elem != nil || len(current.enum) != 0 || len(current.media) != 0 {
+				return false
+			}
+			for i, field := range current.fields {
+				if field.name == "" || (i > 0 && current.fields[i-1].name >= field.name) {
+					return false
+				}
+				stack = append(stack, field.typ)
+			}
+		case MapKind, ListKind:
+			if current.elem == nil || len(current.fields) != 0 || len(current.enum) != 0 || len(current.media) != 0 {
+				return false
+			}
+			stack = append(stack, *current.elem)
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func scalarOrdinaryCanonical(value Value) ([]byte, bool) {
 	switch value.kind {
 	case StringKind:
@@ -252,8 +310,22 @@ func scalarOrdinaryCanonical(value Value) ([]byte, bool) {
 
 // Validate checks that value is a closed object satisfying all contract ports.
 func (c Contract) Validate(value Value) error {
-	if !c.Valid() {
+	if !validContractForValidation(c) {
 		return fmt.Errorf("invalid contract")
 	}
-	return c.ObjectType().Validate(value)
+	return validateValue(Type{kind: ObjectKind, fields: c.ports}, value)
+}
+
+func validContractForValidation(contract Contract) bool {
+	if !contract.valid {
+		return false
+	}
+	types := make([]Type, 0, len(contract.ports))
+	for i, port := range contract.ports {
+		if port.name == "" || (i > 0 && contract.ports[i-1].name >= port.name) {
+			return false
+		}
+		types = append(types, port.typ)
+	}
+	return validTypesForValidation(types)
 }

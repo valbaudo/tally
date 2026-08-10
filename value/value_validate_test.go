@@ -1,8 +1,13 @@
 package value
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"reflect"
+	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func TestTypeValidateValueAcceptsExactRecursiveValues(t *testing.T) {
@@ -143,5 +148,46 @@ func TestTypeValidateValueRejectsInvalidInputs(t *testing.T) {
 	}
 	if err := Any().Validate(Value{}); err == nil {
 		t.Fatal("Any validated a zero value")
+	}
+}
+
+func TestTypeAndContractValidateDeepFiniteSubprocess(t *testing.T) {
+	if os.Getenv("DAWN_DEEP_VALIDATION_CHILD") == "1" {
+		debug.SetMaxStack(1 << 20)
+		value := NewNull()
+		typ := Null()
+		for range 50_000 {
+			value = NewList(value)
+			child := typ
+			typ = Type{kind: ListKind, elem: &child}
+		}
+		if err := typ.Validate(value); err != nil {
+			t.Fatal(err)
+		}
+
+		contract := Contract{
+			valid: true,
+			ports: []Field{{name: "deep", typ: typ}},
+		}
+		object := Value{
+			kind:    ObjectKind,
+			entries: []Entry{{name: "deep", value: value}},
+		}
+		if err := contract.Validate(object); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTypeAndContractValidateDeepFiniteSubprocess$", "-test.count=1")
+	command.Env = append(os.Environ(), "DAWN_DEEP_VALIDATION_CHILD=1")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("deep-validation child timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("deep-validation child failed: %v\n%s", err, output)
 	}
 }
