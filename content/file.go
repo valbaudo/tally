@@ -16,6 +16,10 @@ import (
 
 const mediaSniffSize = 512
 
+// Match the standard library's bounded tolerance for misbehaving readers that
+// transiently return no bytes and no error.
+const maxConsecutiveEmptyReads = 100
+
 // Repository manages semantic files whose immutable bytes are held by a Store.
 type Repository struct {
 	store Store
@@ -174,6 +178,7 @@ func (r *Repository) copyVerified(ctx context.Context, file File, destination io
 func readMediaPrefix(source io.Reader) ([]byte, error) {
 	prefix := make([]byte, mediaSniffSize)
 	n := 0
+	emptyReads := 0
 	for n < len(prefix) {
 		read, err := source.Read(prefix[n:])
 		n += read
@@ -181,8 +186,13 @@ func readMediaPrefix(source io.Reader) ([]byte, error) {
 			return prefix[:n], err
 		}
 		if read == 0 {
-			return prefix[:n], io.ErrNoProgress
+			emptyReads++
+			if emptyReads == maxConsecutiveEmptyReads {
+				return prefix[:n], io.ErrNoProgress
+			}
+			continue
 		}
+		emptyReads = 0
 	}
 	return prefix, nil
 }

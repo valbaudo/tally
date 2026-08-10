@@ -89,6 +89,29 @@ func TestIngestFilePreservesExactPrefixReadError(t *testing.T) {
 	}
 }
 
+func TestIngestFileToleratesTransientEmptyReadBeforeSniffing(t *testing.T) {
+	data := []byte("hello\n")
+	repository, err := NewRepository(NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := repository.IngestFile(context.Background(), "logical-input", "", &transientEmptyReader{data: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Media() != "text/plain; charset=utf-8" {
+		t.Fatalf("media = %q, want text/plain; charset=utf-8", file.Media())
+	}
+	var got bytes.Buffer
+	if err := repository.CopyFile(context.Background(), file, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Bytes(), data) {
+		t.Fatalf("ingested bytes = %q, want %q", got.Bytes(), data)
+	}
+}
+
 func TestIngestFileCommitsBytesIndependentOfHostFile(t *testing.T) {
 	sourceName := filepath.Join(t.TempDir(), "source.txt")
 	want := []byte("original committed bytes")
@@ -368,6 +391,24 @@ func (r *exactPrefixErrorReader) Read(destination []byte) (int, error) {
 	}
 	r.read = true
 	return copy(destination, r.data), errExactPrefixRead
+}
+
+type transientEmptyReader struct {
+	data  []byte
+	empty bool
+}
+
+func (r *transientEmptyReader) Read(destination []byte) (int, error) {
+	if !r.empty {
+		r.empty = true
+		return 0, nil
+	}
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(destination, r.data)
+	r.data = r.data[n:]
+	return n, nil
 }
 
 type collidingStore struct {
