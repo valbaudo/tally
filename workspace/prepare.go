@@ -21,6 +21,11 @@ import (
 // Environment owns all private filesystem state for one invocation.
 type Environment struct {
 	workspace             string
+	workspaceIdentity     fs.FileInfo
+	outputRoot            string
+	outputRootIdentity    fs.FileInfo
+	repository            *content.Repository
+	publishedWorkspace    []string
 	manifest              Manifest
 	outputs               value.Contract
 	plans                 map[string]outputPlan
@@ -45,6 +50,8 @@ type Target struct {
 	kind             value.Kind
 	location         string
 	relativeLocation string
+	slotIdentity     fs.FileInfo
+	targetIdentity   fs.FileInfo
 }
 
 // ValuePath returns a defensive copy of the concrete structured output path.
@@ -122,19 +129,38 @@ func Prepare(ctx context.Context, repository *content.Repository, leaf workflow.
 			return nil, fmt.Errorf("workspace: create working directory: %w", err)
 		}
 	}
+	workspaceIdentity, err := os.Lstat(working)
+	if err != nil || !workspaceIdentity.IsDir() {
+		if err != nil {
+			return nil, fmt.Errorf("workspace: inspect working directory: %w", err)
+		}
+		return nil, fmt.Errorf("workspace: working directory is not a directory")
+	}
 	manifestOutputs, plans, targets, namespaces, err := prepareOutputs(ctx, leaf.Outputs(), leaf.PublishWorkspace(), outputRoot)
 	if err != nil {
 		return nil, err
 	}
+	outputRootIdentity, err := os.Lstat(outputRoot)
+	if err != nil || !outputRootIdentity.IsDir() {
+		if err != nil {
+			return nil, fmt.Errorf("workspace: inspect output root: %w", err)
+		}
+		return nil, fmt.Errorf("workspace: output root is not a directory")
+	}
 	environment := &Environment{
-		workspace:      working,
-		manifest:       Manifest{inputs: manifestInputs, outputs: manifestOutputs},
-		outputs:        leaf.Outputs(),
-		plans:          plans,
-		targets:        targets,
-		members:        make(map[string]*memberAllocation),
-		namespaces:     namespaces,
-		rootCapability: rootCapability,
+		workspace:          working,
+		workspaceIdentity:  workspaceIdentity,
+		outputRoot:         outputRoot,
+		outputRootIdentity: outputRootIdentity,
+		repository:         repository,
+		publishedWorkspace: append([]string(nil), leaf.PublishWorkspace()...),
+		manifest:           Manifest{inputs: manifestInputs, outputs: manifestOutputs},
+		outputs:            leaf.Outputs(),
+		plans:              plans,
+		targets:            targets,
+		members:            make(map[string]*memberAllocation),
+		namespaces:         namespaces,
+		rootCapability:     rootCapability,
 	}
 	environment.removeRootEntry = rootCapability.removeEntry
 	prepared = true
@@ -210,10 +236,27 @@ func (e *Environment) Output(path value.Path) (Target, error) {
 	if !created || memberRoot == nil {
 		return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, created, fmt.Errorf("workspace: dynamic output member creation returned no directory"))
 	}
+	createdInfo, err := memberRoot.lstat(".")
+	if err != nil || !createdInfo.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("dynamic output member is not a directory")
+		}
+		cause := errors.Join(fmt.Errorf("workspace: inspect dynamic output member: %w", err), memberRoot.close())
+		return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, true, cause)
+	}
 	targetPath := filepath.Join(plan.location, memberID, "value")
+	var targetInfo fs.FileInfo
 	if plan.kind == value.TreeKind {
 		if err := memberRoot.mkdir("value", 0o700); err != nil {
 			cause := errors.Join(fmt.Errorf("workspace: create dynamic tree output target: %w", err), memberRoot.close())
+			return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, true, cause)
+		}
+		targetInfo, err = memberRoot.lstat("value")
+		if err != nil || !targetInfo.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("dynamic tree output target is not a directory")
+			}
+			cause := errors.Join(fmt.Errorf("workspace: inspect dynamic tree output target: %w", err), memberRoot.close())
 			return Target{}, e.failDynamicMember(plan, physicalIdentity, allocation, true, cause)
 		}
 	}
@@ -226,6 +269,8 @@ func (e *Environment) Output(path value.Path) (Target, error) {
 	target := Target{
 		valuePath: cloneValuePath(path), kind: plan.kind, location: targetPath,
 		relativeLocation: filepath.ToSlash(filepath.Join(plan.relativeLocation, memberID, "value")),
+		slotIdentity:     createdInfo,
+		targetIdentity:   targetInfo,
 	}
 	e.targets[key] = target
 	return target, nil
@@ -942,12 +987,13 @@ func (n *pinnedOutputNamespace) close() error {
 }
 
 type outputPlan struct {
-	kind             value.Kind
-	dynamic          bool
-	identity         string
-	location         string
-	relativeLocation string
-	namespace        outputNamespaceCapability
+	kind              value.Kind
+	dynamic           bool
+	identity          string
+	location          string
+	relativeLocation  string
+	directoryIdentity fs.FileInfo
+	namespace         outputNamespaceCapability
 }
 
 func prepareOutputs(ctx context.Context, contract value.Contract, published []string, outputRoot string) (records []Output, plans map[string]outputPlan, targets map[string]Target, namespaces []outputNamespaceCapability, err error) {
@@ -1041,8 +1087,18 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 			if err := os.Mkdir(slot, 0o700); err != nil {
 				return nil, nil, nil, nil, fmt.Errorf("workspace: create output slot: %w", err)
 			}
+			slotIdentity, err := os.Lstat(slot)
+			if err != nil || !slotIdentity.IsDir() {
+				if err != nil {
+					return nil, nil, nil, nil, fmt.Errorf("workspace: inspect output slot: %w", err)
+				}
+				return nil, nil, nil, nil, fmt.Errorf("workspace: output slot is not a directory")
+			}
 			relativeSlot := filepath.ToSlash(filepath.Join("outputs", id))
-			plan := outputPlan{kind: task.typ.Kind(), dynamic: task.dynamic, identity: schemaKey, location: slot, relativeLocation: relativeSlot}
+			plan := outputPlan{
+				kind: task.typ.Kind(), dynamic: task.dynamic, identity: schemaKey,
+				location: slot, relativeLocation: relativeSlot, directoryIdentity: slotIdentity,
+			}
 			if task.dynamic {
 				namespace, openErr := openPinnedOutputNamespace(slot)
 				if openErr != nil {
@@ -1057,9 +1113,17 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 			}
 			if !task.dynamic {
 				targetPath := filepath.Join(slot, "value")
+				var targetIdentity fs.FileInfo
 				if task.typ.Kind() == value.TreeKind {
 					if err := os.Mkdir(targetPath, 0o700); err != nil {
 						return nil, nil, nil, nil, fmt.Errorf("workspace: create static tree output target: %w", err)
+					}
+					targetIdentity, err = os.Lstat(targetPath)
+					if err != nil || !targetIdentity.IsDir() {
+						if err != nil {
+							return nil, nil, nil, nil, fmt.Errorf("workspace: inspect static tree output target: %w", err)
+						}
+						return nil, nil, nil, nil, fmt.Errorf("workspace: static tree output target is not a directory")
 					}
 				}
 				relativeTarget := filepath.ToSlash(filepath.Join(relativeSlot, "value"))
@@ -1068,6 +1132,7 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 				targets[string(canonicalPath(task.static))] = Target{
 					valuePath: cloneValuePath(task.static), kind: task.typ.Kind(),
 					location: targetPath, relativeLocation: relativeTarget,
+					slotIdentity: slotIdentity, targetIdentity: targetIdentity,
 				}
 			}
 			plans[schemaKey] = plan
