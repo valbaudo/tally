@@ -197,7 +197,14 @@ func (c *compiler) compileNode(draft NodeDraft) (Node, error) {
 		if err != nil {
 			return Node{}, fmt.Errorf("node %q leaf outputs: %w", draft.Name, err)
 		}
-		node.leaf = &Leaf{kind: draft.Leaf.Kind, inputs: inputs, outputs: outputs}
+		delivery, err := compileDelivery(*draft.Leaf, inputs, outputs)
+		if err != nil {
+			return Node{}, fmt.Errorf("node %q leaf delivery: %w", draft.Name, err)
+		}
+		node.leaf = &Leaf{
+			kind: draft.Leaf.Kind, inputs: inputs, outputs: outputs,
+			baseTree: delivery.baseTree, publishWorkspace: delivery.publishWorkspace, attachments: delivery.attachments,
+		}
 	case draft.Graph != nil:
 		graph, err := c.compileGraph(draft.Graph)
 		if err != nil {

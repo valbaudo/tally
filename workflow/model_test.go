@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/valbaudo/dawn/value"
@@ -232,6 +233,39 @@ func TestDefinitionImmutableThroughScopeAccessors(t *testing.T) {
 	stableTermination, _ := stableLoop.Loop()
 	if stableTermination.Termination()[0] != "done" {
 		t.Fatalf("termination = %q, want done", stableTermination.Termination()[0])
+	}
+}
+
+func TestLeafDeliveryAccessorsAreDefensive(t *testing.T) {
+	leaf := Leaf{
+		baseTree:         []string{"source"},
+		publishWorkspace: []string{"continued"},
+		attachments: []Attachment{{
+			input: []string{"payload", "document"}, fidelity: VisualFidelity,
+		}},
+	}
+
+	base := leaf.BaseTree()
+	base[0] = "changed"
+	publication := leaf.PublishWorkspace()
+	publication[0] = "changed"
+	attachments := leaf.Attachments()
+	attachmentPath := attachments[0].Input()
+	attachmentPath[0] = "changed"
+	attachments[0] = Attachment{}
+
+	if got, want := leaf.BaseTree(), []string{"source"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("BaseTree() = %v, want %v", got, want)
+	}
+	if got, want := leaf.PublishWorkspace(), []string{"continued"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PublishWorkspace() = %v, want %v", got, want)
+	}
+	stable := leaf.Attachments()
+	if got, want := stable[0].Input(), []string{"payload", "document"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("attachment Input() = %v, want %v", got, want)
+	}
+	if got := stable[0].Fidelity(); got != VisualFidelity {
+		t.Fatalf("attachment Fidelity() = %v, want VisualFidelity", got)
 	}
 }
 

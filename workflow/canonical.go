@@ -56,9 +56,17 @@ type nodeWire struct {
 }
 
 type leafWire struct {
-	Kind    stringWire   `json:"kind"`
-	Inputs  contractWire `json:"inputs"`
-	Outputs contractWire `json:"outputs"`
+	Kind             stringWire       `json:"kind"`
+	Inputs           contractWire     `json:"inputs"`
+	Outputs          contractWire     `json:"outputs"`
+	BaseTree         []stringWire     `json:"baseTree"`
+	PublishWorkspace []stringWire     `json:"publishWorkspace"`
+	Attachments      []attachmentWire `json:"attachments"`
+}
+
+type attachmentWire struct {
+	Input    []stringWire `json:"input"`
+	Fidelity Fidelity     `json:"fidelity"`
 }
 
 type scopeWire struct {
@@ -187,10 +195,24 @@ func encodeNode(node Node) nodeWire {
 		wire.Literals[index] = literalWire{Input: encodeString(literal.input), Value: json.RawMessage(literal.value.Bytes())}
 	}
 	if node.leaf != nil {
-		wire.Leaf = &leafWire{Kind: encodeString(string(node.leaf.kind)), Inputs: encodeContract(node.leaf.inputs), Outputs: encodeContract(node.leaf.outputs)}
+		wire.Leaf = encodeLeaf(*node.leaf)
 	}
 	if node.scope != nil {
 		wire.Scope = encodeScope(*node.scope)
+	}
+	return wire
+}
+
+func encodeLeaf(leaf Leaf) *leafWire {
+	wire := &leafWire{
+		Kind: encodeString(string(leaf.kind)), Inputs: encodeContract(leaf.inputs), Outputs: encodeContract(leaf.outputs),
+		BaseTree: encodeStrings(leaf.baseTree), PublishWorkspace: encodeStrings(leaf.publishWorkspace),
+	}
+	if len(leaf.attachments) != 0 {
+		wire.Attachments = make([]attachmentWire, len(leaf.attachments))
+		for index, attachment := range leaf.attachments {
+			wire.Attachments[index] = attachmentWire{Input: encodeStrings(attachment.input), Fidelity: attachment.fidelity}
+		}
 	}
 	return wire
 }
@@ -287,6 +309,9 @@ func normalizeNode(node *Node) {
 		}
 		return bytes.Compare(node.literals[i].value.Bytes(), node.literals[j].value.Bytes()) < 0
 	})
+	if node.leaf != nil {
+		normalizeAttachments(&node.leaf.attachments)
+	}
 	if node.scope == nil {
 		return
 	}

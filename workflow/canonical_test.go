@@ -187,6 +187,74 @@ func TestCanonicalDefinitionChangesWithSemantics(t *testing.T) {
 	}
 }
 
+func TestCanonicalDeliveryIntentIgnoresAttachmentSourceOrder(t *testing.T) {
+	forward := mustCompileCanonical(t, canonicalDeliveryFixture(t, false))
+	reversed := mustCompileCanonical(t, canonicalDeliveryFixture(t, true))
+	if !bytes.Equal(forward.Canonical(), reversed.Canonical()) {
+		t.Fatalf("canonical delivery definitions differ:\n%s\n%s", forward.Canonical(), reversed.Canonical())
+	}
+
+	forwardLeaf, _ := mustNode(t, forward.Root(), "attach").Leaf()
+	reversedLeaf, _ := mustNode(t, reversed.Root(), "attach").Leaf()
+	if !reflect.DeepEqual(forwardLeaf.Attachments(), reversedLeaf.Attachments()) {
+		t.Fatalf("attachment inspection differs: %#v != %#v", forwardLeaf.Attachments(), reversedLeaf.Attachments())
+	}
+}
+
+func TestCanonicalDeliveryIntentChangesWithSemantics(t *testing.T) {
+	baseline := mustCompileCanonical(t, canonicalDeliveryFixture(t, false)).Canonical()
+	for _, tc := range []struct {
+		name string
+		edit func(*ProgramDraft)
+	}{
+		{"base tree", func(draft *ProgramDraft) {
+			canonicalNode(canonicalRoot(draft), "workspace").Leaf.BaseTree = []string{"otherSource"}
+		}},
+		{"workspace publication", func(draft *ProgramDraft) {
+			canonicalNode(canonicalRoot(draft), "workspace").Leaf.PublishWorkspace = []string{"otherWorkspace"}
+		}},
+		{"attachment fidelity", func(draft *ProgramDraft) {
+			canonicalNode(canonicalRoot(draft), "attach").Leaf.Attachments[0].Fidelity = TextFidelity
+		}},
+		{"attachment subtree", func(draft *ProgramDraft) {
+			canonicalNode(canonicalRoot(draft), "attach").Leaf.Attachments[0].Input = []string{"otherDocument"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draft := canonicalDeliveryFixture(t, false)
+			tc.edit(&draft)
+			if got := mustCompileCanonical(t, draft).Canonical(); bytes.Equal(got, baseline) {
+				t.Fatal("canonical bytes did not change")
+			}
+		})
+	}
+}
+
+func TestCanonicalDeliveryIntentClonesDrafts(t *testing.T) {
+	draft := canonicalDeliveryFixture(t, false)
+	definition := mustCompileCanonical(t, draft)
+	wantCanonical := definition.Canonical()
+	workspaceDraft := canonicalNode(canonicalRoot(&draft), "workspace").Leaf
+	attachmentDraft := canonicalNode(canonicalRoot(&draft), "attach").Leaf
+	workspaceDraft.BaseTree[0] = "changed"
+	workspaceDraft.PublishWorkspace[0] = "changed"
+	attachmentDraft.Attachments[0].Input[0] = "changed"
+	attachmentDraft.Attachments[0].Fidelity = TextFidelity
+	attachmentDraft.Attachments[0] = AttachmentDraft{}
+
+	if got := definition.Canonical(); !bytes.Equal(got, wantCanonical) {
+		t.Fatalf("canonical bytes changed after draft mutation: got %s, want %s", got, wantCanonical)
+	}
+	workspaceLeaf, _ := mustNode(t, definition.Root(), "workspace").Leaf()
+	if got, want := workspaceLeaf.BaseTree(), []string{"source"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("compiled base = %v, want %v", got, want)
+	}
+	attachmentLeaf, _ := mustNode(t, definition.Root(), "attach").Leaf()
+	if got, want := attachmentLeaf.Attachments()[0].Input(), []string{"document"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("compiled attachment = %v, want %v", got, want)
+	}
+}
+
 // This catches aliases from source drafts and accessor results that let a
 // caller change an already compiled definition or its canonical bytes.
 func TestDefinitionImmutable(t *testing.T) {
@@ -330,6 +398,67 @@ func canonicalFixture(t *testing.T, reverse bool) ProgramDraft {
 		modules[0], modules[1] = modules[1], modules[0]
 	}
 	return ProgramDraft{Root: "root", Modules: modules}
+}
+
+func canonicalDeliveryFixture(t *testing.T, reverse bool) ProgramDraft {
+	t.Helper()
+	treeInputs := canonicalContract(t,
+		canonicalField(t, "source", value.Tree()),
+		canonicalField(t, "otherSource", value.Tree()),
+	)
+	treeOutputs := canonicalContract(t,
+		canonicalField(t, "continued", value.Tree()),
+		canonicalField(t, "otherWorkspace", value.Tree()),
+	)
+	file := canonicalFile(t, "application/pdf", "image/png", false)
+	payload, err := value.Object(canonicalField(t, "page", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachmentInputs := canonicalContract(t,
+		canonicalField(t, "document", file),
+		canonicalField(t, "otherDocument", file),
+		canonicalField(t, "payload", payload),
+	)
+	attachments := []AttachmentDraft{
+		{Input: []string{"document"}, Fidelity: VisualFidelity},
+		{Input: []string{"payload"}, Fidelity: TextFidelity},
+	}
+	if reverse {
+		attachments[0], attachments[1] = attachments[1], attachments[0]
+	}
+	graphInputs := canonicalContract(t,
+		canonicalField(t, "source", value.Tree()),
+		canonicalField(t, "otherSource", value.Tree()),
+		canonicalField(t, "document", file),
+		canonicalField(t, "otherDocument", file),
+		canonicalField(t, "payload", payload),
+	)
+	root := GraphDraft{
+		Inputs: graphInputs, Outputs: treeOutputs,
+		Nodes: []NodeDraft{
+			{Name: "workspace", Leaf: &LeafDraft{
+				Kind: Agent, Inputs: treeInputs, Outputs: treeOutputs,
+				BaseTree: []string{"source"}, PublishWorkspace: []string{"continued"},
+			}},
+			{Name: "attach", Leaf: &LeafDraft{
+				Kind: LLM, Inputs: attachmentInputs, Outputs: value.EmptyContract(), Attachments: attachments,
+			}},
+		},
+		Edges: []EdgeDraft{
+			{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "workspace"}, Bindings: []BindingDraft{{From: []string{"source"}, To: "source"}, {From: []string{"otherSource"}, To: "otherSource"}}},
+			{From: EndpointDraft{Kind: Boundary}, To: EndpointDraft{Kind: Child, Child: "attach"}, Bindings: []BindingDraft{{From: []string{"document"}, To: "document"}, {From: []string{"otherDocument"}, To: "otherDocument"}, {From: []string{"payload"}, To: "payload"}}},
+			{From: EndpointDraft{Kind: Child, Child: "workspace"}, To: EndpointDraft{Kind: Boundary}, Bindings: []BindingDraft{{From: []string{"continued"}, To: "continued"}, {From: []string{"otherWorkspace"}, To: "otherWorkspace"}}},
+		},
+	}
+	if reverse {
+		reverseNodes(root.Nodes)
+		reverseEdges(root.Edges)
+		for index := range root.Edges {
+			reverseBindings(root.Edges[index].Bindings)
+		}
+	}
+	return bindingProgram(root)
 }
 
 func canonicalReads(def Definition) string {

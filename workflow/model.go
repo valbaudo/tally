@@ -155,8 +155,11 @@ func (n Node) Provenance() Provenance { return n.provenance }
 
 // Leaf is one canonical externally observable workflow operation.
 type Leaf struct {
-	kind            LeafKind
-	inputs, outputs value.Contract
+	kind             LeafKind
+	inputs, outputs  value.Contract
+	baseTree         []string
+	publishWorkspace []string
+	attachments      []Attachment
 }
 
 // Kind returns the leaf's closed kind.
@@ -167,6 +170,17 @@ func (l Leaf) Inputs() value.Contract { return l.inputs }
 
 // Outputs returns the leaf output contract.
 func (l Leaf) Outputs() value.Contract { return l.outputs }
+
+// BaseTree returns the required tree input that seeds this leaf's workspace.
+func (l Leaf) BaseTree() []string { return append([]string(nil), l.baseTree...) }
+
+// PublishWorkspace returns the required tree output that captures this leaf's workspace.
+func (l Leaf) PublishWorkspace() []string {
+	return append([]string(nil), l.publishWorkspace...)
+}
+
+// Attachments returns defensive copies of this raw LLM's file-delivery requirements.
+func (l Leaf) Attachments() []Attachment { return cloneAttachments(l.attachments) }
 
 // Scope is a closed tagged union over canonical structured scopes.
 type Scope struct {

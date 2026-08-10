@@ -42,9 +42,12 @@ type NodeDraft struct {
 
 // LeafDraft declares a closed leaf and its boundary contracts.
 type LeafDraft struct {
-	Kind    LeafKind
-	Inputs  value.Contract
-	Outputs value.Contract
+	Kind             LeafKind
+	Inputs           value.Contract
+	Outputs          value.Contract
+	BaseTree         []string
+	PublishWorkspace []string
+	Attachments      []AttachmentDraft
 }
 
 // CallDraft refers to a statically named module.
