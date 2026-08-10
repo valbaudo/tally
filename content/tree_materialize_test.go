@@ -202,7 +202,7 @@ func TestMaterializeTreeRollsBackWhenFirstPostCreateInspectionFails(t *testing.T
 func TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack(t *testing.T) {
 	const childCase = "DAWN_DEEP_TREE_ROLLBACK_REMOVE_CASE"
 	if os.Getenv(childCase) == "" {
-		command := exec.Command(os.Args[0], "-test.run=^TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack$", "-test.count=1")
+		command := hardFileDescriptorLimitCommand(os.Args[0], "-test.run=^TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack$", "-test.count=1")
 		command.Env = append(os.Environ(), childCase+"=1")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("deep tree rollback removal did not return ordinarily: %v\n%s", err, output)
@@ -225,8 +225,10 @@ func TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack(t *testing.T) {
 	debug.SetMaxStack(64 << 10)
 	result := make(chan error, 1)
 	go func() {
-		removeErr := (osTreeCaptureRoot{root: root}).removeAll("tree")
-		result <- errors.Join(removeErr, root.Close())
+		captureRoot := osTreeCaptureRoot{root: root}
+		firstErr := captureRoot.removeAll("tree")
+		retryErr := captureRoot.removeAll("tree")
+		result <- errors.Join(firstErr, retryErr, root.Close())
 	}()
 	if err := <-result; err != nil {
 		t.Fatal(err)
@@ -234,6 +236,17 @@ func TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack(t *testing.T) {
 	if _, err := os.Lstat(treePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("deep rollback target status = %v, want absent", err)
 	}
+}
+
+func hardFileDescriptorLimitCommand(arguments ...string) *exec.Cmd {
+	const script = `
+ulimit -S -n 128 || exit 90
+ulimit -H -n 128 || exit 91
+[ "$(ulimit -S -n)" = 128 ] || exit 92
+[ "$(ulimit -H -n)" = 128 ] || exit 93
+exec "$@"
+`
+	return exec.Command("/bin/sh", append([]string{"-c", script, "dawn-low-fd"}, arguments...)...)
 }
 
 func createDeepTreeMaterializationFixture(path string, depth int) (err error) {

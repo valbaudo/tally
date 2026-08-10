@@ -916,17 +916,19 @@ func (r osRootedDirectory) openRoot(name string) (rootedDirectory, error) {
 func (r osRootedDirectory) remove(name string) error { return r.root.Remove(name) }
 func (r osRootedDirectory) close() error             { return r.root.Close() }
 
-type rootedRemovalFrame struct {
-	root       rootedDirectory
-	parent     rootedDirectory
-	name       string
-	entries    []fs.DirEntry
-	position   int
-	enumerated bool
+type rootedRemovalPath struct {
+	parent *rootedRemovalPath
+	name   string
+	depth  int
 }
 
-func removeRootedEntry(parent rootedDirectory, name string) (err error) {
-	info, err := parent.lstat(name)
+type rootedRemovalTask struct {
+	path   *rootedRemovalPath
+	remove bool
+}
+
+func removeRootedEntry(anchor rootedDirectory, name string) error {
+	info, err := anchor.lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -934,71 +936,111 @@ func removeRootedEntry(parent rootedDirectory, name string) (err error) {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return parent.remove(name)
+		return anchor.remove(name)
 	}
-	_ = parent.chmod(name, 0o700)
-	root, err := parent.openRoot(name)
-	if err != nil {
-		return err
-	}
-	stack := []rootedRemovalFrame{{root: root, parent: parent, name: name}}
-	defer func() {
-		for index := len(stack) - 1; index >= 0; index-- {
-			if stack[index].root != nil {
-				err = errors.Join(err, stack[index].root.close())
-			}
-		}
-	}()
+	_ = anchor.chmod(name, 0o700)
+	rootPath := &rootedRemovalPath{name: name, depth: 1}
+	stack := []rootedRemovalTask{{path: rootPath}}
 	for len(stack) != 0 {
-		current := &stack[len(stack)-1]
-		if !current.enumerated {
-			_ = current.root.chmod(".", 0o700)
-			entries, readErr := current.root.readDir()
-			if readErr != nil {
-				return readErr
+		task := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if task.remove {
+			if err := removeRootedRemovalPath(anchor, task.path); err != nil {
+				return err
 			}
-			current.entries = entries
-			current.enumerated = true
 			continue
 		}
-		if current.position != len(current.entries) {
-			entry := current.entries[current.position]
-			current.position++
-			childInfo, statErr := current.root.lstat(entry.Name())
+
+		root, _, err := openRootedRemovalPath(anchor, task.path)
+		if err != nil {
+			return err
+		}
+		_ = root.chmod(".", 0o700)
+		entries, readErr := root.readDir()
+		if readErr != nil {
+			return errors.Join(readErr, root.close())
+		}
+		children := make([]*rootedRemovalPath, 0, len(entries))
+		for _, entry := range entries {
+			childInfo, statErr := root.lstat(entry.Name())
 			if errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
 			if statErr != nil {
-				return statErr
+				return errors.Join(statErr, root.close())
 			}
 			if !childInfo.IsDir() || childInfo.Mode()&os.ModeSymlink != 0 {
-				if removeErr := current.root.remove(entry.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-					return removeErr
+				if removeErr := root.remove(entry.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return errors.Join(removeErr, root.close())
 				}
 				continue
 			}
-			_ = current.root.chmod(entry.Name(), 0o700)
-			child, openErr := current.root.openRoot(entry.Name())
-			if openErr != nil {
-				return openErr
-			}
-			stack = append(stack, rootedRemovalFrame{root: child, parent: current.root, name: entry.Name()})
-			continue
+			_ = root.chmod(entry.Name(), 0o700)
+			children = append(children, &rootedRemovalPath{parent: task.path, name: entry.Name(), depth: task.path.depth + 1})
 		}
-
-		child := current.root
-		childParent := current.parent
-		childName := current.name
-		current.root = nil
-		if closeErr := child.close(); closeErr != nil {
+		if closeErr := root.close(); closeErr != nil {
 			return closeErr
 		}
-		stack = stack[:len(stack)-1]
-		if removeErr := childParent.remove(childName); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return removeErr
+		stack = append(stack, rootedRemovalTask{path: task.path, remove: true})
+		for index := len(children) - 1; index >= 0; index-- {
+			stack = append(stack, rootedRemovalTask{path: children[index]})
 		}
 	}
 	return nil
+}
+
+func openRootedRemovalPath(anchor rootedDirectory, path *rootedRemovalPath) (root rootedDirectory, owned bool, err error) {
+	if path == nil {
+		return anchor, false, nil
+	}
+	segments := make([]string, path.depth)
+	for current := path; current != nil; current = current.parent {
+		segments[current.depth-1] = current.name
+	}
+	current := anchor
+	currentOwned := false
+	for _, segment := range segments {
+		next, openErr := current.openRoot(segment)
+		if openErr != nil {
+			if next != nil {
+				openErr = errors.Join(openErr, next.close())
+			}
+			if currentOwned {
+				openErr = errors.Join(openErr, current.close())
+			}
+			return nil, false, openErr
+		}
+		if next == nil {
+			openErr = fmt.Errorf("workspace: open cleanup directory returned no capability")
+			if currentOwned {
+				openErr = errors.Join(openErr, current.close())
+			}
+			return nil, false, openErr
+		}
+		if currentOwned {
+			if closeErr := current.close(); closeErr != nil {
+				return nil, false, errors.Join(closeErr, next.close())
+			}
+		}
+		current = next
+		currentOwned = true
+	}
+	return current, currentOwned, nil
+}
+
+func removeRootedRemovalPath(anchor rootedDirectory, path *rootedRemovalPath) error {
+	parent, owned, err := openRootedRemovalPath(anchor, path.parent)
+	if err != nil {
+		return err
+	}
+	removeErr := parent.remove(path.name)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if owned {
+		removeErr = errors.Join(removeErr, parent.close())
+	}
+	return removeErr
 }
 
 type outputNamespaceCapability interface {

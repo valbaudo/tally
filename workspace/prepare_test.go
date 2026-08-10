@@ -330,7 +330,7 @@ func TestPrepareDeepFiniteTreeUnderLowStackSubprocess(t *testing.T) {
 func TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess(t *testing.T) {
 	const childCase = "DAWN_DEEP_WORKSPACE_CLOSE_CASE"
 	if os.Getenv(childCase) == "" {
-		command := exec.Command(os.Args[0], "-test.run=^TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess$", "-test.count=1")
+		command := hardFileDescriptorLimitCommand(os.Args[0], "-test.run=^TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess$", "-test.count=1")
 		command.Env = append(os.Environ(), childCase+"=1")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("deep tree Environment.Close did not return ordinarily: %v\n%s", err, output)
@@ -354,9 +354,25 @@ func TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess(t *testing.T) {
 	debug.SetMaxStack(64 << 10)
 	result := make(chan error, 1)
 	go func() { result <- environment.Close() }()
-	if err := <-result; err != nil {
-		t.Fatal(err)
+	firstErr := <-result
+	retryErr := environment.Close()
+	if firstErr != nil || retryErr != nil {
+		t.Fatalf("deep cleanup errors: first=%v, retry=%v", firstErr, retryErr)
 	}
+	if _, err := os.Lstat(filepath.Dir(environment.Workspace())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deep runtime root status = %v, want absent", err)
+	}
+}
+
+func hardFileDescriptorLimitCommand(arguments ...string) *exec.Cmd {
+	const script = `
+ulimit -S -n 128 || exit 90
+ulimit -H -n 128 || exit 91
+[ "$(ulimit -S -n)" = 128 ] || exit 92
+[ "$(ulimit -H -n)" = 128 ] || exit 93
+exec "$@"
+`
+	return exec.Command("/bin/sh", append([]string{"-c", script, "dawn-low-fd"}, arguments...)...)
 }
 
 func createDeepDirectoryTree(rootPath string, depth int) (err error) {

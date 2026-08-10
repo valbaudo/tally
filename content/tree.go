@@ -150,17 +150,19 @@ func (r osTreeCaptureRoot) remove(name string) error    { return r.root.Remove(n
 func (r osTreeCaptureRoot) removeAll(name string) error { return removeTreeCaptureEntry(r, name) }
 func (r osTreeCaptureRoot) close() error                { return r.root.Close() }
 
-type treeRemovalFrame struct {
-	root       treeCaptureRoot
-	parent     treeCaptureRoot
-	name       string
-	entries    []os.DirEntry
-	position   int
-	enumerated bool
+type treeRemovalPath struct {
+	parent *treeRemovalPath
+	name   string
+	depth  int
 }
 
-func removeTreeCaptureEntry(parent treeCaptureRoot, name string) (err error) {
-	info, err := parent.lstat(name)
+type treeRemovalTask struct {
+	path   *treeRemovalPath
+	remove bool
+}
+
+func removeTreeCaptureEntry(anchor treeCaptureRoot, name string) error {
+	info, err := anchor.lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -168,68 +170,108 @@ func removeTreeCaptureEntry(parent treeCaptureRoot, name string) (err error) {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return parent.remove(name)
+		return anchor.remove(name)
 	}
-	root, err := parent.openRoot(name)
-	if err != nil {
-		return err
-	}
-	stack := []treeRemovalFrame{{root: root, parent: parent, name: name}}
-	defer func() {
-		for index := len(stack) - 1; index >= 0; index-- {
-			if stack[index].root != nil {
-				err = errors.Join(err, stack[index].root.close())
-			}
-		}
-	}()
+	rootPath := &treeRemovalPath{name: name, depth: 1}
+	stack := []treeRemovalTask{{path: rootPath}}
 	for len(stack) != 0 {
-		current := &stack[len(stack)-1]
-		if !current.enumerated {
-			entries, readErr := current.root.readDir(".")
-			if readErr != nil {
-				return readErr
+		task := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if task.remove {
+			if err := removeTreeRemovalPath(anchor, task.path); err != nil {
+				return err
 			}
-			current.entries = entries
-			current.enumerated = true
 			continue
 		}
-		if current.position != len(current.entries) {
-			entry := current.entries[current.position]
-			current.position++
-			childInfo, statErr := current.root.lstat(entry.Name())
+
+		root, _, err := openTreeRemovalPath(anchor, task.path)
+		if err != nil {
+			return err
+		}
+		entries, readErr := root.readDir(".")
+		if readErr != nil {
+			return errors.Join(readErr, root.close())
+		}
+		children := make([]*treeRemovalPath, 0, len(entries))
+		for _, entry := range entries {
+			childInfo, statErr := root.lstat(entry.Name())
 			if errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
 			if statErr != nil {
-				return statErr
+				return errors.Join(statErr, root.close())
 			}
 			if !childInfo.IsDir() || childInfo.Mode()&os.ModeSymlink != 0 {
-				if removeErr := current.root.remove(entry.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-					return removeErr
+				if removeErr := root.remove(entry.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return errors.Join(removeErr, root.close())
 				}
 				continue
 			}
-			child, openErr := current.root.openRoot(entry.Name())
-			if openErr != nil {
-				return openErr
-			}
-			stack = append(stack, treeRemovalFrame{root: child, parent: current.root, name: entry.Name()})
-			continue
+			children = append(children, &treeRemovalPath{parent: task.path, name: entry.Name(), depth: task.path.depth + 1})
 		}
-
-		child := current.root
-		childParent := current.parent
-		childName := current.name
-		current.root = nil
-		if closeErr := child.close(); closeErr != nil {
+		if closeErr := root.close(); closeErr != nil {
 			return closeErr
 		}
-		stack = stack[:len(stack)-1]
-		if removeErr := childParent.remove(childName); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return removeErr
+		stack = append(stack, treeRemovalTask{path: task.path, remove: true})
+		for index := len(children) - 1; index >= 0; index-- {
+			stack = append(stack, treeRemovalTask{path: children[index]})
 		}
 	}
 	return nil
+}
+
+func openTreeRemovalPath(anchor treeCaptureRoot, path *treeRemovalPath) (root treeCaptureRoot, owned bool, err error) {
+	if path == nil {
+		return anchor, false, nil
+	}
+	segments := make([]string, path.depth)
+	for current := path; current != nil; current = current.parent {
+		segments[current.depth-1] = current.name
+	}
+	current := anchor
+	currentOwned := false
+	for _, segment := range segments {
+		next, openErr := current.openRoot(segment)
+		if openErr != nil {
+			if next != nil {
+				openErr = errors.Join(openErr, next.close())
+			}
+			if currentOwned {
+				openErr = errors.Join(openErr, current.close())
+			}
+			return nil, false, openErr
+		}
+		if next == nil {
+			openErr = fmt.Errorf("content: open cleanup directory returned no capability")
+			if currentOwned {
+				openErr = errors.Join(openErr, current.close())
+			}
+			return nil, false, openErr
+		}
+		if currentOwned {
+			if closeErr := current.close(); closeErr != nil {
+				return nil, false, errors.Join(closeErr, next.close())
+			}
+		}
+		current = next
+		currentOwned = true
+	}
+	return current, currentOwned, nil
+}
+
+func removeTreeRemovalPath(anchor treeCaptureRoot, path *treeRemovalPath) error {
+	parent, owned, err := openTreeRemovalPath(anchor, path.parent)
+	if err != nil {
+		return err
+	}
+	removeErr := parent.remove(path.name)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if owned {
+		removeErr = errors.Join(removeErr, parent.close())
+	}
+	return removeErr
 }
 
 type treeRootTempFile struct {
