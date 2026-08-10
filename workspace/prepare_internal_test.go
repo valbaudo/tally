@@ -94,6 +94,60 @@ func TestCloseRetriesTransientRootRemovalWhileOutputsStayClosed(t *testing.T) {
 	}
 }
 
+func TestCloseRejectsReusedRuntimeRootPathWithoutTouchingReplacement(t *testing.T) {
+	environment := prepareDynamicTreeEnvironment(t)
+	root := filepath.Dir(environment.Workspace())
+	movedRoot := root + ".moved"
+	t.Cleanup(func() {
+		_ = os.RemoveAll(root)
+		_ = os.RemoveAll(movedRoot)
+	})
+	removeCalls := 0
+	realRemove := environment.removeRoot
+	environment.removeRoot = func(path string) error {
+		removeCalls++
+		if removeCalls == 1 {
+			return errors.New("injected transient root removal failure")
+		}
+		return realRemove(path)
+	}
+
+	if err := environment.Close(); err == nil || !strings.Contains(err.Error(), "injected transient root removal failure") {
+		t.Fatalf("first Close error = %v, want injected removal failure", err)
+	}
+	if err := os.Rename(root, movedRoot); err != nil {
+		t.Fatalf("move original runtime root: %v", err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("create replacement runtime root: %v", err)
+	}
+	sentinel := filepath.Join(root, "replacement-sentinel")
+	const sentinelContents = "replacement must survive"
+	if err := os.WriteFile(sentinel, []byte(sentinelContents), 0o600); err != nil {
+		t.Fatalf("write replacement sentinel: %v", err)
+	}
+
+	secondErr := environment.Close()
+	contents, readErr := os.ReadFile(sentinel)
+	if readErr != nil || string(contents) != sentinelContents {
+		t.Fatalf("replacement sentinel after second Close = (%q, %v), want preserved bytes", contents, readErr)
+	}
+	if secondErr == nil || !strings.Contains(secondErr.Error(), "cleanup integrity") || !strings.Contains(secondErr.Error(), "identity changed") {
+		t.Fatalf("second Close error = %v, want runtime-root identity error", secondErr)
+	}
+	thirdErr := environment.Close()
+	if thirdErr == nil || !strings.Contains(thirdErr.Error(), "cleanup integrity") || !strings.Contains(thirdErr.Error(), "identity changed") {
+		t.Fatalf("third Close error = %v, want retained runtime-root integrity error", thirdErr)
+	}
+	contents, readErr = os.ReadFile(sentinel)
+	if readErr != nil || string(contents) != sentinelContents {
+		t.Fatalf("replacement sentinel after repeated Close = (%q, %v), want preserved bytes", contents, readErr)
+	}
+	if removeCalls != 1 {
+		t.Fatalf("root removal calls = %d, want only the initial failed attempt", removeCalls)
+	}
+}
+
 type failingOutputNamespace struct {
 	outputNamespaceCapability
 	failAfterCreate int
