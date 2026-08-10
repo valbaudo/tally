@@ -546,3 +546,50 @@ AWF demonstrates the need for durable named file handoff and capture-before-comm
 | Validation failures | Validation and failure semantics |
 | Simplest viable defaults | Defaults and deliberate absences |
 | Parallel fan-in without destination knobs | Parallel branching and fan-in; Prestige proof |
+
+## Implementation Evidence
+
+The reviewed Task 1–7 implementation history is:
+
+- Task 1: `94eff2572ca866632c480763bd64789a291b4453` — `feat(content): store immutable bytes by typed digest`
+- Task 1 reviewed fix: `6ce6b5a278a384d88f5406ffa52e513b9f00c1d7` — `fix(content): honor cancellation before publication`
+- Task 2: `c25bb482477225376feacbdb87ec82b3b086b96f` — `feat(value): model immutable runtime values`
+- Task 2 reviewed fix: `eba34ad4b94133dbf2799c4d114c307a5aa7bdc5` — `fix(value): make validation preflight iterative`
+- Task 3: `1668006cb347055780e2cdd9d18db85679b67fec` — `feat(content): ingest immutable file values`
+- Task 3 reviewed fix: `1c857f76c44f5aafa8764c4b0639c19cd1e60be6` — `fix(content): publish files without overwrite races`
+- Task 3 reviewed fix: `3eb00b8c6bb9530f68d17a1a169644d192647841` — `fix(content): tolerate transient empty file reads`
+- Task 4: `ad110d6ce1f8f06ef56009c8f9d59953878053ae` — `feat(content): capture portable immutable trees`
+- Task 4 reviewed fix: `535fe4bdb5a5b9e905f526373f974e9ad95be436` — `fix(content): confine portable tree backends`
+- Task 4 reviewed fix: `e6b19cd7287e6229fb456c0a78db5566c5089939` — `fix(content): bind materialized tree identities`
+- Task 4 reviewed fix: `b0dc262c9fd5577a9de5d95ee725c243a61ba547` — `fix(content): roll back on final close failure`
+- Task 5: `e79eb8f080f67325486040811a10c3c15a53e19e` — `feat(workflow): declare file delivery semantics`
+- Task 5 reviewed fix: `b03ebbb5d0aca1da952462bb4712f2da620253ed` — `fix(workflow): traverse delivery types iteratively`
+- Task 6: `a6dc281ce72d4edccd6730607d5ab88f918dfb45` — `feat(workspace): prepare private invocation roots`
+- Task 6 reviewed fix: `6b435591e3ee05a3b102974ee21522c33070166b` — `fix(workspace): confine dynamic slots and retry cleanup`
+- Task 6 reviewed fix: `30b497c45d9506bde5ea99b63f3282e79aeeacc2` — `fix(workspace): guard invocation root cleanup`
+- Task 6 reviewed fix: `ca87947ed44504ed68ec06b574ffdc7fcacec908` — `fix(workspace): remove invocation roots safely`
+- Task 7: `dc41ece9a8646af7b5633b7631fdfda71f3e3b0e` — `feat(workspace): capture one complete candidate`
+- Task 7 reviewed fix: `863388e786705675384d5d06988df3fe54c8e53a` — `fix(workspace): bind capture provenance and roots`
+
+The syntax-independent Prestige-shaped tracer's first execution was already green, so Task 8 required no integration fix:
+
+```text
+go test ./workspace -run 'TestPrestigeValueFlow|TestProductInvariant' -count=1
+ok   github.com/valbaudo/dawn/workspace 1.107s
+```
+
+Verification commands:
+
+```bash
+go test ./content ./value ./workflow ./workspace -count=1
+go test -race ./content ./value ./workflow ./workspace -count=1
+go test ./... -count=1
+go vet ./...
+git diff --check
+if rg -n 'github\.com/valbaudo/dawn/(store|plan|gate|backend|proc)|dawn\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
+if rg -n 'KindWorkspace|artifact(s)?\s+map|input_files|output_files|capture_path|destination_path|merge_policy|provider_file_id|workspace_dir|mounts:' content value workflow workspace; then exit 1; fi
+```
+
+Every verification command exited zero; both invariant scans produced no matches.
+
+> This implementation provides immutable values/content and local workspace preparation/candidate capture. GitHub #7 owns structured scheduling and propagation; #8 owns durable commits, replay, and reuse; #9 owns adapter preparation/run/recovery; #10 owns the native script ABI and process lifecycle; #11 owns sub-workflow linking; #12 owns author syntax.
