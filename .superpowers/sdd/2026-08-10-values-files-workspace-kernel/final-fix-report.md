@@ -13,6 +13,7 @@ All seven accepted final-review findings are corrected without a compatibility l
 - `475e3c47d22cddea35d9b7f2d9cb12e1d6f23213` — `Make public finite traversals stack safe`
 - `a1e53243bc9da1586df2bd4e1b404e6cd93ea327` — `Fix value and capture boundary semantics`
 - `64152784c574e02f590bd0ab907821f8f6d388f0` — `Document final capture semantics`
+- `74e6b2c948b90c7abff33634159f1c40e8d7a1be` — `Bound deep cleanup descriptor usage`
 
 ## RED/GREEN evidence
 
@@ -27,6 +28,7 @@ Observed REDs before production changes:
 - Deep finite workspace preparation and `Environment.Close` overflowed in `filepath.WalkDir`/`fs.WalkDir` cleanup paths.
 - A long descending/ascending/oscillating symlink target required 162,565 allocations in the focused regression.
 - The final rollback-focused low-stack subprocess exposed one remaining `os.Root.RemoveAll` stack overflow.
+- Fix Round 2 lowered both the hard and soft descriptor limits to 128 inside the existing 512-deep cleanup subprocesses. `Environment.Close` and tree rollback removal each failed with `EMFILE`, and an immediate retry repeated the same failure, because the first iterative walkers retained one `os.Root` per depth.
 
 GREEN corrections and regressions:
 
@@ -34,6 +36,7 @@ GREEN corrections and regressions:
 - Workflow contract cloning and canonical type emission are iterative; public `workflow.Compile` returns ordinarily under the low-stack regression.
 - Value and workspace paths use persistent linked nodes where extension is frequent. Type canonical wire emission is a flat prefix traversal.
 - Workspace staging/read-only traversal and cleanup are iterative handle-relative walks. Tree rollback cleanup is also iterative and handle-relative; no production `filepath.WalkDir`, `fs.WalkDir`, or `RemoveAll` remains in `content`/`workspace`.
+- Fix Round 2 changed both removal walks to keep persistent path-segment cursors and visit/remove tasks in memory. Each operation reopens the required directory from one retained anchor, closes every previous intermediate before continuing, and later reopens the parent for postorder removal. Descriptor use is constant/bounded, paths are never joined into a `PATH_MAX`-dependent string, and there is no depth or descriptor knob. The strengthened subprocesses verify first cleanup, retry, and target absence under both the 128-FD limit and the 64 KiB stack limit.
 - Tree symlink resolution uses interned linked path-node identities and is near-linear without a depth/component limit.
 - Focused low-stack/complexity regressions all pass in `content/tree_test.go`, `content/tree_materialize_test.go`, `value/type_test.go`, `value/literal_test.go`, `value/value_validate_test.go`, `workflow/compile_test.go`, and `workspace/prepare_test.go`.
 
@@ -83,7 +86,7 @@ GREEN corrections:
 
 - File materialization tracks successful publication and removes that new target whenever a later deferred cleanup makes the operation fail; retry succeeds.
 - Tree materialization arms rollback immediately after destination creation, before inspection, and removes every newly created destination on later error.
-- Existing exact-name/transformed-name/final-close rollback regressions remain green, along with the new low-stack iterative rollback removal test.
+- Existing exact-name/transformed-name/final-close rollback regressions remain green, along with the low-stack and hard-128-FD iterative rollback removal test.
 
 ### 7. Typed-nil built-in stores
 
@@ -111,6 +114,16 @@ ok github.com/valbaudo/dawn/workflow
 ok github.com/valbaudo/dawn/workspace
 ```
 
+Fix Round 2 focused regressions and existing error seams:
+
+```text
+go test ./workspace -run '^(TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess|TestPrepareCloseIsIdempotentAndRemovesAllPrivateState|TestPrepareRollsBackCompleteRuntimeRootOnInputFailure|TestCloseRetriesTransientRootRemovalWhileOutputsStayClosed|TestCloseRejectsReusedRuntimeRootPathWithoutTouchingReplacement|TestCloseDoesNotRecursivelyDeleteReplacementSwappedBeforeFinalRemove)$' -count=1
+ok github.com/valbaudo/dawn/workspace
+
+go test ./content -run '^(TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack|TestMaterializeTreeRemovesOnlyNewDestinationAfterFailure|TestMaterializeTreeRollsBackAfterFinalParentCloseFailure|TestMaterializeTreeRollsBackWhenFirstPostCreateInspectionFails|TestMaterializeTreeRemovesTransformedDestinationRootByActualName|TestMaterializeTreeRejectsExactNameDecoyForCreatedObject)$' -count=1
+ok github.com/valbaudo/dawn/content
+```
+
 Required matrix:
 
 ```text
@@ -128,6 +141,9 @@ exit 0
 
 git diff --check
 exit 0
+
+git diff --check fc52d02e48b12c7cb9b5bc4cffcb2da41f9186dd..HEAD
+exit 0
 ```
 
 Both exact plan invariant scans exited zero with no matches:
@@ -141,4 +157,4 @@ Additional surface scans found no `Outputs.Value` reference and no production `f
 
 ## Concerns and boundaries
 
-No accepted finding remains unresolved. Stable double capture is an ordinary consistency check over a pinned root; it intentionally does not promise isolation against a process that continues mutating files. Durable candidate commit/replay, scheduling, adapter execution, native process lifecycle, and later-ticket behavior remain outside this kernel.
+No accepted finding remains unresolved. Constant-descriptor removal may perform work proportional to encoded path volume because it deliberately reopens deep parents instead of retaining their descriptors; no configured limit or full joined path is introduced. Stable double capture is an ordinary consistency check over a pinned root; it intentionally does not promise isolation against a process that continues mutating files. Durable candidate commit/replay, scheduling, adapter execution, native process lifecycle, and later-ticket behavior remain outside this kernel.
