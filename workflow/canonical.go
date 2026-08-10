@@ -41,11 +41,22 @@ type fieldWire struct {
 }
 
 type typeWire struct {
+	Nodes []typeNodeWire `json:"nodes"`
+}
+
+// typeNodeWire is one node in a prefix-ordered type tree. Keeping the private
+// canonical representation flat makes both construction and JSON encoding
+// stack-safe for deeply nested finite public types.
+type typeNodeWire struct {
 	Kind   value.Kind        `json:"kind"`
-	Elem   *typeWire         `json:"elem"`
-	Fields []fieldWire       `json:"fields"`
+	Fields []typeFieldWire   `json:"fields"`
 	Enum   []json.RawMessage `json:"enum"`
 	Media  []stringWire      `json:"media"`
+}
+
+type typeFieldWire struct {
+	Name     stringWire `json:"name"`
+	Optional bool       `json:"optional"`
 }
 
 type nodeWire struct {
@@ -161,30 +172,39 @@ func encodeContract(contract value.Contract) contractWire {
 }
 
 func encodeType(typ value.Type) typeWire {
-	wire := typeWire{Kind: typ.Kind()}
-	switch typ.Kind() {
-	case value.ListKind, value.MapKind:
-		element, _ := typ.Element()
-		encoded := encodeType(element)
-		wire.Elem = &encoded
-	case value.ObjectKind:
-		fields := typ.Fields()
-		wire.Fields = make([]fieldWire, len(fields))
-		for index, field := range fields {
-			wire.Fields[index] = fieldWire{Name: encodeString(field.Name()), Type: encodeType(field.Type()), Optional: field.Optional()}
+	wire := typeWire{}
+	pending := []value.Type{typ}
+	for len(pending) != 0 {
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		node := typeNodeWire{Kind: current.Kind()}
+		switch current.Kind() {
+		case value.ListKind, value.MapKind:
+			element, _ := current.Element()
+			pending = append(pending, element)
+		case value.ObjectKind:
+			fields := current.Fields()
+			node.Fields = make([]typeFieldWire, len(fields))
+			for index, field := range fields {
+				node.Fields[index] = typeFieldWire{Name: encodeString(field.Name()), Optional: field.Optional()}
+			}
+			for index := len(fields) - 1; index >= 0; index-- {
+				pending = append(pending, fields[index].Type())
+			}
+		case value.EnumKind:
+			values := current.EnumValues()
+			node.Enum = make([]json.RawMessage, len(values))
+			for index, member := range values {
+				node.Enum[index] = json.RawMessage(member.Bytes())
+			}
+		case value.FileKind:
+			media := current.Media()
+			node.Media = make([]stringWire, len(media))
+			for index, constraint := range media {
+				node.Media[index] = encodeString(constraint)
+			}
 		}
-	case value.EnumKind:
-		values := typ.EnumValues()
-		wire.Enum = make([]json.RawMessage, len(values))
-		for index, member := range values {
-			wire.Enum[index] = json.RawMessage(member.Bytes())
-		}
-	case value.FileKind:
-		media := typ.Media()
-		wire.Media = make([]stringWire, len(media))
-		for index, constraint := range media {
-			wire.Media[index] = encodeString(constraint)
-		}
+		wire.Nodes = append(wire.Nodes, node)
 	}
 	return wire
 }

@@ -613,19 +613,56 @@ func pathSlotIdentity(domain string, canonical []byte) string {
 // process with the same user authority can change these modes, so this is not
 // an isolation boundary; the committed repository content remains immutable.
 func bestEffortReadOnly(root string) {
-	paths := make([]string, 0)
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err == nil {
-			paths = append(paths, path)
-		}
-		return nil
-	})
-	for index := len(paths) - 1; index >= 0; index-- {
-		info, err := os.Lstat(paths[index])
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if !info.IsDir() {
+		_ = os.Chmod(root, info.Mode().Perm()&^0o222)
+		return
+	}
+	capability, err := os.OpenRoot(root)
+	if err != nil {
+		return
+	}
+	type frame struct {
+		root       *os.Root
+		entries    []os.DirEntry
+		position   int
+		enumerated bool
+	}
+	stack := []frame{{root: capability}}
+	for len(stack) != 0 {
+		current := &stack[len(stack)-1]
+		if !current.enumerated {
+			current.entries, _ = fs.ReadDir(current.root.FS(), ".")
+			current.enumerated = true
 			continue
 		}
-		_ = os.Chmod(paths[index], info.Mode().Perm()&^0o222)
+		if current.position == len(current.entries) {
+			if currentInfo, statErr := current.root.Lstat("."); statErr == nil {
+				_ = current.root.Chmod(".", currentInfo.Mode().Perm()&^0o222)
+			}
+			_ = current.root.Close()
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		entry := current.entries[current.position]
+		current.position++
+		childInfo, statErr := current.root.Lstat(entry.Name())
+		if statErr != nil || childInfo.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if !childInfo.IsDir() {
+			_ = current.root.Chmod(entry.Name(), childInfo.Mode().Perm()&^0o222)
+			continue
+		}
+		child, openErr := current.root.OpenRoot(entry.Name())
+		if openErr != nil {
+			_ = current.root.Chmod(entry.Name(), childInfo.Mode().Perm()&^0o222)
+			continue
+		}
+		stack = append(stack, frame{root: child})
 	}
 }
 
@@ -732,24 +769,15 @@ func (r *pinnedInvocationRoot) removeContents() error {
 	if err != nil || !present {
 		return err
 	}
-	_ = fs.WalkDir(r.root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if entry.IsDir() {
-			_ = r.root.Chmod(path, 0o700)
-		} else {
-			_ = r.root.Chmod(path, 0o600)
-		}
-		return nil
-	})
+	_ = r.root.Chmod(".", 0o700)
 	entries, err := fs.ReadDir(r.root.FS(), ".")
 	if err != nil {
 		return err
 	}
 	var removeErr error
+	root := osRootedDirectory{root: r.root}
 	for _, entry := range entries {
-		if err := r.root.RemoveAll(entry.Name()); err != nil {
+		if err := removeRootedEntry(root, entry.Name()); err != nil {
 			removeErr = errors.Join(removeErr, fmt.Errorf("remove runtime root child: %w", err))
 		}
 	}
@@ -836,18 +864,26 @@ type schemaSegment struct {
 	name string
 }
 
+type schemaCursor struct {
+	parent  *schemaCursor
+	segment schemaSegment
+	length  int
+}
+
 type outputTask struct {
 	typ     value.Type
-	schema  []schemaSegment
+	schema  *schemaCursor
 	static  value.Path
 	dynamic bool
 }
 
 type rootedDirectory interface {
 	lstat(string) (fs.FileInfo, error)
+	readDir() ([]fs.DirEntry, error)
+	chmod(string, fs.FileMode) error
 	mkdir(string, fs.FileMode) error
 	openRoot(string) (rootedDirectory, error)
-	removeAll(string) error
+	remove(string) error
 	close() error
 }
 
@@ -855,6 +891,14 @@ type osRootedDirectory struct{ root *os.Root }
 
 func (r osRootedDirectory) lstat(name string) (fs.FileInfo, error) {
 	return r.root.Lstat(name)
+}
+
+func (r osRootedDirectory) readDir() ([]fs.DirEntry, error) {
+	return fs.ReadDir(r.root.FS(), ".")
+}
+
+func (r osRootedDirectory) chmod(name string, mode fs.FileMode) error {
+	return r.root.Chmod(name, mode)
 }
 
 func (r osRootedDirectory) mkdir(name string, mode fs.FileMode) error {
@@ -869,8 +913,93 @@ func (r osRootedDirectory) openRoot(name string) (rootedDirectory, error) {
 	return osRootedDirectory{root: root}, nil
 }
 
-func (r osRootedDirectory) removeAll(name string) error { return r.root.RemoveAll(name) }
-func (r osRootedDirectory) close() error                { return r.root.Close() }
+func (r osRootedDirectory) remove(name string) error { return r.root.Remove(name) }
+func (r osRootedDirectory) close() error             { return r.root.Close() }
+
+type rootedRemovalFrame struct {
+	root       rootedDirectory
+	parent     rootedDirectory
+	name       string
+	entries    []fs.DirEntry
+	position   int
+	enumerated bool
+}
+
+func removeRootedEntry(parent rootedDirectory, name string) (err error) {
+	info, err := parent.lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return parent.remove(name)
+	}
+	_ = parent.chmod(name, 0o700)
+	root, err := parent.openRoot(name)
+	if err != nil {
+		return err
+	}
+	stack := []rootedRemovalFrame{{root: root, parent: parent, name: name}}
+	defer func() {
+		for index := len(stack) - 1; index >= 0; index-- {
+			if stack[index].root != nil {
+				err = errors.Join(err, stack[index].root.close())
+			}
+		}
+	}()
+	for len(stack) != 0 {
+		current := &stack[len(stack)-1]
+		if !current.enumerated {
+			_ = current.root.chmod(".", 0o700)
+			entries, readErr := current.root.readDir()
+			if readErr != nil {
+				return readErr
+			}
+			current.entries = entries
+			current.enumerated = true
+			continue
+		}
+		if current.position != len(current.entries) {
+			entry := current.entries[current.position]
+			current.position++
+			childInfo, statErr := current.root.lstat(entry.Name())
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			if statErr != nil {
+				return statErr
+			}
+			if !childInfo.IsDir() || childInfo.Mode()&os.ModeSymlink != 0 {
+				if removeErr := current.root.remove(entry.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return removeErr
+				}
+				continue
+			}
+			_ = current.root.chmod(entry.Name(), 0o700)
+			child, openErr := current.root.openRoot(entry.Name())
+			if openErr != nil {
+				return openErr
+			}
+			stack = append(stack, rootedRemovalFrame{root: child, parent: current.root, name: entry.Name()})
+			continue
+		}
+
+		child := current.root
+		childParent := current.parent
+		childName := current.name
+		current.root = nil
+		if closeErr := child.close(); closeErr != nil {
+			return closeErr
+		}
+		stack = stack[:len(stack)-1]
+		if removeErr := childParent.remove(childName); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+	}
+	return nil
+}
 
 type outputNamespaceCapability interface {
 	createMemberRoot(string) (rootedDirectory, bool, error)
@@ -972,7 +1101,7 @@ func (n *pinnedOutputNamespace) removeMember(name string) error {
 	if n == nil || n.root == nil || n.closed {
 		return fmt.Errorf("workspace: dynamic output namespace capability is closed")
 	}
-	return n.root.removeAll(name)
+	return removeRootedEntry(n.root, name)
 }
 
 func (n *pinnedOutputNamespace) close() error {
@@ -1015,7 +1144,7 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 	for index := len(ports) - 1; index >= 0; index-- {
 		port := ports[index]
 		tasks = append(tasks, outputTask{
-			typ: port.Type(), schema: []schemaSegment{{kind: schemaField, name: port.Name()}},
+			typ: port.Type(), schema: appendSchema(nil, schemaSegment{kind: schemaField, name: port.Name()}),
 			static: value.Path{}.Field(port.Name()),
 		})
 	}
@@ -1062,7 +1191,8 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 			if !task.dynamic && len(published) != 0 && string(canonicalPath(task.static)) == string(publishedCanonical) {
 				continue
 			}
-			schemaCanonical := canonicalSchema(task.schema)
+			schema := materializeSchema(task.schema)
+			schemaCanonical := canonicalSchema(schema)
 			schemaKey := string(schemaCanonical)
 			if _, exists := plans[schemaKey]; exists {
 				return nil, nil, nil, nil, fmt.Errorf("workspace: duplicate output schema position")
@@ -1108,7 +1238,7 @@ func prepareOutputs(ctx context.Context, contract value.Contract, published []st
 				namespaces = append(namespaces, namespace)
 			}
 			record := Output{
-				valuePath: cloneValuePath(task.static), schemaPath: renderSchema(task.schema), kind: task.typ.Kind(),
+				valuePath: cloneValuePath(task.static), schemaPath: renderSchema(schema), kind: task.typ.Kind(),
 				dynamic: task.dynamic, location: slot, relativeLocation: relativeSlot,
 			}
 			if !task.dynamic {
@@ -1213,11 +1343,24 @@ func findOutputField(fields []value.Field, name string) (value.Field, bool) {
 	return value.Field{}, false
 }
 
-func appendSchema(schema []schemaSegment, segment schemaSegment) []schemaSegment {
-	cloned := make([]schemaSegment, len(schema), len(schema)+1)
-	copy(cloned, schema)
-	cloned = append(cloned, segment)
-	return cloned
+func appendSchema(schema *schemaCursor, segment schemaSegment) *schemaCursor {
+	length := 1
+	if schema != nil {
+		length += schema.length
+	}
+	return &schemaCursor{parent: schema, segment: segment, length: length}
+}
+
+func materializeSchema(schema *schemaCursor) []schemaSegment {
+	if schema == nil {
+		return nil
+	}
+	segments := make([]schemaSegment, schema.length)
+	for index := len(segments) - 1; index >= 0; index-- {
+		segments[index] = schema.segment
+		schema = schema.parent
+	}
+	return segments
 }
 
 func canonicalSchema(schema []schemaSegment) []byte {

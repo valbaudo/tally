@@ -117,19 +117,7 @@ func (o Output) RelativeLocation() string { return o.relativeLocation }
 func (o Output) Dynamic() bool { return o.dynamic }
 
 func cloneValuePath(path value.Path) value.Path {
-	var cloned value.Path
-	for _, segment := range path.Segments() {
-		switch segment.Kind() {
-		case value.FieldSegment:
-			name, _ := segment.Name()
-			cloned = cloned.Field(name)
-		case value.MapKeySegment:
-			name, _ := segment.Name()
-			cloned = cloned.MapKey(name)
-		case value.ListIndexSegment:
-			index, _ := segment.Index()
-			cloned = cloned.ListIndex(index)
-		}
-	}
-	return cloned
+	// Path is an immutable persistent value, so sharing its private nodes is a
+	// defensive copy without repeating a deep traversal.
+	return path
 }

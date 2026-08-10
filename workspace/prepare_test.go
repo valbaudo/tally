@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/valbaudo/dawn/content"
 	"github.com/valbaudo/dawn/value"
@@ -216,7 +217,9 @@ func TestPrepareCloseIsIdempotentAndRemovesAllPrivateState(t *testing.T) {
 func TestPrepareDeepFiniteInputAndOutputSchemasDoNotOverflowStack(t *testing.T) {
 	const childCase = "DAWN_DEEP_WORKSPACE_PREPARE_CASE"
 	if os.Getenv(childCase) == "" {
-		command := exec.Command(os.Args[0], "-test.run=^TestPrepareDeepFiniteInputAndOutputSchemasDoNotOverflowStack$")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPrepareDeepFiniteInputAndOutputSchemasDoNotOverflowStack$", "-test.count=1")
 		command.Env = append(os.Environ(), childCase+"=1")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("deep workspace preparation did not return an ordinary result: %v\n%s", err, output)
@@ -236,7 +239,7 @@ func TestPrepareDeepFiniteInputAndOutputSchemasDoNotOverflowStack(t *testing.T) 
 	inputValue := value.NewFileValue(file)
 	outputType := value.Tree()
 	concreteOutput := value.Path{}.Field("output")
-	for range 2048 {
+	for range 50_000 {
 		inputType, err = value.List(inputType)
 		if err != nil {
 			t.Fatal(err)
@@ -253,7 +256,7 @@ func TestPrepareDeepFiniteInputAndOutputSchemasDoNotOverflowStack(t *testing.T) 
 	leaf := compileLeaf(t, workflow.Script, inputs, outputs, nil, nil)
 	input := mustObject(t, mustEntry(t, "input", inputValue))
 
-	debug.SetMaxStack(64 << 10)
+	debug.SetMaxStack(1 << 20)
 	result := make(chan error, 1)
 	go func() {
 		environment, err := workspace.Prepare(context.Background(), repository, leaf, input)
@@ -268,6 +271,115 @@ func TestPrepareDeepFiniteInputAndOutputSchemasDoNotOverflowStack(t *testing.T) 
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestPrepareDeepFiniteTreeUnderLowStackSubprocess(t *testing.T) {
+	const childCase = "DAWN_DEEP_WORKSPACE_TREE_PREPARE_CASE"
+	if os.Getenv(childCase) == "" {
+		command := exec.Command(os.Args[0], "-test.run=^TestPrepareDeepFiniteTreeUnderLowStackSubprocess$", "-test.count=1")
+		command.Env = append(os.Environ(), childCase+"=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("deep tree Prepare did not return ordinarily: %v\n%s", err, output)
+		}
+		return
+	}
+
+	const depth = 512
+	source := t.TempDir()
+	if err := createDeepDirectoryTree(source, depth); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repository.CaptureTree(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := mustContract(t, mustField(t, "tree", value.Tree()))
+	leaf := compileLeaf(t, workflow.Script, inputs, value.EmptyContract(), nil, nil)
+	input := mustObject(t, mustEntry(t, "tree", value.NewTreeValue(tree)))
+
+	previous := debug.SetMaxStack(64 << 10)
+	result := make(chan struct {
+		environment *workspace.Environment
+		err         error
+	}, 1)
+	go func() {
+		environment, prepareErr := workspace.Prepare(context.Background(), repository, leaf, input)
+		result <- struct {
+			environment *workspace.Environment
+			err         error
+		}{environment: environment, err: prepareErr}
+	}()
+	prepared := <-result
+	debug.SetMaxStack(previous)
+	if prepared.environment != nil {
+		defer func() {
+			if err := prepared.environment.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+		}()
+	}
+	if prepared.err != nil {
+		t.Fatal(prepared.err)
+	}
+}
+
+func TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess(t *testing.T) {
+	const childCase = "DAWN_DEEP_WORKSPACE_CLOSE_CASE"
+	if os.Getenv(childCase) == "" {
+		command := exec.Command(os.Args[0], "-test.run=^TestEnvironmentCloseDeepFiniteTreeUnderLowStackSubprocess$", "-test.count=1")
+		command.Env = append(os.Environ(), childCase+"=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("deep tree Environment.Close did not return ordinarily: %v\n%s", err, output)
+		}
+		return
+	}
+
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), value.EmptyContract(), nil, nil)
+	environment, err := workspace.Prepare(context.Background(), repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createDeepDirectoryTree(environment.Workspace(), 512); err != nil {
+		t.Fatal(err)
+	}
+
+	debug.SetMaxStack(64 << 10)
+	result := make(chan error, 1)
+	go func() { result <- environment.Close() }()
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func createDeepDirectoryTree(rootPath string, depth int) (err error) {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	for range depth {
+		if err := root.Mkdir("d", 0o700); err != nil {
+			return err
+		}
+		child, err := root.OpenRoot("d")
+		if err != nil {
+			return err
+		}
+		if err := root.Close(); err != nil {
+			_ = child.Close()
+			return err
+		}
+		root = child
+	}
+	return nil
 }
 
 func TestPrepareMaterializesBaseAndNamedInputs(t *testing.T) {

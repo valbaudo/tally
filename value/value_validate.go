@@ -21,7 +21,7 @@ func (e *ValidationError) Error() string {
 
 // Path returns a defensive copy of the mismatch path.
 func (e *ValidationError) Path() Path {
-	return Path{segments: e.path.Segments()}
+	return pathFromSegments(e.path.Segments())
 }
 
 type validationPath struct {
@@ -47,7 +47,7 @@ func materializeValidationPath(node *validationPath) Path {
 		segments[i] = node.segment
 		node = node.parent
 	}
-	return Path{segments: segments}
+	return pathFromSegments(segments)
 }
 
 func validationFailure(path *validationPath, problem string) error {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"path"
-	"slices"
 	"strings"
 )
 
@@ -219,7 +218,7 @@ func validateTreeEntries(entries []treeEntry) error {
 			return fmt.Errorf("content: tree manifest entry has no directory parent")
 		}
 	}
-	if err := validateTreeSymlinks(entries, byPath); err != nil {
+	if err := validateTreeSymlinks(entries); err != nil {
 		return err
 	}
 	return nil
@@ -249,39 +248,70 @@ func treeSegmentsKey(segments []string) string {
 
 type symlinkResolutionFrame struct {
 	index            int
-	resolved         []string
+	resolved         *treePathNode
 	parts            []string
 	position         int
 	waiting          int
 	requireDirectory bool
 }
 
-func validateTreeSymlinks(entries []treeEntry, byPath map[string]int) error {
+type treePathNode struct {
+	parent   *treePathNode
+	children map[string]*treePathNode
+	entry    int
+	kind     treeKind
+}
+
+func indexTreePaths(entries []treeEntry) (*treePathNode, []*treePathNode) {
+	root := &treePathNode{entry: -1, kind: directoryEntry}
+	nodes := make([]*treePathNode, len(entries))
+	for index, entry := range entries {
+		current := root
+		for _, segment := range entry.segments {
+			if current.children == nil {
+				current.children = make(map[string]*treePathNode)
+			}
+			child := current.children[segment]
+			if child == nil {
+				child = &treePathNode{parent: current, entry: -1}
+				current.children[segment] = child
+			}
+			current = child
+		}
+		current.entry = index
+		current.kind = entry.kind
+		nodes[index] = current
+	}
+	return root, nodes
+}
+
+func validateTreeSymlinks(entries []treeEntry) error {
 	const (
 		unvisited uint8 = iota
 		visiting
 		resolved
 	)
+	rootNode, entryNodes := indexTreePaths(entries)
 	states := make([]uint8, len(entries))
-	resolutions := make([][]string, len(entries))
+	resolutions := make([]*treePathNode, len(entries))
 	for rootIndex, root := range entries {
 		if root.kind != symlinkEntry || states[rootIndex] == resolved {
 			continue
 		}
 		states[rootIndex] = visiting
-		stack := []symlinkResolutionFrame{newSymlinkResolutionFrame(rootIndex, root)}
+		stack := []symlinkResolutionFrame{newSymlinkResolutionFrame(rootIndex, root, entryNodes[rootIndex])}
 		for len(stack) != 0 {
 			frame := &stack[len(stack)-1]
 			if frame.waiting >= 0 {
-				frame.resolved = slices.Clone(resolutions[frame.waiting])
+				frame.resolved = resolutions[frame.waiting]
 				frame.waiting = -1
 				continue
 			}
 			if frame.position == len(frame.parts) {
-				if frame.requireDirectory && !treePathIsDirectory(entries, byPath, frame.resolved) {
+				if frame.requireDirectory && !treePathIsDirectory(frame.resolved) {
 					return fmt.Errorf("content: tree symlink target does not resolve to a directory")
 				}
-				resolutions[frame.index] = slices.Clone(frame.resolved)
+				resolutions[frame.index] = frame.resolved
 				states[frame.index] = resolved
 				stack = stack[:len(stack)-1]
 				continue
@@ -292,29 +322,29 @@ func validateTreeSymlinks(entries []treeEntry, byPath map[string]int) error {
 				continue
 			}
 			if part == "." {
-				if !treePathIsDirectory(entries, byPath, frame.resolved) {
+				if !treePathIsDirectory(frame.resolved) {
 					return fmt.Errorf("content: tree symlink traverses a non-directory")
 				}
 				continue
 			}
 			if part == ".." {
-				if len(frame.resolved) == 0 {
+				if frame.resolved == rootNode {
 					return fmt.Errorf("content: tree symlink target escapes the root")
 				}
-				if !treePathIsDirectory(entries, byPath, frame.resolved) {
+				if !treePathIsDirectory(frame.resolved) {
 					return fmt.Errorf("content: tree symlink traverses a non-directory")
 				}
-				frame.resolved = frame.resolved[:len(frame.resolved)-1]
+				frame.resolved = frame.resolved.parent
 				continue
 			}
-			if !treePathIsDirectory(entries, byPath, frame.resolved) {
+			if !treePathIsDirectory(frame.resolved) {
 				return fmt.Errorf("content: tree symlink traverses a non-directory")
 			}
-			candidate := append(slices.Clone(frame.resolved), part)
-			entryIndex, exists := byPath[treeSegmentsKey(candidate)]
-			if !exists {
+			candidate := frame.resolved.children[part]
+			if candidate == nil || candidate.entry < 0 {
 				return fmt.Errorf("content: tree symlink target does not resolve")
 			}
+			entryIndex := candidate.entry
 			entry := entries[entryIndex]
 			if entry.kind != symlinkEntry {
 				frame.resolved = candidate
@@ -324,31 +354,27 @@ func validateTreeSymlinks(entries []treeEntry, byPath map[string]int) error {
 			case visiting:
 				return fmt.Errorf("content: tree symlink cycle does not resolve")
 			case resolved:
-				frame.resolved = slices.Clone(resolutions[entryIndex])
+				frame.resolved = resolutions[entryIndex]
 			default:
 				states[entryIndex] = visiting
 				frame.waiting = entryIndex
-				stack = append(stack, newSymlinkResolutionFrame(entryIndex, entry))
+				stack = append(stack, newSymlinkResolutionFrame(entryIndex, entry, entryNodes[entryIndex]))
 			}
 		}
 	}
 	return nil
 }
 
-func newSymlinkResolutionFrame(index int, entry treeEntry) symlinkResolutionFrame {
+func newSymlinkResolutionFrame(index int, entry treeEntry, node *treePathNode) symlinkResolutionFrame {
 	return symlinkResolutionFrame{
 		index:            index,
-		resolved:         slices.Clone(entry.segments[:len(entry.segments)-1]),
+		resolved:         node.parent,
 		parts:            strings.Split(entry.target, "/"),
 		waiting:          -1,
 		requireDirectory: strings.HasSuffix(entry.target, "/"),
 	}
 }
 
-func treePathIsDirectory(entries []treeEntry, byPath map[string]int, segments []string) bool {
-	if len(segments) == 0 {
-		return true
-	}
-	index, exists := byPath[treeSegmentsKey(segments)]
-	return exists && entries[index].kind == directoryEntry
+func treePathIsDirectory(node *treePathNode) bool {
+	return node != nil && node.kind == directoryEntry
 }

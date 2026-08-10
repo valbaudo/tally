@@ -447,6 +447,36 @@ func TestTreeManifestProcessingHandlesDeepSymlinkGraphsIteratively(t *testing.T)
 	}
 }
 
+func TestTreeSymlinkResolutionLongOscillatingTargetIsNearLinear(t *testing.T) {
+	const (
+		depth        = 512
+		oscillations = 20_000
+	)
+	entries := make([]treeEntry, 0, depth+1)
+	segments := make([]string, 0, depth+1)
+	for range depth {
+		segments = append(segments, "d")
+		entries = append(entries, treeEntry{segments: slices.Clone(segments), kind: directoryEntry})
+	}
+	segments = append(segments, "link")
+	entries = append(entries, treeEntry{
+		segments: slices.Clone(segments),
+		kind:     symlinkEntry,
+		target:   strings.Repeat("../d/", oscillations),
+	})
+
+	var validationErr error
+	allocations := testing.AllocsPerRun(1, func() {
+		validationErr = validateTreeEntries(entries)
+	})
+	if validationErr != nil {
+		t.Fatal(validationErr)
+	}
+	if allocations > 10_000 {
+		t.Fatalf("long oscillating target allocations = %.0f, want near-linear path-node reuse", allocations)
+	}
+}
+
 func makePortableTree(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

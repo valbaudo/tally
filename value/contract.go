@@ -7,8 +7,9 @@ import (
 
 // Contract is a valid, closed set of top-level ports.
 type Contract struct {
-	valid bool
-	ports []Field
+	valid       bool
+	constructed bool
+	ports       []Field
 }
 
 // NewContract constructs a closed contract from declared top-level ports.
@@ -20,23 +21,25 @@ func NewContract(ports ...Field) (Contract, error) {
 	if problem.duplicate != "" {
 		return Contract{}, fmt.Errorf("contract has duplicate port %q", problem.duplicate)
 	}
-	return Contract{valid: true, ports: copy}, nil
+	return Contract{valid: true, constructed: true, ports: copy}, nil
 }
 
 // EmptyContract constructs an explicitly valid contract with no ports.
-func EmptyContract() Contract { return Contract{valid: true} }
+func EmptyContract() Contract { return Contract{valid: true, constructed: true} }
 
 // Valid reports whether c was constructed as a contract.
 func (c Contract) Valid() bool {
 	if !c.valid {
 		return false
 	}
+	types := make([]Type, 0, len(c.ports))
 	for i, port := range c.ports {
-		if !validField(port) || (i > 0 && c.ports[i-1].name >= port.name) {
+		if port.name == "" || (i > 0 && c.ports[i-1].name >= port.name) {
 			return false
 		}
+		types = append(types, port.typ)
 	}
-	return true
+	return validTypesForValidation(types)
 }
 
 // Ports returns a copy of the contract's declared ports.
@@ -87,12 +90,11 @@ func (c Contract) Equal(other Contract) bool {
 
 // ObjectType returns the contract as a closed object type.
 func (c Contract) ObjectType() Type {
+	if c.constructed {
+		return Type{constructed: true, kind: ObjectKind, fields: append([]Field(nil), c.ports...)}
+	}
 	if !c.Valid() {
 		return Type{}
 	}
-	typ, err := Object(c.ports...)
-	if err != nil {
-		return Type{}
-	}
-	return typ
+	return Type{kind: ObjectKind, fields: append([]Field(nil), c.ports...)}
 }

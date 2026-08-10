@@ -2,7 +2,12 @@ package value
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"os/exec"
+	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func TestParseLiteralCanonicalizesObjectsAndRejectsInvalidJSONShapes(t *testing.T) {
@@ -185,5 +190,38 @@ func TestCheckAssignable(t *testing.T) {
 				t.Fatalf("RuntimeValidation = %v, want %v", got.RuntimeValidation, tc.wantRuntime)
 			}
 		})
+	}
+}
+
+func TestValidateLiteralDeepFiniteSubprocess(t *testing.T) {
+	if os.Getenv("DAWN_DEEP_LITERAL_VALIDATION_CHILD") == "1" {
+		debug.SetMaxStack(1 << 20)
+		typ := Null()
+		var decoded any
+		for range 50_000 {
+			var err error
+			typ, err = List(typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded = []any{decoded}
+		}
+		literal := Literal{canonical: []byte("deep"), decoded: decoded}
+		if err := typ.ValidateLiteral(literal); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestValidateLiteralDeepFiniteSubprocess$", "-test.count=1")
+	command.Env = append(os.Environ(), "DAWN_DEEP_LITERAL_VALIDATION_CHILD=1")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("deep literal-validation child timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("deep literal-validation child failed: %v\n%s", err, output)
 	}
 }

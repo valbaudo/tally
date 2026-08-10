@@ -29,9 +29,10 @@ const (
 
 // Field is a named member of an object or contract.
 type Field struct {
-	name     string
-	typ      Type
-	optional bool
+	constructed bool
+	name        string
+	typ         Type
+	optional    bool
 }
 
 // Name returns the field's declared name.
@@ -45,33 +46,34 @@ func (f Field) Optional() bool { return f.optional }
 
 // Type is an immutable recursive contract type.
 type Type struct {
-	kind   Kind
-	elem   *Type
-	fields []Field
-	enum   []Literal
-	media  []string
+	constructed bool
+	kind        Kind
+	elem        *Type
+	fields      []Field
+	enum        []Literal
+	media       []string
 }
 
 // String constructs the string type.
-func String() Type { return Type{kind: StringKind} }
+func String() Type { return Type{constructed: true, kind: StringKind} }
 
 // Integer constructs the integer type.
-func Integer() Type { return Type{kind: IntegerKind} }
+func Integer() Type { return Type{constructed: true, kind: IntegerKind} }
 
 // Number constructs the number type.
-func Number() Type { return Type{kind: NumberKind} }
+func Number() Type { return Type{constructed: true, kind: NumberKind} }
 
 // Boolean constructs the boolean type.
-func Boolean() Type { return Type{kind: BooleanKind} }
+func Boolean() Type { return Type{constructed: true, kind: BooleanKind} }
 
 // Null constructs the null type.
-func Null() Type { return Type{kind: NullKind} }
+func Null() Type { return Type{constructed: true, kind: NullKind} }
 
 // Tree constructs the immutable tree-handle type.
-func Tree() Type { return Type{kind: TreeKind} }
+func Tree() Type { return Type{constructed: true, kind: TreeKind} }
 
 // Any constructs the ordinary untyped-data type.
-func Any() Type { return Type{kind: AnyKind} }
+func Any() Type { return Type{constructed: true, kind: AnyKind} }
 
 // Kind returns this type's closed-algebra member.
 func (t Type) Kind() Kind { return t.kind }
@@ -119,10 +121,10 @@ func newField(name string, typ Type, optional bool) (Field, error) {
 	if name == "" {
 		return Field{}, fmt.Errorf("field name must not be empty")
 	}
-	if !typ.Valid() {
+	if !typ.constructed {
 		return Field{}, fmt.Errorf("field %q has an invalid type", name)
 	}
-	return Field{name: name, typ: typ, optional: optional}, nil
+	return Field{constructed: true, name: name, typ: typ, optional: optional}, nil
 }
 
 var mediaConstraint = regexp.MustCompile(`^[a-z0-9][a-z0-9!#$&^_.+-]*/(?:[a-z0-9][a-z0-9!#$&^_.+-]*|\*)$`)
@@ -137,7 +139,7 @@ func File(media ...string) (Type, error) {
 	}
 	sort.Strings(constraints)
 	constraints = compactStrings(constraints)
-	return Type{kind: FileKind, media: constraints}, nil
+	return Type{constructed: true, kind: FileKind, media: constraints}, nil
 }
 
 // Enum constructs an enum over one or more scalar literal members.
@@ -155,25 +157,25 @@ func Enum(values ...Literal) (Type, error) {
 		return bytes.Compare(members[i].canonical, members[j].canonical) < 0
 	})
 	members = compactLiterals(members)
-	return Type{kind: EnumKind, enum: members}, nil
+	return Type{constructed: true, kind: EnumKind, enum: members}, nil
 }
 
 // List constructs a homogeneous list type.
 func List(element Type) (Type, error) {
-	if !element.Valid() {
+	if !element.constructed {
 		return Type{}, fmt.Errorf("list element type is invalid")
 	}
 	copy := element
-	return Type{kind: ListKind, elem: &copy}, nil
+	return Type{constructed: true, kind: ListKind, elem: &copy}, nil
 }
 
 // Map constructs a homogeneous string-keyed map type.
 func Map(element Type) (Type, error) {
-	if !element.Valid() {
+	if !element.constructed {
 		return Type{}, fmt.Errorf("map element type is invalid")
 	}
 	copy := element
-	return Type{kind: MapKind, elem: &copy}, nil
+	return Type{constructed: true, kind: MapKind, elem: &copy}, nil
 }
 
 // Object constructs a closed object with the supplied named fields.
@@ -185,7 +187,7 @@ func Object(fields ...Field) (Type, error) {
 	if problem.duplicate != "" {
 		return Type{}, fmt.Errorf("object has duplicate field %q", problem.duplicate)
 	}
-	return Type{kind: ObjectKind, fields: copy}, nil
+	return Type{constructed: true, kind: ObjectKind, fields: copy}, nil
 }
 
 type fieldSetProblem struct {
@@ -196,7 +198,7 @@ type fieldSetProblem struct {
 func canonicalFields(fields []Field) ([]Field, fieldSetProblem) {
 	copy := append([]Field(nil), fields...)
 	for _, field := range copy {
-		if !validField(field) {
+		if !field.constructed || field.name == "" || !field.typ.constructed {
 			return nil, fieldSetProblem{invalid: true}
 		}
 	}
@@ -214,78 +216,98 @@ func validField(field Field) bool {
 }
 
 func validType(t Type) bool {
-	switch t.kind {
-	case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, TreeKind, AnyKind:
-		return t.elem == nil && len(t.fields) == 0 && len(t.enum) == 0 && len(t.media) == 0
-	case FileKind:
-		if t.elem != nil || len(t.fields) != 0 || len(t.enum) != 0 {
-			return false
-		}
-		for _, constraint := range t.media {
-			if !mediaConstraint.MatchString(constraint) {
+	stack := []Type{t}
+	for len(stack) != 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		switch current.kind {
+		case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, TreeKind, AnyKind:
+			if current.elem != nil || len(current.fields) != 0 || len(current.enum) != 0 || len(current.media) != 0 {
 				return false
 			}
-		}
-		return true
-	case EnumKind:
-		if t.elem != nil || len(t.fields) != 0 || len(t.media) != 0 || len(t.enum) == 0 {
-			return false
-		}
-		for _, value := range t.enum {
-			if !value.valid() || !value.scalar() {
+		case FileKind:
+			if current.elem != nil || len(current.fields) != 0 || len(current.enum) != 0 {
 				return false
 			}
-		}
-		return true
-	case ObjectKind:
-		if t.elem != nil || len(t.enum) != 0 || len(t.media) != 0 {
-			return false
-		}
-		for i, field := range t.fields {
-			if !validField(field) || (i > 0 && t.fields[i-1].name >= field.name) {
+			for _, constraint := range current.media {
+				if !mediaConstraint.MatchString(constraint) {
+					return false
+				}
+			}
+		case EnumKind:
+			if current.elem != nil || len(current.fields) != 0 || len(current.media) != 0 || len(current.enum) == 0 {
 				return false
 			}
+			for _, member := range current.enum {
+				if !member.valid() || !member.scalar() {
+					return false
+				}
+			}
+		case ObjectKind:
+			if current.elem != nil || len(current.enum) != 0 || len(current.media) != 0 {
+				return false
+			}
+			for index, field := range current.fields {
+				if field.name == "" || (index > 0 && current.fields[index-1].name >= field.name) {
+					return false
+				}
+				stack = append(stack, field.typ)
+			}
+		case MapKind, ListKind:
+			if current.elem == nil || len(current.fields) != 0 || len(current.enum) != 0 || len(current.media) != 0 {
+				return false
+			}
+			stack = append(stack, *current.elem)
+		default:
+			return false
 		}
-		return true
-	case MapKind, ListKind:
-		return t.elem != nil && t.elem.Valid() && len(t.fields) == 0 && len(t.enum) == 0 && len(t.media) == 0
-	default:
-		return false
 	}
+	return true
 }
 
 func equalType(left, right Type) bool {
-	if left.kind != right.kind || !left.Valid() || !right.Valid() {
+	if !left.Valid() || !right.Valid() {
 		return false
 	}
-	switch left.kind {
-	case ListKind, MapKind:
-		return equalType(*left.elem, *right.elem)
-	case ObjectKind:
-		if len(left.fields) != len(right.fields) {
+	type pair struct{ left, right Type }
+	stack := []pair{{left: left, right: right}}
+	for len(stack) != 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current.left.kind != current.right.kind {
 			return false
 		}
-		for i := range left.fields {
-			if left.fields[i].name != right.fields[i].name || left.fields[i].optional != right.fields[i].optional || !equalType(left.fields[i].typ, right.fields[i].typ) {
+		switch current.left.kind {
+		case ListKind, MapKind:
+			stack = append(stack, pair{left: *current.left.elem, right: *current.right.elem})
+		case ObjectKind:
+			if len(current.left.fields) != len(current.right.fields) {
 				return false
 			}
-		}
-	case EnumKind:
-		if len(left.enum) != len(right.enum) {
-			return false
-		}
-		for i := range left.enum {
-			if !left.enum[i].Equal(right.enum[i]) {
+			for index := range current.left.fields {
+				leftField, rightField := current.left.fields[index], current.right.fields[index]
+				if leftField.name != rightField.name || leftField.optional != rightField.optional {
+					return false
+				}
+				stack = append(stack, pair{left: leftField.typ, right: rightField.typ})
+			}
+		case EnumKind:
+			if len(current.left.enum) != len(current.right.enum) {
 				return false
 			}
-		}
-	case FileKind:
-		if len(left.media) != len(right.media) {
-			return false
-		}
-		for i := range left.media {
-			if left.media[i] != right.media[i] {
+			for index := range current.left.enum {
+				if !current.left.enum[index].Equal(current.right.enum[index]) {
+					return false
+				}
+			}
+		case FileKind:
+			if len(current.left.media) != len(current.right.media) {
 				return false
+			}
+			for index := range current.left.media {
+				if current.left.media[index] != current.right.media[index] {
+					return false
+				}
 			}
 		}
 	}

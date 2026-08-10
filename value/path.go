@@ -43,7 +43,13 @@ func (s Segment) Index() (int, bool) {
 // Path is an immutable sequence of tagged value segments. The zero Path is
 // the root.
 type Path struct {
-	segments []Segment
+	tail   *pathNode
+	length int
+}
+
+type pathNode struct {
+	parent  *pathNode
+	segment Segment
 }
 
 // Field returns a copied path extended by an object-field segment.
@@ -62,21 +68,34 @@ func (p Path) ListIndex(index int) Path {
 }
 
 func (p Path) append(segment Segment) Path {
-	segments := make([]Segment, len(p.segments), len(p.segments)+1)
-	copy(segments, p.segments)
-	segments = append(segments, segment)
-	return Path{segments: segments}
+	return Path{tail: &pathNode{parent: p.tail, segment: segment}, length: p.length + 1}
 }
 
 // Segments returns a copy of the structured path.
-func (p Path) Segments() []Segment { return append([]Segment(nil), p.segments...) }
+func (p Path) Segments() []Segment {
+	segments := make([]Segment, p.length)
+	node := p.tail
+	for index := len(segments) - 1; index >= 0; index-- {
+		segments[index] = node.segment
+		node = node.parent
+	}
+	return segments
+}
+
+func pathFromSegments(segments []Segment) Path {
+	var path Path
+	for _, segment := range segments {
+		path = path.append(segment)
+	}
+	return path
+}
 
 // String renders an escaped diagnostic. The rendering is not path identity or
 // a filesystem interpretation.
 func (p Path) String() string {
 	var out strings.Builder
 	out.WriteByte('$')
-	for _, segment := range p.segments {
+	for _, segment := range p.Segments() {
 		switch segment.kind {
 		case FieldSegment:
 			out.WriteString(".field(")

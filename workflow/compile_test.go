@@ -324,6 +324,45 @@ func TestCompileAllowsReusedNonRecursiveDraftGraph(t *testing.T) {
 	}
 }
 
+func TestCompileDeepFinitePublicTypeSubprocess(t *testing.T) {
+	const childCase = "DAWN_DEEP_PUBLIC_COMPILE_TYPE_CASE"
+	if os.Getenv(childCase) != "" {
+		typ := value.String()
+		for range 50_000 {
+			var err error
+			typ, err = value.List(typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		port, err := value.Required("deep", typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs, err := value.NewContract(port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		debug.SetMaxStack(1 << 20)
+		_, err = Compile(ProgramDraft{Root: "root", Modules: []ModuleDraft{{
+			Name: "root",
+			Graph: GraphDraft{Inputs: value.EmptyContract(), Outputs: value.EmptyContract(), Nodes: []NodeDraft{{
+				Name: "deep", Leaf: &LeafDraft{Kind: Script, Inputs: value.EmptyContract(), Outputs: outputs},
+			}}},
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestCompileDeepFinitePublicTypeSubprocess$", "-test.count=1")
+	command.Env = append(os.Environ(), childCase+"=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("deep public Compile did not return ordinarily: %v\n%s", err, output)
+	}
+}
+
 // This catches active-pointer protection that mistakes separate uses of an
 // already-finished branch, map, or loop draft for recursive expansion.
 func TestCompileAllowsReusedNonRecursiveStructuredDraft(t *testing.T) {

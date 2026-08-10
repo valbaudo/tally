@@ -1,8 +1,13 @@
 package value
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"reflect"
+	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func mustType(t *testing.T, typ Type, err error) Type {
@@ -202,5 +207,99 @@ func TestFieldAccessorsExposeDeclaredProperties(t *testing.T) {
 	field := optional(t, "maybe", String())
 	if field.Name() != "maybe" || field.Type().Kind() != StringKind || !field.Optional() {
 		t.Fatalf("Field accessors = (%q, %v, %v)", field.Name(), field.Type().Kind(), field.Optional())
+	}
+}
+
+func TestPublicTypeTraversalDeepFiniteSubprocess(t *testing.T) {
+	if os.Getenv("DAWN_DEEP_PUBLIC_TYPE_CHILD") == "1" {
+		debug.SetMaxStack(1 << 20)
+
+		left := Integer()
+		right := Number()
+		for index := 0; index < 50_000; index++ {
+			var err error
+			switch index % 3 {
+			case 0:
+				left, err = List(left)
+				if err == nil {
+					right, err = List(right)
+				}
+			case 1:
+				left, err = Map(left)
+				if err == nil {
+					right, err = Map(right)
+				}
+			case 2:
+				leftField, fieldErr := Required("member", left)
+				if fieldErr != nil {
+					err = fieldErr
+					break
+				}
+				rightField, fieldErr := Required("member", right)
+				if fieldErr != nil {
+					err = fieldErr
+					break
+				}
+				leftContract, contractErr := NewContract(leftField)
+				if contractErr != nil {
+					err = contractErr
+					break
+				}
+				rightContract, contractErr := NewContract(rightField)
+				if contractErr != nil {
+					err = contractErr
+					break
+				}
+				left = leftContract.ObjectType()
+				right = rightContract.ObjectType()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if !left.Valid() || !right.Valid() {
+			t.Fatal("deep exported construction produced an invalid type")
+		}
+		if left.Equal(right) {
+			t.Fatal("deep integer and number types compare equal")
+		}
+		assignment, err := CheckAssignable(left, right)
+		if err != nil || assignment.RuntimeValidation {
+			t.Fatalf("deep assignability = (%+v, %v)", assignment, err)
+		}
+
+		leftPort, err := Required("deep", left)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leftContract, err := NewContract(leftPort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rightPort, err := Required("deep", right)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rightContract, err := NewContract(rightPort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !leftContract.Valid() || !rightContract.Valid() || leftContract.Equal(rightContract) {
+			t.Fatal("deep contract validity or equality changed")
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPublicTypeTraversalDeepFiniteSubprocess$", "-test.count=1")
+	command.Env = append(os.Environ(), "DAWN_DEEP_PUBLIC_TYPE_CHILD=1")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("deep public-type child timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("deep public-type child failed: %v\n%s", err, output)
 	}
 }

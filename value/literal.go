@@ -3,6 +3,7 @@ package value
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -337,104 +338,143 @@ func (t Type) ValidateLiteral(l Literal) error {
 }
 
 func validateLiteral(t Type, l Literal) error {
-	switch t.kind {
-	case StringKind:
-		if _, ok := l.decoded.(string); !ok {
-			return fmt.Errorf("want string")
-		}
-	case IntegerKind:
-		number, ok := l.decoded.(json.Number)
-		if !ok || strings.ContainsAny(number.String(), ".eE") {
-			return fmt.Errorf("want integer")
-		}
-	case NumberKind:
-		if _, ok := l.decoded.(json.Number); !ok {
-			return fmt.Errorf("want number")
-		}
-	case BooleanKind:
-		if _, ok := l.decoded.(bool); !ok {
-			return fmt.Errorf("want boolean")
-		}
-	case NullKind:
-		if l.decoded != nil {
-			return fmt.Errorf("want null")
-		}
-	case EnumKind:
-		for _, value := range t.enum {
-			if l.Equal(value) {
-				return nil
+	type literalPath struct {
+		parent *literalPath
+		kind   Kind
+		name   string
+		index  int
+	}
+	const (
+		validateLiteralTask uint8 = iota
+		requiredLiteralTask
+	)
+	type literalTask struct {
+		typ     Type
+		decoded any
+		path    *literalPath
+		mode    uint8
+		problem string
+	}
+	wrap := func(path *literalPath, err error) error {
+		for path != nil {
+			switch path.kind {
+			case ObjectKind:
+				err = fmt.Errorf("field %q: %w", path.name, err)
+			case MapKind:
+				err = fmt.Errorf("map key %q: %w", path.name, err)
+			case ListKind:
+				err = fmt.Errorf("list item %d: %w", path.index, err)
 			}
+			path = path.parent
 		}
-		return fmt.Errorf("literal is not an enum member")
-	case ObjectKind:
-		object, ok := l.decoded.(map[string]any)
-		if !ok {
-			return fmt.Errorf("want object")
+		return err
+	}
+
+	tasks := []literalTask{{typ: t, decoded: l.decoded}}
+	for len(tasks) != 0 {
+		task := tasks[len(tasks)-1]
+		tasks = tasks[:len(tasks)-1]
+		if task.problem != "" {
+			return wrap(task.path, errors.New(task.problem))
 		}
-		for _, key := range sortedMapKeys(object) {
-			fieldType, declared := findField(t.fields, key)
-			if !declared {
-				return fmt.Errorf("undeclared field %q", key)
+		if task.mode == requiredLiteralTask {
+			object := task.decoded.(map[string]any)
+			for _, field := range task.typ.fields {
+				if _, present := object[field.name]; !present && !field.optional {
+					return wrap(task.path, fmt.Errorf("required field %q is absent", field.name))
+				}
 			}
-			value := object[key]
-			child, err := literalFromDecoded(value)
+			continue
+		}
+
+		switch task.typ.kind {
+		case StringKind:
+			if _, ok := task.decoded.(string); !ok {
+				return wrap(task.path, fmt.Errorf("want string"))
+			}
+		case IntegerKind:
+			number, ok := task.decoded.(json.Number)
+			if !ok || strings.ContainsAny(number.String(), ".eE") {
+				return wrap(task.path, fmt.Errorf("want integer"))
+			}
+		case NumberKind:
+			if _, ok := task.decoded.(json.Number); !ok {
+				return wrap(task.path, fmt.Errorf("want number"))
+			}
+		case BooleanKind:
+			if _, ok := task.decoded.(bool); !ok {
+				return wrap(task.path, fmt.Errorf("want boolean"))
+			}
+		case NullKind:
+			if task.decoded != nil {
+				return wrap(task.path, fmt.Errorf("want null"))
+			}
+		case EnumKind:
+			canonical, err := canonicalJSON(task.decoded)
 			if err != nil {
-				return err
+				return wrap(task.path, err)
 			}
-			if err := validateLiteral(fieldType, child); err != nil {
-				return fmt.Errorf("field %q: %w", key, err)
+			matched := false
+			for _, member := range task.typ.enum {
+				if bytes.Equal(canonical, member.canonical) {
+					matched = true
+					break
+				}
 			}
+			if !matched {
+				return wrap(task.path, fmt.Errorf("literal is not an enum member"))
+			}
+		case ObjectKind:
+			object, ok := task.decoded.(map[string]any)
+			if !ok {
+				return wrap(task.path, fmt.Errorf("want object"))
+			}
+			tasks = append(tasks, literalTask{typ: task.typ, decoded: object, path: task.path, mode: requiredLiteralTask})
+			keys := sortedMapKeys(object)
+			for index := len(keys) - 1; index >= 0; index-- {
+				key := keys[index]
+				fieldType, declared := findField(task.typ.fields, key)
+				if !declared {
+					tasks = append(tasks, literalTask{path: task.path, problem: fmt.Sprintf("undeclared field %q", key)})
+					continue
+				}
+				tasks = append(tasks, literalTask{
+					typ: fieldType, decoded: object[key],
+					path: &literalPath{parent: task.path, kind: ObjectKind, name: key}, mode: validateLiteralTask,
+				})
+			}
+		case MapKind:
+			object, ok := task.decoded.(map[string]any)
+			if !ok {
+				return wrap(task.path, fmt.Errorf("want map"))
+			}
+			keys := sortedMapKeys(object)
+			for index := len(keys) - 1; index >= 0; index-- {
+				key := keys[index]
+				tasks = append(tasks, literalTask{
+					typ: *task.typ.elem, decoded: object[key],
+					path: &literalPath{parent: task.path, kind: MapKind, name: key}, mode: validateLiteralTask,
+				})
+			}
+		case ListKind:
+			list, ok := task.decoded.([]any)
+			if !ok {
+				return wrap(task.path, fmt.Errorf("want list"))
+			}
+			for index := len(list) - 1; index >= 0; index-- {
+				tasks = append(tasks, literalTask{
+					typ: *task.typ.elem, decoded: list[index],
+					path: &literalPath{parent: task.path, kind: ListKind, index: index}, mode: validateLiteralTask,
+				})
+			}
+		case FileKind, TreeKind:
+			return wrap(task.path, fmt.Errorf("%v values cannot be compile-time literals", task.typ.kind))
+		case AnyKind:
+		default:
+			return wrap(task.path, fmt.Errorf("invalid type"))
 		}
-		for _, field := range t.fields {
-			if _, present := object[field.name]; !present && !field.optional {
-				return fmt.Errorf("required field %q is absent", field.name)
-			}
-		}
-	case MapKind:
-		object, ok := l.decoded.(map[string]any)
-		if !ok {
-			return fmt.Errorf("want map")
-		}
-		for _, key := range sortedMapKeys(object) {
-			value := object[key]
-			child, err := literalFromDecoded(value)
-			if err != nil {
-				return err
-			}
-			if err := validateLiteral(*t.elem, child); err != nil {
-				return fmt.Errorf("map key %q: %w", key, err)
-			}
-		}
-	case ListKind:
-		list, ok := l.decoded.([]any)
-		if !ok {
-			return fmt.Errorf("want list")
-		}
-		for i, value := range list {
-			child, err := literalFromDecoded(value)
-			if err != nil {
-				return err
-			}
-			if err := validateLiteral(*t.elem, child); err != nil {
-				return fmt.Errorf("list item %d: %w", i, err)
-			}
-		}
-	case FileKind, TreeKind:
-		return fmt.Errorf("%v values cannot be compile-time literals", t.kind)
-	case AnyKind:
-		return nil
-	default:
-		return fmt.Errorf("invalid type")
 	}
 	return nil
-}
-
-func literalFromDecoded(value any) (Literal, error) {
-	canonical, err := canonicalJSON(value)
-	if err != nil {
-		return Literal{}, err
-	}
-	return Literal{canonical: canonical, decoded: value}, nil
 }
 
 // ValidateLiteral checks that l is a closed object satisfying all contract ports.
@@ -459,57 +499,111 @@ func CheckAssignable(from, to Type) (Assignment, error) {
 }
 
 func checkAssignable(from, to Type) (Assignment, error) {
-	if from.Equal(to) {
-		return Assignment{}, nil
+	type assignmentPath struct {
+		parent *assignmentPath
+		field  string
 	}
-	if to.kind == AnyKind {
-		if ordinaryType(from) {
-			return Assignment{}, nil
+	type assignmentTask struct {
+		from, to Type
+		path     *assignmentPath
+	}
+	fail := func(path *assignmentPath, err error) (Assignment, error) {
+		for path != nil {
+			err = fmt.Errorf("field %q: %w", path.field, err)
+			path = path.parent
 		}
-		return Assignment{}, fmt.Errorf("%v is not assignable to ordinary any", from.kind)
+		return Assignment{}, err
 	}
-	if from.kind == AnyKind {
-		if ordinaryType(to) {
-			return Assignment{RuntimeValidation: true}, nil
+
+	assignment := Assignment{}
+	tasks := []assignmentTask{{from: from, to: to}}
+	for len(tasks) != 0 {
+		task := tasks[len(tasks)-1]
+		tasks = tasks[:len(tasks)-1]
+		source, destination := task.from, task.to
+
+		if destination.kind == AnyKind && source.kind != AnyKind {
+			if !ordinaryType(source) {
+				return fail(task.path, fmt.Errorf("%v is not assignable to ordinary any", source.kind))
+			}
+			continue
 		}
-		return Assignment{}, fmt.Errorf("ordinary any is not assignable to %v", to.kind)
+		if source.kind == AnyKind && destination.kind != AnyKind {
+			if !ordinaryType(destination) {
+				return fail(task.path, fmt.Errorf("ordinary any is not assignable to %v", destination.kind))
+			}
+			assignment.RuntimeValidation = true
+			continue
+		}
+		if source.kind == IntegerKind && destination.kind == NumberKind {
+			continue
+		}
+		if source.kind == EnumKind && destination.kind != EnumKind && enumWidensTo(source, destination.kind) {
+			continue
+		}
+		if source.kind != destination.kind {
+			return fail(task.path, fmt.Errorf("%v is not assignable to %v", source.kind, destination.kind))
+		}
+
+		switch source.kind {
+		case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, TreeKind, AnyKind:
+		case EnumKind:
+			if len(source.enum) != len(destination.enum) {
+				return fail(task.path, fmt.Errorf("%v is not assignable to %v", source.kind, destination.kind))
+			}
+			for index := range source.enum {
+				if !source.enum[index].Equal(destination.enum[index]) {
+					return fail(task.path, fmt.Errorf("%v is not assignable to %v", source.kind, destination.kind))
+				}
+			}
+		case ListKind, MapKind:
+			tasks = append(tasks, assignmentTask{from: *source.elem, to: *destination.elem, path: task.path})
+		case ObjectKind:
+			if len(source.fields) != len(destination.fields) {
+				return fail(task.path, fmt.Errorf("closed objects have different fields"))
+			}
+			for index := len(source.fields) - 1; index >= 0; index-- {
+				sourceField, destinationField := source.fields[index], destination.fields[index]
+				if sourceField.name != destinationField.name {
+					return fail(task.path, fmt.Errorf("closed objects have different fields"))
+				}
+				childPath := &assignmentPath{parent: task.path, field: sourceField.name}
+				if sourceField.optional && !destinationField.optional {
+					return fail(childPath, fmt.Errorf("optional field cannot satisfy a required field"))
+				}
+				tasks = append(tasks, assignmentTask{from: sourceField.typ, to: destinationField.typ, path: childPath})
+			}
+		case FileKind:
+			child, err := assignFile(source, destination)
+			if err != nil {
+				return fail(task.path, err)
+			}
+			assignment.RuntimeValidation = assignment.RuntimeValidation || child.RuntimeValidation
+		default:
+			return fail(task.path, fmt.Errorf("%v is not assignable to %v", source.kind, destination.kind))
+		}
 	}
-	if from.kind == IntegerKind && to.kind == NumberKind {
-		return Assignment{}, nil
-	}
-	if from.kind == EnumKind && enumWidensTo(from, to.kind) {
-		return Assignment{}, nil
-	}
-	switch {
-	case from.kind == ListKind && to.kind == ListKind:
-		return checkAssignable(*from.elem, *to.elem)
-	case from.kind == MapKind && to.kind == MapKind:
-		return checkAssignable(*from.elem, *to.elem)
-	case from.kind == ObjectKind && to.kind == ObjectKind:
-		return assignObject(from, to)
-	case from.kind == FileKind && to.kind == FileKind:
-		return assignFile(from, to)
-	default:
-		return Assignment{}, fmt.Errorf("%v is not assignable to %v", from.kind, to.kind)
-	}
+	return assignment, nil
 }
 
 func ordinaryType(t Type) bool {
-	switch t.kind {
-	case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, EnumKind, AnyKind:
-		return true
-	case ObjectKind:
-		for _, field := range t.fields {
-			if !ordinaryType(field.typ) {
-				return false
+	stack := []Type{t}
+	for len(stack) != 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		switch current.kind {
+		case StringKind, IntegerKind, NumberKind, BooleanKind, NullKind, EnumKind, AnyKind:
+		case ObjectKind:
+			for _, field := range current.fields {
+				stack = append(stack, field.typ)
 			}
+		case MapKind, ListKind:
+			stack = append(stack, *current.elem)
+		default:
+			return false
 		}
-		return true
-	case MapKind, ListKind:
-		return ordinaryType(*t.elem)
-	default:
-		return false
 	}
+	return true
 }
 
 func enumWidensTo(enum Type, destination Kind) bool {
@@ -544,28 +638,6 @@ func literalKind(l Literal) Kind {
 	default:
 		return InvalidKind
 	}
-}
-
-func assignObject(from, to Type) (Assignment, error) {
-	if len(from.fields) != len(to.fields) {
-		return Assignment{}, fmt.Errorf("closed objects have different fields")
-	}
-	assignment := Assignment{}
-	for i := range from.fields {
-		source, destination := from.fields[i], to.fields[i]
-		if source.name != destination.name {
-			return Assignment{}, fmt.Errorf("closed objects have different fields")
-		}
-		if source.optional && !destination.optional {
-			return Assignment{}, fmt.Errorf("optional field %q cannot satisfy a required field", source.name)
-		}
-		child, err := checkAssignable(source.typ, destination.typ)
-		if err != nil {
-			return Assignment{}, fmt.Errorf("field %q: %w", source.name, err)
-		}
-		assignment.RuntimeValidation = assignment.RuntimeValidation || child.RuntimeValidation
-	}
-	return assignment, nil
 }
 
 func assignFile(from, to Type) (Assignment, error) {
