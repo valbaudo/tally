@@ -419,26 +419,44 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 	}
 	cleanDestination := filepath.Clean(destination)
 	destinationName := filepath.Base(cleanDestination)
-	parent, err := filesystem.openRoot(filepath.Dir(cleanDestination))
+	parentPath := filepath.Dir(cleanDestination)
+	parent, err := filesystem.openRoot(parentPath)
 	if err != nil {
 		return fmt.Errorf("content: open tree materialization parent: %w", err)
 	}
 	var destinationRoot treeCaptureRoot
 	createdName := ""
-	removeDestination := false
+	rollbackArmed := false
 	defer func() {
 		if destinationRoot != nil {
 			if closeErr := destinationRoot.close(); closeErr != nil {
 				err = errors.Join(err, fmt.Errorf("content: close tree materialization destination: %w", closeErr))
 			}
+			destinationRoot = nil
 		}
-		if removeDestination && createdName != "" {
-			if cleanupErr := parent.removeAll(createdName); cleanupErr != nil {
+		removedBeforeParentClose := false
+		if err != nil && rollbackArmed && createdName != "" {
+			cleanupErr := parent.removeAll(createdName)
+			removedBeforeParentClose = cleanupErr == nil
+			if cleanupErr != nil {
 				err = errors.Join(err, fmt.Errorf("content: remove failed tree materialization: %w", cleanupErr))
 			}
 		}
 		if closeErr := parent.close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("content: close tree materialization parent: %w", closeErr))
+			if rollbackArmed && createdName != "" && !removedBeforeParentClose {
+				cleanupParent, openErr := filesystem.openRoot(parentPath)
+				if openErr != nil {
+					err = errors.Join(err, fmt.Errorf("content: reopen tree materialization parent for cleanup: %w", openErr))
+					return
+				}
+				if cleanupErr := cleanupParent.removeAll(createdName); cleanupErr != nil {
+					err = errors.Join(err, fmt.Errorf("content: remove failed tree materialization: %w", cleanupErr))
+				}
+				if cleanupCloseErr := cleanupParent.close(); cleanupCloseErr != nil {
+					err = errors.Join(err, fmt.Errorf("content: close tree materialization cleanup parent: %w", cleanupCloseErr))
+				}
+			}
 		}
 	}()
 	if err := requireAbsentTreeName(parent, destinationName); err != nil {
@@ -450,7 +468,7 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 	}
 	createdName, exact, err := identifyCreatedTreeName(parent, destinationName, createdInfo)
 	if createdName != "" {
-		removeDestination = true
+		rollbackArmed = true
 	}
 	if err != nil {
 		return err
@@ -500,11 +518,6 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("content: materialize tree: %w", err)
 	}
-	if closeErr := destinationRoot.close(); closeErr != nil {
-		return fmt.Errorf("content: close tree materialization destination: %w", closeErr)
-	}
-	destinationRoot = nil
-	removeDestination = false
 	return nil
 }
 

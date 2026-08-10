@@ -134,6 +134,43 @@ func TestMaterializeTreeRemovesOnlyNewDestinationAfterFailure(t *testing.T) {
 	}
 }
 
+func TestMaterializeTreeRollsBackAfterFinalParentCloseFailure(t *testing.T) {
+	repository, err := NewRepository(NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "file"), []byte("materialized"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repository.CaptureTree(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	destination := filepath.Join(parent, "new-tree")
+	sibling := filepath.Join(parent, "keep")
+	if err := os.WriteFile(sibling, []byte("sibling"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository.treeFS = &finalParentCloseFailingTreeFilesystem{
+		treeFilesystem: repository.treeFilesystem(),
+		parent:         parent,
+	}
+
+	err = repository.MaterializeTree(context.Background(), tree, destination)
+	if err == nil || !strings.Contains(err.Error(), "injected final parent close failure") {
+		t.Fatalf("MaterializeTree error = %v, want final parent close failure", err)
+	}
+	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination after final parent close failure = %v, want absent", statErr)
+	}
+	got, err := os.ReadFile(sibling)
+	if err != nil || string(got) != "sibling" {
+		t.Fatalf("sibling after close-failure cleanup = (%q, %v)", got, err)
+	}
+}
+
 func TestMaterializeTreeRejectsCorruptManifestBeforeCreatingDestination(t *testing.T) {
 	store := NewMemory()
 	manifest := putTestObject(t, store, []byte("not dawn tree data"))
@@ -352,6 +389,37 @@ func TestMaterializeTreeHonorsCancellationBeforeCreation(t *testing.T) {
 type caseFoldingTreeFilesystem struct {
 	treeFilesystem
 	destination string
+}
+
+type finalParentCloseFailingTreeFilesystem struct {
+	treeFilesystem
+	parent string
+	failed bool
+}
+
+func (f *finalParentCloseFailingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == f.parent && !f.failed {
+		return finalParentCloseFailingTreeRoot{treeCaptureRoot: root, filesystem: f}, nil
+	}
+	return root, nil
+}
+
+type finalParentCloseFailingTreeRoot struct {
+	treeCaptureRoot
+	filesystem *finalParentCloseFailingTreeFilesystem
+}
+
+func (r finalParentCloseFailingTreeRoot) close() error {
+	closeErr := r.treeCaptureRoot.close()
+	if !r.filesystem.failed {
+		r.filesystem.failed = true
+		return errors.Join(closeErr, errors.New("injected final parent close failure"))
+	}
+	return closeErr
 }
 
 type transformingTreeFilesystem struct {
