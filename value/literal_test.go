@@ -103,6 +103,7 @@ func TestValidateLiteralEnforcesTypesAndObjectPresence(t *testing.T) {
 		{"list wrong member", listType(t, Boolean()), "[true,1]"},
 		{"map wrong member", mapType(t, Integer()), `{"a":1,"b":1.5}`},
 		{"enum wrong member", enumType(t, mustLiteral(t, `"low"`)), `"high"`},
+		{"integer enum rejects number spelling", enumType(t, mustLiteral(t, `1`)), `1.0`},
 		{"file cannot be literal", fileType(t), `"x"`},
 		{"tree cannot be literal", Tree(), `{}`},
 	}
@@ -193,6 +194,20 @@ func TestCheckAssignable(t *testing.T) {
 	}
 }
 
+func TestMediaRelationsRejectMalformedRecordsWithoutPanicking(t *testing.T) {
+	for _, malformed := range []string{"", "json", "application/", "/json"} {
+		if mediaContains("application/json", malformed) {
+			t.Errorf("application/json contains malformed media %q", malformed)
+		}
+		if mediaContains(malformed, "application/json") {
+			t.Errorf("malformed media %q contains application/json", malformed)
+		}
+		if mediaIntersects("application/json", malformed) {
+			t.Errorf("application/json intersects malformed media %q", malformed)
+		}
+	}
+}
+
 func TestValidateLiteralDeepFiniteSubprocess(t *testing.T) {
 	if os.Getenv("DAWN_DEEP_LITERAL_VALIDATION_CHILD") == "1" {
 		debug.SetMaxStack(1 << 20)
@@ -209,6 +224,13 @@ func TestValidateLiteralDeepFiniteSubprocess(t *testing.T) {
 		literal := Literal{canonical: []byte("deep"), decoded: decoded}
 		if err := typ.ValidateLiteral(literal); err != nil {
 			t.Fatal(err)
+		}
+		enum, err := Enum(mustLiteral(t, "1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := enum.ValidateLiteral(literal); err == nil {
+			t.Fatal("scalar enum accepted a deeply nested literal")
 		}
 		return
 	}

@@ -106,7 +106,7 @@ func validateValue(t Type, value Value) error {
 			}
 			matched := false
 			for _, member := range currentType.enum {
-				if bytes.Equal(member.canonical, ordinary) {
+				if literalKind(member) == current.kind && bytes.Equal(member.canonical, ordinary) {
 					matched = true
 					break
 				}

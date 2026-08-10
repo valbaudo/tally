@@ -147,8 +147,90 @@ func (r osTreeCaptureRoot) symlink(oldname, newname string) (fs.FileInfo, error)
 	return r.root.Lstat(newname)
 }
 func (r osTreeCaptureRoot) remove(name string) error    { return r.root.Remove(name) }
-func (r osTreeCaptureRoot) removeAll(name string) error { return r.root.RemoveAll(name) }
+func (r osTreeCaptureRoot) removeAll(name string) error { return removeTreeCaptureEntry(r, name) }
 func (r osTreeCaptureRoot) close() error                { return r.root.Close() }
+
+type treeRemovalFrame struct {
+	root       treeCaptureRoot
+	parent     treeCaptureRoot
+	name       string
+	entries    []os.DirEntry
+	position   int
+	enumerated bool
+}
+
+func removeTreeCaptureEntry(parent treeCaptureRoot, name string) (err error) {
+	info, err := parent.lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return parent.remove(name)
+	}
+	root, err := parent.openRoot(name)
+	if err != nil {
+		return err
+	}
+	stack := []treeRemovalFrame{{root: root, parent: parent, name: name}}
+	defer func() {
+		for index := len(stack) - 1; index >= 0; index-- {
+			if stack[index].root != nil {
+				err = errors.Join(err, stack[index].root.close())
+			}
+		}
+	}()
+	for len(stack) != 0 {
+		current := &stack[len(stack)-1]
+		if !current.enumerated {
+			entries, readErr := current.root.readDir(".")
+			if readErr != nil {
+				return readErr
+			}
+			current.entries = entries
+			current.enumerated = true
+			continue
+		}
+		if current.position != len(current.entries) {
+			entry := current.entries[current.position]
+			current.position++
+			childInfo, statErr := current.root.lstat(entry.Name())
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			if statErr != nil {
+				return statErr
+			}
+			if !childInfo.IsDir() || childInfo.Mode()&os.ModeSymlink != 0 {
+				if removeErr := current.root.remove(entry.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return removeErr
+				}
+				continue
+			}
+			child, openErr := current.root.openRoot(entry.Name())
+			if openErr != nil {
+				return openErr
+			}
+			stack = append(stack, treeRemovalFrame{root: child, parent: current.root, name: entry.Name()})
+			continue
+		}
+
+		child := current.root
+		childParent := current.parent
+		childName := current.name
+		current.root = nil
+		if closeErr := child.close(); closeErr != nil {
+			return closeErr
+		}
+		stack = stack[:len(stack)-1]
+		if removeErr := childParent.remove(childName); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+	}
+	return nil
+}
 
 type treeRootTempFile struct {
 	*os.File
@@ -505,9 +587,11 @@ func (r *Repository) MaterializeTree(ctx context.Context, tree Tree, destination
 	if err != nil {
 		return fmt.Errorf("content: create tree materialization destination: %w", err)
 	}
-	createdName, exact, err := identifyCreatedTreeName(parent, destinationName, createdInfo)
-	if createdName != "" {
-		rollbackArmed = true
+	createdName = destinationName
+	rollbackArmed = true
+	actualName, exact, err := identifyCreatedTreeName(parent, destinationName, createdInfo)
+	if actualName != "" {
+		createdName = actualName
 	}
 	if err != nil {
 		return err

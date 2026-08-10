@@ -410,13 +410,17 @@ func validateLiteral(t Type, l Literal) error {
 				return wrap(task.path, fmt.Errorf("want null"))
 			}
 		case EnumKind:
+			kind := literalKind(Literal{decoded: task.decoded})
+			if kind == InvalidKind {
+				return wrap(task.path, fmt.Errorf("want scalar enum member"))
+			}
 			canonical, err := canonicalJSON(task.decoded)
 			if err != nil {
 				return wrap(task.path, err)
 			}
 			matched := false
 			for _, member := range task.typ.enum {
-				if bytes.Equal(canonical, member.canonical) {
+				if literalKind(member) == kind && bytes.Equal(canonical, member.canonical) {
 					matched = true
 					break
 				}
@@ -671,21 +675,24 @@ func assignFile(from, to Type) (Assignment, error) {
 }
 
 func mediaContains(destination, source string) bool {
-	if destination == source {
-		return true
+	destinationType, destinationSub, destinationOK := splitMedia(destination)
+	sourceType, sourceSub, sourceOK := splitMedia(source)
+	if !destinationOK || !sourceOK {
+		return false
 	}
-	destinationType, destinationSub := splitMedia(destination)
-	sourceType, sourceSub := splitMedia(source)
-	return destinationType == sourceType && destinationSub == "*" && sourceSub != ""
+	return destinationType == sourceType && (destinationSub == sourceSub || destinationSub == "*" && sourceSub != "")
 }
 
 func mediaIntersects(left, right string) bool {
-	leftType, leftSub := splitMedia(left)
-	rightType, rightSub := splitMedia(right)
+	leftType, leftSub, leftOK := splitMedia(left)
+	rightType, rightSub, rightOK := splitMedia(right)
+	if !leftOK || !rightOK {
+		return false
+	}
 	return leftType == rightType && (leftSub == "*" || rightSub == "*" || leftSub == rightSub)
 }
 
-func splitMedia(media string) (string, string) {
-	parts := strings.SplitN(media, "/", 2)
-	return parts[0], parts[1]
+func splitMedia(media string) (string, string, bool) {
+	typeName, subtype, found := strings.Cut(media, "/")
+	return typeName, subtype, found && typeName != "" && subtype != "" && !strings.Contains(subtype, "/")
 }

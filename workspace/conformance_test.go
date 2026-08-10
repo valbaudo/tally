@@ -266,7 +266,7 @@ func TestPrestigeValueFlow(t *testing.T) {
 		if err != nil {
 			return value.Value{}, err
 		}
-		report, err := outputs.Value(ctx, value.Path{}.Field("merge_report"))
+		report, err := outputs.File(ctx, value.Path{}.Field("merge_report"), "merge-report.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -361,7 +361,7 @@ func TestPrestigeValueFlow(t *testing.T) {
 	mustWriteFile(t, filepath.Join(finalEnvironment.Workspace(), "unpublished-notes.tmp"), "private notes\n")
 	mustWriteFile(t, reportTarget.Location(), "Prestige assessment complete\n")
 	lateCandidate, err := finalEnvironment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		report, err := outputs.Value(ctx, value.Path{}.Field("report"))
+		report, err := outputs.File(ctx, value.Path{}.Field("report"), "prestige-assessment.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -370,7 +370,7 @@ func TestPrestigeValueFlow(t *testing.T) {
 	assertZeroCaptureError(t, lateCandidate, err)
 
 	finalCandidate, err := finalEnvironment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		report, err := outputs.Value(ctx, value.Path{}.Field("report"))
+		report, err := outputs.File(ctx, value.Path{}.Field("report"), "prestige-assessment.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -422,11 +422,11 @@ func captureBranch(t *testing.T, ctx context.Context, environment *workspace.Env
 		if err != nil {
 			return value.Value{}, err
 		}
-		firstValue, err := outputs.Value(ctx, firstPath)
+		firstValue, err := outputs.File(ctx, firstPath, firstName+".txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
-		secondValue, err := outputs.Value(ctx, secondPath)
+		secondValue, err := outputs.File(ctx, secondPath, secondName+".txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}

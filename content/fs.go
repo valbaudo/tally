@@ -26,6 +26,15 @@ func OpenFS(root string) (*FS, error) {
 
 // Put streams content to a temporary file before publishing it atomically.
 func (s *FS) Put(ctx context.Context, source io.Reader) (object Object, err error) {
+	if s == nil {
+		return Object{}, fmt.Errorf("content: filesystem store is nil")
+	}
+	if ctx == nil {
+		return Object{}, fmt.Errorf("content: put context must not be nil")
+	}
+	if source == nil {
+		return Object{}, fmt.Errorf("content: put source must not be nil")
+	}
 	if err := ctx.Err(); err != nil {
 		return Object{}, fmt.Errorf("content: put: %w", err)
 	}
@@ -76,6 +85,15 @@ func (s *FS) Put(ctx context.Context, source io.Reader) (object Object, err erro
 
 // Copy writes a stored object to destination while checking its identity.
 func (s *FS) Copy(ctx context.Context, digest Digest, destination io.Writer) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("content: filesystem store is nil")
+	}
+	if ctx == nil {
+		return 0, fmt.Errorf("content: copy context must not be nil")
+	}
+	if destination == nil {
+		return 0, fmt.Errorf("content: copy destination must not be nil")
+	}
 	file, err := os.Open(filepath.Join(s.root, digestFilename(digest)))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, integrityError("missing content")

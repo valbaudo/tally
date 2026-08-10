@@ -53,6 +53,31 @@ func TestIngestFileCanonicalizesExplicitMedia(t *testing.T) {
 	if file.Media() != "application/x-custom; foo=bar" {
 		t.Fatalf("media = %q, want canonical value", file.Media())
 	}
+	for _, media := range []string{"json", "application/", "application/*"} {
+		if _, err := repository.IngestFile(context.Background(), "logical-input", media, bytes.NewReader([]byte("plain"))); err == nil {
+			t.Errorf("IngestFile accepted non-concrete media %q", media)
+		}
+	}
+}
+
+func TestNewFileCanonicalizesAndRequiresConcreteTypeSubtypeMedia(t *testing.T) {
+	digest := Digest(sha256.Sum256([]byte("semantic bytes")))
+	file, err := NewFile(digest, 14, "report.json", "Application/JSON; Profile=\"custom\"; Charset=UTF-8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := file.Media(), "application/json; charset=UTF-8; profile=custom"; got != want {
+		t.Fatalf("canonical media = %q, want %q", got, want)
+	}
+	for _, media := range []string{"json", "application/", "/json", "*/json", "application/*", "*/*"} {
+		if _, err := NewFile(digest, 14, "report.json", media); err == nil {
+			t.Errorf("NewFile accepted non-concrete media %q", media)
+		}
+	}
+	forged := File{digest: digest, size: 14, name: "report.json", media: "Application/JSON"}
+	if forged.Valid() {
+		t.Fatal("File.Valid accepted non-canonical media storage")
+	}
 }
 
 func TestIngestFilePassesExplicitMediaSourceDirectlyToStore(t *testing.T) {
@@ -323,6 +348,40 @@ func TestMaterializeFileJoinsTemporaryCleanupErrors(t *testing.T) {
 	}
 	if !errors.Is(err, errTemporaryRemove) {
 		t.Fatalf("MaterializeFile error = %v, want joined remove error", err)
+	}
+}
+
+func TestMaterializeFileRollsBackPublishedTargetWhenTemporaryCleanupFails(t *testing.T) {
+	repository, err := NewRepository(NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := repository.IngestFile(context.Background(), "logical.txt", "text/plain", bytes.NewReader([]byte("committed")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "runtime-owned-output")
+
+	originalRemove := removeMaterializationTemp
+	failCleanup := true
+	removeMaterializationTemp = func(name string) error {
+		if failCleanup {
+			return errTemporaryRemove
+		}
+		return os.Remove(name)
+	}
+	t.Cleanup(func() { removeMaterializationTemp = originalRemove })
+
+	err = repository.MaterializeFile(context.Background(), file, target)
+	if !errors.Is(err, errTemporaryRemove) {
+		t.Fatalf("MaterializeFile error = %v, want temporary cleanup failure", err)
+	}
+	if _, statErr := os.Lstat(target); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published target after failed operation = %v, want absent", statErr)
+	}
+	failCleanup = false
+	if err := repository.MaterializeFile(context.Background(), file, target); err != nil {
+		t.Fatalf("retry after rollback: %v", err)
 	}
 }
 

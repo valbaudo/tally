@@ -61,6 +61,68 @@ func TestFSStore(t *testing.T) {
 	})
 }
 
+func TestBuiltInStoresRejectTypedNilReceiversAndNilStreams(t *testing.T) {
+	ctx := context.Background()
+	digest := Digest(sha256.Sum256([]byte("missing")))
+	for _, test := range []struct {
+		name  string
+		store Store
+	}{
+		{"Memory", (*Memory)(nil)},
+		{"FS", (*FS)(nil)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.store.Put(ctx, bytes.NewReader([]byte("bytes"))); err == nil {
+				t.Fatal("typed-nil Put succeeded")
+			}
+			if _, err := test.store.Copy(ctx, digest, io.Discard); err == nil {
+				t.Fatal("typed-nil Copy succeeded")
+			}
+
+			repository, err := NewRepository(test.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.IngestFile(ctx, "logical.bin", "application/octet-stream", bytes.NewReader([]byte("bytes"))); err == nil {
+				t.Fatal("repository backed by typed nil store ingested a file")
+			}
+			file, err := NewFile(digest, 7, "logical.bin", "application/octet-stream")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repository.CopyFile(ctx, file, io.Discard); err == nil {
+				t.Fatal("repository backed by typed nil store copied a file")
+			}
+		})
+	}
+
+	memory := NewMemory()
+	if _, err := memory.Put(ctx, nil); err == nil {
+		t.Fatal("Memory.Put accepted a nil reader")
+	}
+	object, err := memory.Put(ctx, bytes.NewReader([]byte("stored")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.Copy(ctx, object.Digest(), nil); err == nil {
+		t.Fatal("Memory.Copy accepted a nil writer")
+	}
+	filesystem, err := OpenFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filesystem.Put(ctx, nil); err == nil {
+		t.Fatal("FS.Put accepted a nil reader")
+	}
+	object, err = filesystem.Put(ctx, bytes.NewReader([]byte("stored")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filesystem.Copy(ctx, object.Digest(), nil); err == nil {
+		t.Fatal("FS.Copy accepted a nil writer")
+	}
+}
+
 func storeContract(t *testing.T, open func(*testing.T) Store) {
 	t.Helper()
 	t.Run("identity and defensive reads", func(t *testing.T) {

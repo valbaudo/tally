@@ -2,8 +2,6 @@ package content
 
 import (
 	"fmt"
-	"mime"
-	"strings"
 )
 
 // File describes immutable file content and its logical metadata.
@@ -24,16 +22,11 @@ func NewFile(digest Digest, size int64, name, media string) (File, error) {
 	if name == "" {
 		return File{}, fmt.Errorf("content: file name must not be empty")
 	}
-	if media == "" {
-		return File{}, fmt.Errorf("content: file media must not be empty")
+	canonical, err := canonicalConcreteMedia(media)
+	if err != nil {
+		return File{}, err
 	}
-	if parsed, _, err := mime.ParseMediaType(media); err != nil || strings.Contains(parsed, "*") {
-		if err == nil {
-			err = fmt.Errorf("media type must be concrete")
-		}
-		return File{}, fmt.Errorf("content: invalid file media %q: %w", media, err)
-	}
-	return File{digest: digest, size: size, name: name, media: media}, nil
+	return File{digest: digest, size: size, name: name, media: canonical}, nil
 }
 
 // Valid reports whether f contains valid semantic file facts.
@@ -41,8 +34,8 @@ func (f File) Valid() bool {
 	if f.digest == (Digest{}) || f.size < 0 || f.name == "" || f.media == "" {
 		return false
 	}
-	parsed, _, err := mime.ParseMediaType(f.media)
-	return err == nil && !strings.Contains(parsed, "*")
+	canonical, err := canonicalConcreteMedia(f.media)
+	return err == nil && canonical == f.media
 }
 
 // Digest returns the file's content identity.

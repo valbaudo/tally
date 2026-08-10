@@ -114,8 +114,20 @@ func TestTypeValidateValueMatchesParsedMediaAndEnums(t *testing.T) {
 	if err := enumType(t, mustLiteral(t, `"x"`), mustLiteral(t, `1`), mustLiteral(t, `true`)).Validate(NewString("x")); err != nil {
 		t.Fatalf("enum rejected canonical string member: %v", err)
 	}
-	if err := enumType(t, mustLiteral(t, `1`)).Validate(mustNumber(t, "1")); err != nil {
-		t.Fatalf("enum rejected matching scalar ordinary representation: %v", err)
+	integerEnum := enumType(t, mustLiteral(t, `1`))
+	assignment, err := CheckAssignable(integerEnum, Number())
+	if err != nil || assignment.RuntimeValidation {
+		t.Fatalf("integer enum to number assignment = (%+v, %v), want static widening", assignment, err)
+	}
+	produced := mustInteger(t, "1")
+	if err := integerEnum.Validate(produced); err != nil {
+		t.Fatalf("producer enum rejected its integer member: %v", err)
+	}
+	if err := Number().Validate(produced); err != nil {
+		t.Fatalf("consumer number rejected widened integer member: %v", err)
+	}
+	if err := integerEnum.Validate(mustNumber(t, "1")); err == nil {
+		t.Fatal("integer enum accepted a NumberKind value with equal JSON bytes")
 	}
 }
 

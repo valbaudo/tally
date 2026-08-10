@@ -23,6 +23,15 @@ func NewMemory() *Memory {
 
 // Put streams content into memory and publishes it only after a complete read.
 func (m *Memory) Put(ctx context.Context, source io.Reader) (Object, error) {
+	if m == nil {
+		return Object{}, fmt.Errorf("content: memory store is nil")
+	}
+	if ctx == nil {
+		return Object{}, fmt.Errorf("content: put context must not be nil")
+	}
+	if source == nil {
+		return Object{}, fmt.Errorf("content: put source must not be nil")
+	}
 	var data bytes.Buffer
 	hasher := sha256.New()
 	size, err := copyContext(ctx, io.MultiWriter(&data, hasher), source)
@@ -50,6 +59,15 @@ func (m *Memory) Put(ctx context.Context, source io.Reader) (Object, error) {
 
 // Copy writes content for digest while checking its stored identity.
 func (m *Memory) Copy(ctx context.Context, digest Digest, destination io.Writer) (int64, error) {
+	if m == nil {
+		return 0, fmt.Errorf("content: memory store is nil")
+	}
+	if ctx == nil {
+		return 0, fmt.Errorf("content: copy context must not be nil")
+	}
+	if destination == nil {
+		return 0, fmt.Errorf("content: copy destination must not be nil")
+	}
 	m.mu.RLock()
 	stored, exists := m.contents[digest]
 	snapshot := append([]byte(nil), stored...)
@@ -76,6 +94,15 @@ func digestFromHash(hasher hash.Hash) Digest {
 }
 
 func copyContext(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
+	if ctx == nil {
+		return 0, fmt.Errorf("context must not be nil")
+	}
+	if destination == nil {
+		return 0, fmt.Errorf("destination must not be nil")
+	}
+	if source == nil {
+		return 0, fmt.Errorf("source must not be nil")
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}

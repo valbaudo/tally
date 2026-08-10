@@ -180,7 +180,7 @@ func validateTreeEntries(entries []treeEntry) error {
 			return fmt.Errorf("content: invalid tree manifest empty entry path")
 		}
 		for _, segment := range entry.segments {
-			if segment == "" || segment == "." || segment == ".." {
+			if segment == "" || segment == "." || segment == ".." || strings.Contains(segment, "/") || strings.ContainsRune(segment, '\x00') {
 				return fmt.Errorf("content: invalid tree manifest path segment")
 			}
 		}

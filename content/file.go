@@ -59,16 +59,16 @@ func (r *Repository) IngestFile(ctx context.Context, name, explicitMedia string,
 		return File{}, fmt.Errorf("content: file source must not be nil")
 	}
 
-	explicit, err := canonicalMedia(explicitMedia)
-	if err != nil {
-		return File{}, err
-	}
-	if explicit != "" {
+	if explicitMedia != "" {
+		explicit, err := canonicalConcreteMedia(explicitMedia)
+		if err != nil {
+			return File{}, err
+		}
 		return r.storeFile(ctx, name, explicit, source)
 	}
 
 	prefix, terminalErr := readMediaPrefix(source)
-	media, err := canonicalMedia(http.DetectContentType(prefix))
+	media, err := canonicalConcreteMedia(http.DetectContentType(prefix))
 	if err != nil {
 		return File{}, fmt.Errorf("content: detect file media: %w", err)
 	}
@@ -127,6 +127,7 @@ func (r *Repository) MaterializeFile(ctx context.Context, file File, target stri
 	}
 	temporaryName := temporary.Name()
 	temporaryClosed := false
+	published := false
 	defer func() {
 		var cleanupErr error
 		if !temporaryClosed {
@@ -143,6 +144,11 @@ func (r *Repository) MaterializeFile(ctx context.Context, file File, target stri
 		if cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
+		if err != nil && published {
+			if rollbackErr := os.Remove(target); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("content: remove failed materialized file: %w", rollbackErr))
+			}
+		}
 	}()
 
 	if err := r.copyVerified(ctx, file, temporary); err != nil {
@@ -158,6 +164,7 @@ func (r *Repository) MaterializeFile(ctx context.Context, file File, target stri
 	if err := os.Link(temporaryName, target); err != nil {
 		return fmt.Errorf("content: publish materialized file: %w", err)
 	}
+	published = true
 	return nil
 }
 
@@ -216,15 +223,19 @@ func (r readerError) Read([]byte) (int, error) {
 	return 0, r.err
 }
 
-func canonicalMedia(media string) (string, error) {
+func canonicalConcreteMedia(media string) (string, error) {
 	if media == "" {
-		return "", nil
+		return "", fmt.Errorf("content: file media must not be empty")
 	}
 	typeName, parameters, err := mime.ParseMediaType(media)
 	if err != nil {
 		return "", fmt.Errorf("content: invalid file media %q: %w", media, err)
 	}
-	if strings.Contains(typeName, "*") {
+	major, subtype, hasSubtype := strings.Cut(typeName, "/")
+	if !hasSubtype || major == "" || subtype == "" || strings.Contains(subtype, "/") {
+		return "", fmt.Errorf("content: file media %q must have a nonempty type and subtype", media)
+	}
+	if strings.Contains(major, "*") || strings.Contains(subtype, "*") {
 		return "", fmt.Errorf("content: file media %q must be concrete", media)
 	}
 	formatted := mime.FormatMediaType(typeName, parameters)

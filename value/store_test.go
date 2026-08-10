@@ -88,3 +88,15 @@ func TestValueStoreRejectsInvalidValueAndNilContentStore(t *testing.T) {
 		t.Fatal("nil-backed Get succeeded")
 	}
 }
+
+func TestValueStoreReturnsErrorsForTypedNilBuiltInContentStores(t *testing.T) {
+	for _, contents := range []content.Store{(*content.Memory)(nil), (*content.FS)(nil)} {
+		store := NewStore(contents)
+		if _, err := store.Put(context.Background(), NewNull()); err == nil {
+			t.Fatal("Put through typed-nil built-in store succeeded")
+		}
+		if _, err := store.Get(context.Background(), content.Digest(sha256.Sum256([]byte("missing")))); err == nil {
+			t.Fatal("Get through typed-nil built-in store succeeded")
+		}
+	}
+}

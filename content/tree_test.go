@@ -413,6 +413,48 @@ func TestTreeManifestHasExactPrivateHeader(t *testing.T) {
 	}
 }
 
+func TestTreeManifestSegmentsAreSinglePOSIXComponents(t *testing.T) {
+	for _, segment := range []string{"a/b", "a\x00b"} {
+		if _, err := encodeTreeManifest([]treeEntry{{segments: []string{segment}, kind: directoryEntry}}); err == nil {
+			t.Errorf("encodeTreeManifest accepted segment %q", segment)
+		}
+
+		encoded, err := encodeTreeManifest([]treeEntry{{segments: []string{"abc"}, kind: directoryEntry}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset := bytes.Index(encoded, []byte("abc"))
+		if offset < 0 {
+			t.Fatal("valid manifest did not contain its segment bytes")
+		}
+		copy(encoded[offset:offset+3], segment)
+		store := NewMemory()
+		manifest := putTestObject(t, store, encoded)
+		tree, err := NewTree(manifest.Digest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		repository, err := NewRepository(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.Entries(context.Background(), tree); err == nil {
+			t.Errorf("Entries accepted encoded segment %q", segment)
+		}
+	}
+
+	if runtime.GOOS != "windows" {
+		encoded, err := encodeTreeManifest([]treeEntry{{segments: []string{`a\b`}, kind: directoryEntry}})
+		if err != nil {
+			t.Fatalf("backslash is an opaque POSIX component byte: %v", err)
+		}
+		entries, err := decodeTreeManifest(encoded)
+		if err != nil || len(entries) != 1 || entries[0].segments[0] != `a\b` {
+			t.Fatalf("backslash segment round trip = (%#v, %v)", entries, err)
+		}
+	}
+}
+
 func TestTreeManifestProcessingHandlesDeepSymlinkGraphsIteratively(t *testing.T) {
 	const depth = 12000
 	entries := make([]treeEntry, 0, depth+1)

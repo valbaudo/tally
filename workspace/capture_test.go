@@ -83,30 +83,30 @@ func TestCaptureExactSlotsAndStructuredConcretePaths(t *testing.T) {
 	}
 
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		report, err := outputs.Value(ctx, reportPath)
+		report, err := outputs.File(ctx, reportPath, "report.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
-		again, err := outputs.Value(ctx, reportPath)
+		again, err := outputs.File(ctx, reportPath, "report.txt", "Text/Plain")
 		if err != nil {
 			return value.Value{}, err
 		}
 		if !report.Equal(again) {
 			return value.Value{}, errors.New("repeated capture was not memoized")
 		}
-		listed, err := outputs.Value(ctx, listPath)
+		listed, err := outputs.File(ctx, listPath, "list-member.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
-		document, err := outputs.Value(ctx, nestedPath)
+		document, err := outputs.File(ctx, nestedPath, "document.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
-		empty, err := outputs.Value(ctx, value.Path{}.Field("empty"))
+		empty, err := outputs.Tree(ctx, value.Path{}.Field("empty"))
 		if err != nil {
 			return value.Value{}, err
 		}
-		tree, err := outputs.Value(ctx, treePath)
+		tree, err := outputs.Tree(ctx, treePath)
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -131,8 +131,8 @@ func TestCaptureExactSlotsAndStructuredConcretePaths(t *testing.T) {
 	if !ok {
 		t.Fatalf("report kind = %v, want file", reportValue.Kind())
 	}
-	if report.Name() != "value" || report.Media() != "text/plain; charset=utf-8" || report.Size() != int64(len("complete report\n")) {
-		t.Fatalf("report facts = (%q, %q, %d), want (value, text/plain; charset=utf-8, %d)", report.Name(), report.Media(), report.Size(), len("complete report\n"))
+	if report.Name() != "report.txt" || report.Media() != "text/plain" || report.Size() != int64(len("complete report\n")) {
+		t.Fatalf("report facts = (%q, %q, %d), want (report.txt, text/plain, %d)", report.Name(), report.Media(), report.Size(), len("complete report\n"))
 	}
 	var copied bytes.Buffer
 	if err := repository.CopyFile(ctx, report, &copied); err != nil {
@@ -151,6 +151,107 @@ func TestCaptureExactSlotsAndStructuredConcretePaths(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("empty tree entries = %#v, want none", entries)
+	}
+}
+
+func TestCaptureKindSpecificFileMetadataAndWrongMethods(t *testing.T) {
+	ctx := context.Background()
+	repository, err := content.NewRepository(content.NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonType, err := value.File("application/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	customType, err := value.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := mustContract(t,
+		mustField(t, "custom", customType),
+		mustField(t, "exact", jsonType),
+		mustField(t, "tree", value.Tree()),
+	)
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+	environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	for _, name := range []string{"custom", "exact"} {
+		target, err := environment.Output(value.Path{}.Field(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWriteOutput(t, target, "plain bytes that sniff as text")
+	}
+	if _, err := environment.Output(value.Path{}.Field("tree")); err != nil {
+		t.Fatal(err)
+	}
+
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		custom, err := outputs.File(ctx, value.Path{}.Field("custom"), "semantic.dawn", "Application/X-Dawn; Profile=\"Custom\"")
+		if err != nil {
+			return value.Value{}, err
+		}
+		exact, err := outputs.File(ctx, value.Path{}.Field("exact"), "report.json", "application/json")
+		if err != nil {
+			return value.Value{}, err
+		}
+		tree, err := outputs.Tree(ctx, value.Path{}.Field("tree"))
+		if err != nil {
+			return value.Value{}, err
+		}
+		return mustObject(t,
+			mustEntry(t, "custom", custom),
+			mustEntry(t, "exact", exact),
+			mustEntry(t, "tree", tree),
+		), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom, _ := objectMember(t, candidate, "custom").File()
+	if custom.Name() != "semantic.dawn" || custom.Media() != "application/x-dawn; profile=Custom" {
+		t.Fatalf("custom file facts = (%q, %q), want canonical semantic metadata", custom.Name(), custom.Media())
+	}
+	exact, _ := objectMember(t, candidate, "exact").File()
+	if exact.Name() != "report.json" || exact.Media() != "application/json" {
+		t.Fatalf("exact file facts = (%q, %q), want report.json application/json", exact.Name(), exact.Media())
+	}
+
+	for _, test := range []struct {
+		name    string
+		capture func(workspace.Outputs) error
+	}{
+		{"File on tree", func(outputs workspace.Outputs) error {
+			_, err := outputs.File(ctx, value.Path{}.Field("tree"), "tree.bin", "application/octet-stream")
+			return err
+		}},
+		{"Tree on file", func(outputs workspace.Outputs) error {
+			_, err := outputs.Tree(ctx, value.Path{}.Field("exact"))
+			return err
+		}},
+		{"empty logical name", func(outputs workspace.Outputs) error {
+			_, err := outputs.File(ctx, value.Path{}.Field("exact"), "", "application/json")
+			return err
+		}},
+		{"bare media token", func(outputs workspace.Outputs) error {
+			_, err := outputs.File(ctx, value.Path{}.Field("exact"), "report.json", "json")
+			return err
+		}},
+		{"wildcard media", func(outputs workspace.Outputs) error {
+			_, err := outputs.File(ctx, value.Path{}.Field("exact"), "report.json", "application/*")
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			captured, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+				return value.Value{}, test.capture(outputs)
+			})
+			assertZeroCaptureError(t, captured, err)
+		})
 	}
 }
 
@@ -181,14 +282,14 @@ func TestCaptureMemoizesImmutableFileSnapshot(t *testing.T) {
 	}
 
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		first, err := outputs.Value(ctx, path)
+		first, err := outputs.File(ctx, path, "snapshot.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
 		if err := os.WriteFile(target.Location(), []byte("second"), 0o600); err != nil {
 			return value.Value{}, err
 		}
-		second, err := outputs.Value(ctx, path)
+		second, err := outputs.File(ctx, path, "snapshot.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -273,7 +374,7 @@ func TestCaptureRejectsInvalidSlotsContractsAndPaths(t *testing.T) {
 			}
 			test.setup(t, target)
 			candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-				captured, err := outputs.Value(ctx, value.Path{}.Field("report"))
+				captured, err := outputs.File(ctx, value.Path{}.Field("report"), "report.txt", "text/plain")
 				if err != nil {
 					return value.Value{}, err
 				}
@@ -301,7 +402,7 @@ func TestCaptureRejectsInvalidSlotsContractsAndPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			tree, err := outputs.Value(ctx, value.Path{}.Field("tree"))
+			tree, err := outputs.Tree(ctx, value.Path{}.Field("tree"))
 			if err != nil {
 				return value.Value{}, err
 			}
@@ -339,7 +440,7 @@ func TestCaptureRejectsInvalidSlotsContractsAndPaths(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = environment.Close() })
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			_, err := outputs.Value(ctx, value.Path{}.Field("/tmp/host-file"))
+			_, err := outputs.File(ctx, value.Path{}.Field("/tmp/host-file"), "host.bin", "application/octet-stream")
 			return value.Value{}, err
 		})
 		assertZeroCaptureError(t, candidate, err)
@@ -446,7 +547,7 @@ func TestCaptureTreeOutputUsesPinnedRootAcrossPathSwapAndRestore(t *testing.T) {
 	ctx := newSwapRestoreContext(base, target.Location(), saved, decoy)
 
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		result, err := outputs.Value(ctx, value.Path{}.Field("result"))
+		result, err := outputs.Tree(ctx, value.Path{}.Field("result"))
 		if err != nil {
 			return value.Value{}, err
 		}

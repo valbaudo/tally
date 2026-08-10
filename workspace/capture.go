@@ -35,13 +35,21 @@ type capturedOutput struct {
 	value value.Value
 }
 
-// Value captures the exact Dawn-owned target for one concrete declared file or
-// tree output path. Repeated requests return the first immutable snapshot.
-func (o Outputs) Value(ctx context.Context, path value.Path) (value.Value, error) {
+// File captures one declared file target with its inherent logical metadata.
+// The metadata is semantic data and is independent of the fixed physical slot.
+func (o Outputs) File(ctx context.Context, path value.Path, logicalName, concreteMedia string) (value.Value, error) {
 	if o.state == nil {
 		return value.Value{}, fmt.Errorf("workspace: outputs capability is invalid")
 	}
-	return o.state.captureValue(ctx, path)
+	return o.state.captureOutput(ctx, path, value.FileKind, logicalName, concreteMedia)
+}
+
+// Tree captures one declared tree target.
+func (o Outputs) Tree(ctx context.Context, path value.Path) (value.Value, error) {
+	if o.state == nil {
+		return value.Value{}, fmt.Errorf("workspace: outputs capability is invalid")
+	}
+	return o.state.captureOutput(ctx, path, value.TreeKind, "", "")
 }
 
 // Workspace captures the private workspace only when the compiled leaf
@@ -140,7 +148,7 @@ func (s *captureState) captureFailure() error {
 	return s.failure
 }
 
-func (s *captureState) captureValue(ctx context.Context, path value.Path) (result value.Value, err error) {
+func (s *captureState) captureOutput(ctx context.Context, path value.Path, expected value.Kind, logicalName, concreteMedia string) (result value.Value, err error) {
 	s.mu.Lock()
 	defer func() {
 		if err != nil && s.active {
@@ -158,21 +166,34 @@ func (s *captureState) captureValue(ctx context.Context, path value.Path) (resul
 		return value.Value{}, fmt.Errorf("workspace: capture output %s: %w", path.String(), err)
 	}
 	key := string(canonicalPath(path))
-	if prior, ok := s.captured[key]; ok {
-		return prior.value, nil
-	}
 	typ, _, err := resolveOutputSchema(s.env.outputs, path)
 	if err != nil {
 		return value.Value{}, err
 	}
-	if typ.Kind() != value.FileKind && typ.Kind() != value.TreeKind {
-		return value.Value{}, fmt.Errorf("workspace: output path %s does not select a file or tree", path.String())
+	if typ.Kind() != expected {
+		return value.Value{}, fmt.Errorf("workspace: output path %s selects %v, not %v", path.String(), typ.Kind(), expected)
+	}
+	if prior, ok := s.captured[key]; ok {
+		if expected == value.FileKind {
+			file, ok := prior.value.File()
+			if !ok {
+				return value.Value{}, fmt.Errorf("workspace: prior file capture is invalid")
+			}
+			requested, metadataErr := content.NewFile(file.Digest(), file.Size(), logicalName, concreteMedia)
+			if metadataErr != nil {
+				return value.Value{}, metadataErr
+			}
+			if !file.Equal(requested) {
+				return value.Value{}, fmt.Errorf("workspace: repeated file capture metadata differs from the first capture")
+			}
+		}
+		return prior.value, nil
 	}
 	target, err := s.env.Output(path)
 	if err != nil {
 		return value.Value{}, err
 	}
-	captured, err := s.captureTarget(ctx, target)
+	captured, err := s.captureTarget(ctx, target, logicalName, concreteMedia)
 	if err != nil {
 		return value.Value{}, fmt.Errorf("workspace: capture output %s: %w", path.String(), err)
 	}
@@ -222,7 +243,14 @@ func (s *captureState) captureWorkspace(ctx context.Context) (result value.Value
 	if err != nil {
 		return value.Value{}, fmt.Errorf("workspace: open private workspace: %w", err)
 	}
-	tree, captureErr := repository.CaptureTreeRoot(ctx, root)
+	first, captureErr := repository.CaptureTreeRoot(ctx, root)
+	var tree content.Tree
+	if captureErr == nil {
+		tree, captureErr = repository.CaptureTreeRoot(ctx, root)
+	}
+	if captureErr == nil && !first.Equal(tree) {
+		captureErr = fmt.Errorf("private workspace was not stable across verified captures")
+	}
 	if captureErr == nil {
 		captureErr = verifyDirectoryLocation(root, location, identity)
 	}
@@ -240,7 +268,7 @@ func (s *captureState) captureWorkspace(ctx context.Context) (result value.Value
 	return captured, nil
 }
 
-func (s *captureState) captureTarget(ctx context.Context, target Target) (result value.Value, err error) {
+func (s *captureState) captureTarget(ctx context.Context, target Target, logicalName, concreteMedia string) (result value.Value, err error) {
 	slotLocation := filepath.Dir(target.location)
 	root, err := openVerifiedDirectory(slotLocation, target.slotIdentity)
 	if err != nil {
@@ -259,11 +287,11 @@ func (s *captureState) captureTarget(ctx context.Context, target Target) (result
 	}
 	switch target.kind {
 	case value.FileKind:
-		first, err := s.ingestOutputFile(ctx, root, target, entryInfo)
+		first, err := s.ingestOutputFile(ctx, root, target, entryInfo, logicalName, concreteMedia)
 		if err != nil {
 			return value.Value{}, err
 		}
-		second, err := s.ingestOutputFile(ctx, root, target, entryInfo)
+		second, err := s.ingestOutputFile(ctx, root, target, entryInfo, logicalName, concreteMedia)
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -284,7 +312,14 @@ func (s *captureState) captureTarget(ctx context.Context, target Target) (result
 			}
 			return value.Value{}, errors.Join(fmt.Errorf("output tree identity changed while opening"), closeErr)
 		}
-		tree, captureErr := s.env.repository.CaptureTreeRoot(ctx, targetRoot)
+		first, captureErr := s.env.repository.CaptureTreeRoot(ctx, targetRoot)
+		var tree content.Tree
+		if captureErr == nil {
+			tree, captureErr = s.env.repository.CaptureTreeRoot(ctx, targetRoot)
+		}
+		if captureErr == nil && !first.Equal(tree) {
+			captureErr = fmt.Errorf("output tree was not stable across verified captures")
+		}
 		afterInfo, afterErr := targetRoot.Lstat(".")
 		closeErr := targetRoot.Close()
 		if captureErr != nil || afterErr != nil || closeErr != nil {
@@ -312,7 +347,7 @@ func (s *captureState) captureTarget(ctx context.Context, target Target) (result
 	}
 }
 
-func (s *captureState) ingestOutputFile(ctx context.Context, root *os.Root, target Target, expected fs.FileInfo) (content.File, error) {
+func (s *captureState) ingestOutputFile(ctx context.Context, root *os.Root, target Target, expected fs.FileInfo, logicalName, concreteMedia string) (content.File, error) {
 	file, err := root.Open(filepath.Base(target.location))
 	if err != nil {
 		return content.File{}, fmt.Errorf("open output file: %w", err)
@@ -325,7 +360,7 @@ func (s *captureState) ingestOutputFile(ctx context.Context, root *os.Root, targ
 		}
 		return content.File{}, errors.Join(fmt.Errorf("output file identity changed while opening"), closeErr)
 	}
-	semantic, ingestErr := s.env.repository.IngestFile(ctx, filepath.Base(target.location), "", file)
+	semantic, ingestErr := s.env.repository.IngestFile(ctx, logicalName, concreteMedia, file)
 	afterInfo, afterErr := file.Stat()
 	closeErr := file.Close()
 	if ingestErr != nil || afterErr != nil || closeErr != nil {

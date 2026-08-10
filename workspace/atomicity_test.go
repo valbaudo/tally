@@ -34,7 +34,7 @@ func TestCandidateFailuresReturnOnlyZeroValue(t *testing.T) {
 		}
 		mustWriteOutput(t, target, "stored before failure")
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			if _, err := outputs.Value(ctx, value.Path{}.Field("report")); err != nil {
+			if _, err := outputs.File(ctx, value.Path{}.Field("report"), "report.txt", "text/plain"); err != nil {
 				return value.Value{}, err
 			}
 			return value.NewString("must not escape"), errors.New("injected after first blob")
@@ -60,11 +60,11 @@ func TestCandidateFailuresReturnOnlyZeroValue(t *testing.T) {
 			t.Fatal(err)
 		}
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			first, err := outputs.Value(ctx, value.Path{}.Field("first"))
+			first, err := outputs.Tree(ctx, value.Path{}.Field("first"))
 			if err != nil {
 				return value.Value{}, err
 			}
-			second, err := outputs.Value(ctx, value.Path{}.Field("second"))
+			second, err := outputs.Tree(ctx, value.Path{}.Field("second"))
 			if err != nil {
 				return value.Value{}, err
 			}
@@ -129,7 +129,7 @@ func TestCandidateFailuresReturnOnlyZeroValue(t *testing.T) {
 		}
 		mustWriteOutput(t, target, "complete")
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			if _, err := outputs.Value(ctx, value.Path{}.Field("report")); err != nil {
+			if _, err := outputs.File(ctx, value.Path{}.Field("report"), "report.txt", "text/plain"); err != nil {
 				return value.Value{}, err
 			}
 			return mustObject(t), nil
@@ -158,7 +158,7 @@ func TestCandidateRejectsCapturedLeavesMovedOmittedOrForged(t *testing.T) {
 			return mustObject(t, mustEntry(t, "first", second), mustEntry(t, "second", first)), nil
 		}},
 		{"requested optional omitted", func(t *testing.T, outputs workspace.Outputs, first, second value.Value) (value.Value, error) {
-			if _, err := outputs.Value(ctx, value.Path{}.Field("optional")); err != nil {
+			if _, err := outputs.File(ctx, value.Path{}.Field("optional"), "optional.txt", "text/plain"); err != nil {
 				return value.Value{}, err
 			}
 			return mustObject(t, mustEntry(t, "first", first), mustEntry(t, "second", second)), nil
@@ -187,11 +187,11 @@ func TestCandidateRejectsCapturedLeavesMovedOmittedOrForged(t *testing.T) {
 				mustWriteOutput(t, target, name)
 			}
 			candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-				first, err := outputs.Value(ctx, value.Path{}.Field("first"))
+				first, err := outputs.File(ctx, value.Path{}.Field("first"), "first.txt", "text/plain")
 				if err != nil {
 					return value.Value{}, err
 				}
-				second, err := outputs.Value(ctx, value.Path{}.Field("second"))
+				second, err := outputs.File(ctx, value.Path{}.Field("second"), "second.txt", "text/plain")
 				if err != nil {
 					return value.Value{}, err
 				}
@@ -229,11 +229,11 @@ func TestCandidateRejectsEqualContentCapturesSwappedBetweenPaths(t *testing.T) {
 
 	semanticallyEqual := false
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		first, err := outputs.Value(ctx, value.Path{}.Field("first"))
+		first, err := outputs.File(ctx, value.Path{}.Field("first"), "equal.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
-		second, err := outputs.Value(ctx, value.Path{}.Field("second"))
+		second, err := outputs.File(ctx, value.Path{}.Field("second"), "equal.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -266,7 +266,7 @@ func TestCandidateRejectsReconstructedEqualContentHandles(t *testing.T) {
 
 		semanticallyEqual := false
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			captured, err := outputs.Value(ctx, value.Path{}.Field("report"))
+			captured, err := outputs.File(ctx, value.Path{}.Field("report"), "report.txt", "text/plain")
 			if err != nil {
 				return value.Value{}, err
 			}
@@ -297,7 +297,7 @@ func TestCandidateRejectsReconstructedEqualContentHandles(t *testing.T) {
 
 		semanticallyEqual := false
 		candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-			captured, err := outputs.Value(ctx, value.Path{}.Field("result"))
+			captured, err := outputs.Tree(ctx, value.Path{}.Field("result"))
 			if err != nil {
 				return value.Value{}, err
 			}
@@ -331,7 +331,7 @@ func TestCandidateRejectsEqualHandleFromPriorCaptureSession(t *testing.T) {
 	}
 	mustWriteOutput(t, target, "unchanged between sessions")
 	prior, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		report, err := outputs.Value(ctx, path)
+		report, err := outputs.File(ctx, path, "report.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -344,7 +344,7 @@ func TestCandidateRejectsEqualHandleFromPriorCaptureSession(t *testing.T) {
 
 	semanticallyEqual := false
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		current, err := outputs.Value(ctx, path)
+		current, err := outputs.File(ctx, path, "report.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
@@ -384,11 +384,77 @@ func TestAtomicCaptureRejectsSameSizeFileMutationDuringIngest(t *testing.T) {
 	store.replacement = append(bytes.Repeat([]byte("c"), 512), bytes.Repeat([]byte("b"), 88)...)
 
 	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
-		report, err := outputs.Value(ctx, value.Path{}.Field("report"))
+		report, err := outputs.File(ctx, value.Path{}.Field("report"), "report.txt", "text/plain")
 		if err != nil {
 			return value.Value{}, err
 		}
 		return mustObject(t, mustEntry(t, "report", report)), nil
+	})
+	assertZeroCaptureError(t, candidate, err)
+}
+
+func TestAtomicCaptureRejectsSameSizeTreeMutationDuringFirstRead(t *testing.T) {
+	ctx := context.Background()
+	store := &mutatingPutStore{Memory: content.NewMemory()}
+	repository, err := content.NewRepository(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := mustContract(t, mustField(t, "result", value.Tree()))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, nil)
+	environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	target, err := environment.Output(value.Path{}.Field("result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := filepath.Join(target.Location(), "member.bin")
+	if err := os.WriteFile(member, bytes.Repeat([]byte("a"), 600), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.target = member
+	store.replacement = append(bytes.Repeat([]byte("c"), 512), bytes.Repeat([]byte("b"), 88)...)
+
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		result, err := outputs.Tree(ctx, value.Path{}.Field("result"))
+		if err != nil {
+			return value.Value{}, err
+		}
+		return mustObject(t, mustEntry(t, "result", result)), nil
+	})
+	assertZeroCaptureError(t, candidate, err)
+}
+
+func TestAtomicCaptureRejectsSameSizeWorkspaceMutationDuringFirstRead(t *testing.T) {
+	ctx := context.Background()
+	store := &mutatingPutStore{Memory: content.NewMemory()}
+	repository, err := content.NewRepository(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := mustContract(t, mustField(t, "continued", value.Tree()))
+	leaf := compileLeaf(t, workflow.Script, value.EmptyContract(), contract, nil, []string{"continued"})
+	environment, err := workspace.Prepare(ctx, repository, leaf, mustObject(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = environment.Close() })
+	member := filepath.Join(environment.Workspace(), "member.bin")
+	if err := os.WriteFile(member, bytes.Repeat([]byte("a"), 600), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.target = member
+	store.replacement = append(bytes.Repeat([]byte("c"), 512), bytes.Repeat([]byte("b"), 88)...)
+
+	candidate, err := environment.Capture(ctx, func(outputs workspace.Outputs) (value.Value, error) {
+		continued, err := outputs.Workspace(ctx)
+		if err != nil {
+			return value.Value{}, err
+		}
+		return mustObject(t, mustEntry(t, "continued", continued)), nil
 	})
 	assertZeroCaptureError(t, candidate, err)
 }
@@ -410,7 +476,14 @@ type mutatingPutStore struct {
 
 func (s *mutatingPutStore) Put(ctx context.Context, source io.Reader) (content.Object, error) {
 	s.once.Do(func() {
+		prefix := make([]byte, 512)
+		read, readErr := io.ReadFull(source, prefix)
+		if readErr != nil {
+			s.err = readErr
+			return
+		}
 		s.err = os.WriteFile(s.target, s.replacement, 0o600)
+		source = io.MultiReader(bytes.NewReader(prefix[:read]), source)
 	})
 	if s.err != nil {
 		return content.Object{}, s.err

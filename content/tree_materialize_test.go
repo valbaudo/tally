@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -169,6 +171,92 @@ func TestMaterializeTreeRollsBackAfterFinalParentCloseFailure(t *testing.T) {
 	if err != nil || string(got) != "sibling" {
 		t.Fatalf("sibling after close-failure cleanup = (%q, %v)", got, err)
 	}
+}
+
+func TestMaterializeTreeRollsBackWhenFirstPostCreateInspectionFails(t *testing.T) {
+	repository, err := NewRepository(NewMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repository.CaptureTree(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	destination := filepath.Join(parent, "new-tree")
+	failing := &postCreateInspectionFailingTreeFilesystem{
+		treeFilesystem: repository.treeFilesystem(),
+		parent:         parent,
+	}
+	repository.treeFS = failing
+
+	err = repository.MaterializeTree(context.Background(), tree, destination)
+	if err == nil || !strings.Contains(err.Error(), "injected post-create inspection failure") {
+		t.Fatalf("MaterializeTree error = %v, want post-create inspection failure", err)
+	}
+	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination after post-create inspection failure = %v, want absent", statErr)
+	}
+}
+
+func TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack(t *testing.T) {
+	const childCase = "DAWN_DEEP_TREE_ROLLBACK_REMOVE_CASE"
+	if os.Getenv(childCase) == "" {
+		command := exec.Command(os.Args[0], "-test.run=^TestTreeRollbackRemovalHandlesDeepFiniteTreeUnderLowStack$", "-test.count=1")
+		command.Env = append(os.Environ(), childCase+"=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("deep tree rollback removal did not return ordinarily: %v\n%s", err, output)
+		}
+		return
+	}
+
+	parent := t.TempDir()
+	treePath := filepath.Join(parent, "tree")
+	if err := os.Mkdir(treePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := createDeepTreeMaterializationFixture(treePath, 512); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debug.SetMaxStack(64 << 10)
+	result := make(chan error, 1)
+	go func() {
+		removeErr := (osTreeCaptureRoot{root: root}).removeAll("tree")
+		result <- errors.Join(removeErr, root.Close())
+	}()
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(treePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deep rollback target status = %v, want absent", err)
+	}
+}
+
+func createDeepTreeMaterializationFixture(path string, depth int) (err error) {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	for range depth {
+		if err := root.Mkdir("d", 0o700); err != nil {
+			return err
+		}
+		child, err := root.OpenRoot("d")
+		if err != nil {
+			return err
+		}
+		if err := root.Close(); err != nil {
+			_ = child.Close()
+			return err
+		}
+		root = child
+	}
+	return nil
 }
 
 func TestMaterializeTreeRejectsCorruptManifestBeforeCreatingDestination(t *testing.T) {
@@ -395,6 +483,45 @@ type finalParentCloseFailingTreeFilesystem struct {
 	treeFilesystem
 	parent string
 	failed bool
+}
+
+type postCreateInspectionFailingTreeFilesystem struct {
+	treeFilesystem
+	parent  string
+	created bool
+	failed  bool
+}
+
+func (f *postCreateInspectionFailingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
+	root, err := f.treeFilesystem.openRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == f.parent {
+		return &postCreateInspectionFailingTreeRoot{treeCaptureRoot: root, filesystem: f}, nil
+	}
+	return root, nil
+}
+
+type postCreateInspectionFailingTreeRoot struct {
+	treeCaptureRoot
+	filesystem *postCreateInspectionFailingTreeFilesystem
+}
+
+func (r *postCreateInspectionFailingTreeRoot) mkdir(name string, mode os.FileMode) (os.FileInfo, error) {
+	created, err := r.treeCaptureRoot.mkdir(name, mode)
+	if err == nil {
+		r.filesystem.created = true
+	}
+	return created, err
+}
+
+func (r *postCreateInspectionFailingTreeRoot) readDir(name string) ([]os.DirEntry, error) {
+	if r.filesystem.created && !r.filesystem.failed {
+		r.filesystem.failed = true
+		return nil, errors.New("injected post-create inspection failure")
+	}
+	return r.treeCaptureRoot.readDir(name)
 }
 
 func (f *finalParentCloseFailingTreeFilesystem) openRoot(name string) (treeCaptureRoot, error) {
