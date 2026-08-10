@@ -2,10 +2,17 @@ package scheduler
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/valbaudo/dawn/value"
 )
+
+func TestPathDoesNotExposePointerIdentityEquality(t *testing.T) {
+	if reflect.TypeOf(Path{}).Comparable() {
+		t.Fatal("Path became comparable; independently built semantic paths would expose pointer identity through == and map keys")
+	}
+}
 
 func TestPathComponentsRetainArbitraryBytesAndDefensiveCopies(t *testing.T) {
 	item := []byte{'/', 0, 0xff, '.', 'x'}

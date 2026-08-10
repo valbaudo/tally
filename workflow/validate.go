@@ -9,28 +9,153 @@ import (
 )
 
 func validateGraph(graph Graph, cleanupBoundary, cleanupContext bool) error {
-	if cleanupBoundary && !graph.outputs.Equal(value.EmptyContract()) {
-		return fmt.Errorf("cleanup output contract must be explicitly empty")
-	}
-	if err := validateAcyclic(graph); err != nil {
-		return err
-	}
-	nodes := append([]Node(nil), graph.nodes...)
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].name < nodes[j].name })
-	for _, node := range nodes {
-		if err := validateNode(node, cleanupContext); err != nil {
-			return fmt.Errorf("node %q: %w", node.name, err)
+	tasks := []validationTask{{
+		kind: validationGraph, graph: graph,
+		cleanupBoundary: cleanupBoundary, cleanupContext: cleanupContext,
+	}}
+	for len(tasks) != 0 {
+		task := tasks[len(tasks)-1]
+		tasks = tasks[:len(tasks)-1]
+		var err error
+		switch task.kind {
+		case validationGraph:
+			if task.cleanupBoundary && !task.graph.outputs.Equal(value.EmptyContract()) {
+				err = fmt.Errorf("cleanup output contract must be explicitly empty")
+				break
+			}
+			if err = validateAcyclic(task.graph); err != nil {
+				break
+			}
+			if task.graph.cleanup != nil {
+				tasks = append(tasks, validationTask{
+					kind: validationFinally, graph: task.graph,
+					cleanupContext: task.cleanupContext, context: task.context,
+				})
+			}
+			nodes := append([]Node(nil), task.graph.nodes...)
+			sort.Slice(nodes, func(i, j int) bool { return nodes[i].name < nodes[j].name })
+			for index := len(nodes) - 1; index >= 0; index-- {
+				tasks = append(tasks, validationTask{
+					kind: validationNode, node: nodes[index], cleanupContext: task.cleanupContext,
+					context: &validationContext{parent: task.context, label: fmt.Sprintf("node %q", nodes[index].name)},
+				})
+			}
+		case validationNode:
+			err = scheduleNodeValidation(task, &tasks)
+		case validationFinally:
+			if task.cleanupContext {
+				err = fmt.Errorf("finally cannot contain finally")
+				break
+			}
+			tasks = append(tasks, validationTask{
+				kind: validationGraph, graph: task.graph.cleanup.graph,
+				cleanupBoundary: true, cleanupContext: true,
+				context: &validationContext{parent: task.context, label: "finally"},
+			})
 		}
-	}
-	if graph.cleanup != nil {
-		if cleanupContext {
-			return fmt.Errorf("finally cannot contain finally")
-		}
-		if err := validateNestedGraph(graph.cleanup.graph, true, true); err != nil {
-			return fmt.Errorf("finally: %w", err)
+		if err != nil {
+			return wrapValidationContext(task.context, err)
 		}
 	}
 	return nil
+}
+
+type validationTaskKind uint8
+
+const (
+	validationGraph validationTaskKind = iota
+	validationNode
+	validationFinally
+)
+
+type validationContext struct {
+	parent *validationContext
+	label  string
+}
+
+type validationTask struct {
+	kind                            validationTaskKind
+	graph                           Graph
+	node                            Node
+	cleanupBoundary, cleanupContext bool
+	context                         *validationContext
+}
+
+func scheduleNodeValidation(task validationTask, tasks *[]validationTask) error {
+	node := task.node
+	if node.leaf != nil {
+		if node.leaf.kind != Gate {
+			return nil
+		}
+		if task.cleanupContext {
+			return fmt.Errorf("cleanup cannot contain gate")
+		}
+		return validateGate(*node.leaf)
+	}
+	if node.scope == nil {
+		return fmt.Errorf("has no variant")
+	}
+	switch node.scope.kind {
+	case GraphScope:
+		if node.scope.graph == nil {
+			return fmt.Errorf("graph scope is missing its graph")
+		}
+		*tasks = append(*tasks, validationTask{
+			kind: validationGraph, graph: *node.scope.graph,
+			cleanupContext: task.cleanupContext, context: task.context,
+		})
+	case BranchScope:
+		if node.scope.branch == nil {
+			return fmt.Errorf("branch scope is missing its branch")
+		}
+		if err := validateBranch(*node.scope.branch); err != nil {
+			return err
+		}
+		cases := sortedBranchCases(node.scope.branch.cases)
+		for index := len(cases) - 1; index >= 0; index-- {
+			branchCase := cases[index]
+			*tasks = append(*tasks, validationTask{
+				kind: validationGraph, graph: branchCase.graph,
+				cleanupContext: task.cleanupContext,
+				context:        &validationContext{parent: task.context, label: fmt.Sprintf("branch case %q", branchCase.name)},
+			})
+		}
+	case MapScope:
+		if node.scope.map_ == nil {
+			return fmt.Errorf("map scope is missing its map")
+		}
+		if err := validateMap(*node.scope.map_); err != nil {
+			return err
+		}
+		*tasks = append(*tasks, validationTask{
+			kind: validationGraph, graph: node.scope.map_.body,
+			cleanupContext: task.cleanupContext, context: task.context,
+		})
+	case LoopScope:
+		if task.cleanupContext {
+			return fmt.Errorf("cleanup cannot contain loop")
+		}
+		if node.scope.loop == nil {
+			return fmt.Errorf("loop scope is missing its loop")
+		}
+		if err := validateLoop(*node.scope.loop); err != nil {
+			return err
+		}
+		*tasks = append(*tasks, validationTask{
+			kind: validationGraph, graph: node.scope.loop.body,
+			context: task.context,
+		})
+	default:
+		return fmt.Errorf("unknown scope kind %q", node.scope.kind)
+	}
+	return nil
+}
+
+func wrapValidationContext(context *validationContext, err error) error {
+	for current := context; current != nil; current = current.parent {
+		err = fmt.Errorf("%s: %w", current.label, err)
+	}
+	return err
 }
 
 func validateAcyclic(graph Graph) error {
@@ -65,37 +190,46 @@ func validateAcyclic(graph Graph) error {
 	colors := make(map[string]uint8, len(names))
 	stack := make([]string, 0, len(names))
 	stackIndex := make(map[string]int, len(names))
-	var visit func(string) error
-	visit = func(name string) error {
-		colors[name] = visiting
-		stackIndex[name] = len(stack)
-		stack = append(stack, name)
+	type dependencyFrame struct {
+		name      string
+		neighbors []string
+		next      int
+	}
+	frames := make([]dependencyFrame, 0, len(names))
+	enter := func(name string) {
 		neighbors := make([]string, 0, len(adjacent[name]))
 		for neighbor := range adjacent[name] {
 			neighbors = append(neighbors, neighbor)
 		}
 		sort.Strings(neighbors)
-		for _, neighbor := range neighbors {
+		colors[name] = visiting
+		stackIndex[name] = len(stack)
+		stack = append(stack, name)
+		frames = append(frames, dependencyFrame{name: name, neighbors: neighbors})
+	}
+	for _, name := range names {
+		if colors[name] != unvisited {
+			continue
+		}
+		enter(name)
+		for len(frames) != 0 {
+			frame := &frames[len(frames)-1]
+			if frame.next == len(frame.neighbors) {
+				stack = stack[:len(stack)-1]
+				delete(stackIndex, frame.name)
+				colors[frame.name] = visited
+				frames = frames[:len(frames)-1]
+				continue
+			}
+			neighbor := frame.neighbors[frame.next]
+			frame.next++
 			switch colors[neighbor] {
 			case unvisited:
-				if err := visit(neighbor); err != nil {
-					return err
-				}
+				enter(neighbor)
 			case visiting:
 				cycle := append([]string(nil), stack[stackIndex[neighbor]:]...)
 				cycle = append(cycle, neighbor)
 				return fmt.Errorf("dependency cycle: %s", strings.Join(normalizeCycle(cycle), " -> "))
-			}
-		}
-		stack = stack[:len(stack)-1]
-		delete(stackIndex, name)
-		colors[name] = visited
-		return nil
-	}
-	for _, name := range names {
-		if colors[name] == unvisited {
-			if err := visit(name); err != nil {
-				return err
 			}
 		}
 	}
@@ -116,70 +250,6 @@ func normalizeCycle(cycle []string) []string {
 	normalized := append([]string(nil), body[first:]...)
 	normalized = append(normalized, body[:first]...)
 	return append(normalized, normalized[0])
-}
-
-func validateNode(node Node, cleanup bool) error {
-	if node.leaf != nil {
-		if node.leaf.kind == Gate {
-			if cleanup {
-				return fmt.Errorf("cleanup cannot contain gate")
-			}
-			return validateGate(*node.leaf)
-		}
-		return nil
-	}
-	if node.scope == nil {
-		return fmt.Errorf("has no variant")
-	}
-	switch node.scope.kind {
-	case GraphScope:
-		if node.scope.graph == nil {
-			return fmt.Errorf("graph scope is missing its graph")
-		}
-		return validateNestedGraph(*node.scope.graph, false, cleanup)
-	case BranchScope:
-		if node.scope.branch == nil {
-			return fmt.Errorf("branch scope is missing its branch")
-		}
-		if err := validateBranch(*node.scope.branch); err != nil {
-			return err
-		}
-		for _, branchCase := range sortedBranchCases(node.scope.branch.cases) {
-			if err := validateNestedGraph(branchCase.graph, false, cleanup); err != nil {
-				return fmt.Errorf("branch case %q: %w", branchCase.name, err)
-			}
-		}
-		return nil
-	case MapScope:
-		if node.scope.map_ == nil {
-			return fmt.Errorf("map scope is missing its map")
-		}
-		if err := validateMap(*node.scope.map_); err != nil {
-			return err
-		}
-		return validateNestedGraph(node.scope.map_.body, false, cleanup)
-	case LoopScope:
-		if cleanup {
-			return fmt.Errorf("cleanup cannot contain loop")
-		}
-		if node.scope.loop == nil {
-			return fmt.Errorf("loop scope is missing its loop")
-		}
-		if err := validateLoop(*node.scope.loop); err != nil {
-			return err
-		}
-		return validateNestedGraph(node.scope.loop.body, false, false)
-	default:
-		return fmt.Errorf("unknown scope kind %q", node.scope.kind)
-	}
-}
-
-// validateNestedGraph keeps finite structured depth off the caller's Go stack
-// while retaining the existing deterministic depth-first validation order.
-func validateNestedGraph(graph Graph, cleanupBoundary, cleanupContext bool) error {
-	done := make(chan error, 1)
-	go func() { done <- validateGraph(graph, cleanupBoundary, cleanupContext) }()
-	return <-done
 }
 
 func validateBranch(branch Branch) error {

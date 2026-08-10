@@ -64,7 +64,8 @@ func (c Component) IsCleanup() bool { return c.kind == CleanupComponent }
 // Path is an immutable sequence of stable structured execution components.
 // The zero Path is the root path.
 type Path struct {
-	tail *pathNode
+	tail          *pathNode
+	nonComparable [0]func()
 }
 
 type pathNode struct {

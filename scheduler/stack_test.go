@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"runtime/debug"
 	"testing"
 
@@ -27,13 +28,17 @@ func TestStructuredControlFiniteExecutionSubprocess(t *testing.T) {
 			runFiniteDepthCase(t)
 		case "map":
 			runFiniteMapCase(t)
+		case "dependency":
+			runFiniteDependencyCase(t)
+		case "compile-worklist":
+			runFiniteCompileWorklistCase(t)
 		default:
 			t.Fatalf("unknown finite execution case %q", childCase)
 		}
 		return
 	}
 
-	for _, childCase := range []string{"depth", "map"} {
+	for _, childCase := range []string{"depth", "map", "dependency", "compile-worklist"} {
 		t.Run(childCase, func(t *testing.T) {
 			command := exec.Command(os.Args[0], "-test.run=^TestStructuredControlFiniteExecutionSubprocess$", "-test.count=1")
 			command.Env = append(os.Environ(), finiteExecutionCase+"="+childCase)
@@ -41,6 +46,78 @@ func TestStructuredControlFiniteExecutionSubprocess(t *testing.T) {
 				t.Fatalf("finite %s compilation/execution did not return ordinarily: %v\n%s", childCase, err, output)
 			}
 		})
+	}
+}
+
+func runFiniteDependencyCase(t *testing.T) {
+	t.Helper()
+	empty := value.EmptyContract()
+	gateInputs := testContract(t,
+		testRequired(t, "passed", value.Boolean()),
+		testOptional(t, "reason", value.String()),
+	)
+	passed := branchLiteral(t, "true")
+	nodes := make([]workflow.NodeDraft, finiteDepth)
+	edges := make([]workflow.EdgeDraft, 0, finiteDepth-1)
+	for index := range nodes {
+		name := fmt.Sprintf("gate-%05d", index)
+		nodes[index] = workflow.NodeDraft{
+			Name:     name,
+			Leaf:     &workflow.LeafDraft{Kind: workflow.Gate, Inputs: gateInputs, Outputs: empty},
+			Literals: []workflow.LiteralBindingDraft{{Input: "passed", Value: passed}},
+		}
+		if index != 0 {
+			edges = append(edges, prestigeEdge(workflow.Child, fmt.Sprintf("gate-%05d", index-1), workflow.Child, name))
+		}
+	}
+	definition, err := workflow.Compile(workflow.ProgramDraft{
+		Root: "root", Modules: []workflow.ModuleDraft{{
+			Name: "root", Graph: workflow.GraphDraft{Inputs: empty, Outputs: empty, Nodes: nodes, Edges: edges},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("compile finite dependency chain: %v", err)
+	}
+	if len(definition.Canonical()) == 0 {
+		t.Fatal("finite dependency definition omitted its canonical form")
+	}
+}
+
+func runFiniteCompileWorklistCase(t *testing.T) {
+	t.Helper()
+	program := finiteDepthProgram(t)
+	baseline := runtime.NumGoroutine()
+	stop := make(chan struct{})
+	ready := make(chan struct{})
+	observed := make(chan int, 1)
+	go func() {
+		peak := runtime.NumGoroutine()
+		close(ready)
+		for {
+			select {
+			case <-stop:
+				observed <- peak
+				return
+			default:
+				if current := runtime.NumGoroutine(); current > peak {
+					peak = current
+				}
+				runtime.Gosched()
+			}
+		}
+	}()
+	<-ready
+	definition, err := workflow.Compile(program)
+	close(stop)
+	peak := <-observed
+	if err != nil {
+		t.Fatalf("compile finite-depth worklist: %v", err)
+	}
+	if len(definition.Canonical()) == 0 {
+		t.Fatal("finite-depth worklist definition omitted its canonical form")
+	}
+	if peak > baseline+8 {
+		t.Fatalf("finite-depth compilation used %d concurrent goroutines above baseline, want at most 8", peak-baseline)
 	}
 }
 
@@ -57,6 +134,15 @@ func runFiniteDepthCase(t *testing.T) {
 }
 
 func compileFiniteDepthDefinition(t *testing.T) workflow.Definition {
+	t.Helper()
+	definition, err := workflow.Compile(finiteDepthProgram(t))
+	if err != nil {
+		t.Fatalf("compile finite depth definition: %v", err)
+	}
+	return definition
+}
+
+func finiteDepthProgram(t *testing.T) workflow.ProgramDraft {
 	t.Helper()
 	empty := value.EmptyContract()
 	selector := testContract(t, testRequired(t, "selected", value.Boolean()))
@@ -104,13 +190,9 @@ func compileFiniteDepthDefinition(t *testing.T) workflow.Definition {
 		}
 	}
 
-	definition, err := workflow.Compile(workflow.ProgramDraft{
+	return workflow.ProgramDraft{
 		Root: "root", Modules: []workflow.ModuleDraft{{Name: "root", Graph: current}},
-	})
-	if err != nil {
-		t.Fatalf("compile finite depth definition: %v", err)
 	}
-	return definition
 }
 
 func runFiniteMapCase(t *testing.T) {

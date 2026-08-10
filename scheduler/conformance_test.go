@@ -297,30 +297,57 @@ func TestStructuredControlArbitrationStress(t *testing.T) {
 
 func TestStructuredControlGraphCancellationStress(t *testing.T) {
 	empty := value.EmptyContract()
+	type leafCase struct {
+		name       string
+		completion LeafCompletion
+		diagnostic diagnostic
+	}
+	leaves := []leafCase{
+		{name: "a-mechanical", completion: mustLeafFailure(t, MechanicalFailure, errors.New("mechanical/a")), diagnostic: failed(Path{}.AuthoredChild("a-mechanical"), MechanicalFailure, errors.New("mechanical/a"))},
+		{name: "b-contract", completion: mustLeafFailure(t, ContractFailure, errors.New("contract/b")), diagnostic: failed(Path{}.AuthoredChild("b-contract"), ContractFailure, errors.New("contract/b"))},
+		{name: "c-timeout", completion: mustLeafTimeout(t, errors.New("timeout/c")), diagnostic: failed(Path{}.AuthoredChild("c-timeout"), TimeoutFailure, errors.New("timeout/c"))},
+		{name: "d-mechanical", completion: mustLeafFailure(t, MechanicalFailure, errors.New("mechanical/d")), diagnostic: failed(Path{}.AuthoredChild("d-mechanical"), MechanicalFailure, errors.New("mechanical/d"))},
+		{name: "e-contract", completion: mustLeafFailure(t, ContractFailure, errors.New("contract/e")), diagnostic: failed(Path{}.AuthoredChild("e-contract"), ContractFailure, errors.New("contract/e"))},
+		{name: "f-timeout", completion: mustLeafTimeout(t, errors.New("timeout/f")), diagnostic: failed(Path{}.AuthoredChild("f-timeout"), TimeoutFailure, errors.New("timeout/f"))},
+		{name: "g-/\x00", completion: mustLeafFailure(t, MechanicalFailure, errors.New("mechanical/g")), diagnostic: failed(Path{}.AuthoredChild("g-/\x00"), MechanicalFailure, errors.New("mechanical/g"))},
+		{name: "h-é", completion: mustLeafFailure(t, ContractFailure, errors.New("contract/h")), diagnostic: failed(Path{}.AuthoredChild("h-é"), ContractFailure, errors.New("contract/h"))},
+	}
+	nodes := make([]workflow.NodeDraft, len(leaves))
+	causes := make([]diagnostic, len(leaves))
+	for index, leaf := range leaves {
+		nodes[index] = testLeaf(leaf.name, empty, empty)
+		causes[index] = leaf.diagnostic
+	}
 	definition := testDefinition(t, workflow.GraphDraft{
 		Inputs: empty, Outputs: empty,
-		Nodes: []workflow.NodeDraft{
-			testLeaf("a-mechanical", empty, empty),
-			testLeaf("b-contract", empty, empty),
-			testLeaf("c-timeout", empty, empty),
-		},
+		Nodes: nodes,
 	})
-	var want string
+	want := stressResultSignature(normalize(causes, nil))
+	seenOrders := make(map[string]struct{})
 	for seed := int64(0); seed < conformancePermutations; seed++ {
 		runner := newMapTestRunner()
-		boundary := newPathRecordingBoundary(&eventTrace{})
-		execution := startMapTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 3, CancellationGrace: time.Second})
-		starts := prestigeStartsByName(runner.waitStarts(t, 3))
-		completions := map[string]LeafCompletion{
-			"a-mechanical": mustLeafFailure(t, MechanicalFailure, errors.New("mechanical")),
-			"b-contract":   mustLeafFailure(t, ContractFailure, errors.New("contract")),
-			"c-timeout":    mustLeafTimeout(t, errors.New("timeout")),
+		boundary := newSettlementSignalBoundary(&eventTrace{}, len(leaves)+1)
+		execution := startMapTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: len(leaves), CancellationGrace: testTimeout})
+		starts := prestigeStartsByName(runner.waitStarts(t, len(leaves)))
+		order := conformanceSchedule(len(leaves), int(seed)*313+17)
+		orderedNames := make([]string, len(order))
+		for position, index := range order {
+			orderedNames[position] = leaves[index].name
+			requirePrestigeStartCount(t, starts, leaves[index].name, 1)
 		}
-		names := []string{"a-mechanical", "b-contract", "c-timeout"}
-		for _, index := range rand.New(rand.NewSource(seed)).Perm(len(names)) {
-			name := names[index]
-			requirePrestigeStartCount(t, starts, name, 1)
-			starts[name][0].complete(completions[name])
+		seenOrders[strings.Join(orderedNames, ",")] = struct{}{}
+
+		first := leaves[order[0]]
+		starts[first.name][0].complete(first.completion)
+		boundary.waitSettled(t, Path{}.AuthoredChild(first.name))
+		for _, index := range order[1:] {
+			name := leaves[index].name
+			waitClosed(t, starts[name][0].cancelObserved, fmt.Sprintf("seed %d leaf %q did not observe fail-fast cancellation", seed, name))
+		}
+		for _, index := range order[1:] {
+			leaf := leaves[index]
+			starts[leaf.name][0].complete(leaf.completion)
+			boundary.waitSettled(t, Path{}.AuthoredChild(leaf.name))
 		}
 
 		result := waitResult(t, execution)
@@ -331,9 +358,7 @@ func TestStructuredControlGraphCancellationStress(t *testing.T) {
 			t.Fatalf("seed %d primary = %#v, want lexical mechanical path", seed, primary)
 		}
 		signature := stressResultSignature(result)
-		if seed == 0 {
-			want = signature
-		} else if signature != want {
+		if signature != want {
 			t.Fatalf("seed %d runtime arbitration = %q, want %q", seed, signature, want)
 		}
 		for _, started := range starts {
@@ -344,7 +369,137 @@ func TestStructuredControlGraphCancellationStress(t *testing.T) {
 		if runner.activeCount() != 0 {
 			t.Fatalf("seed %d active graph executions = %d, want 0", seed, runner.activeCount())
 		}
-		assertSettledPathsNeverCommit(t, boundary.snapshot())
+		if _, ok := result.Output(); ok {
+			t.Fatalf("seed %d non-success graph exposed output", seed)
+		}
+		assertSettledPathsNeverCommit(t, boundary.base.snapshot())
+	}
+	if len(seenOrders) != conformancePermutations {
+		t.Fatalf("runtime stress exercised %d distinct completion schedules, want %d", len(seenOrders), conformancePermutations)
+	}
+}
+
+func TestStructuredControlFailFastCancellationConformance(t *testing.T) {
+	empty := value.EmptyContract()
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{
+			testLeaf("trigger", empty, empty),
+			testLeaf("cooperative", empty, empty),
+			testLeaf("noncooperative", empty, empty),
+			testLeaf("later", empty, empty),
+		},
+		Edges: []workflow.EdgeDraft{prestigeEdge(workflow.Child, "trigger", workflow.Child, "later")},
+	})
+	runner := newMapTestRunner()
+	boundary := newPathRecordingBoundary(&eventTrace{})
+	execution := startMapTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 3, CancellationGrace: 100 * time.Millisecond})
+	starts := prestigeStartsByName(runner.waitStarts(t, 3))
+	for _, name := range []string{"trigger", "cooperative", "noncooperative"} {
+		requirePrestigeStartCount(t, starts, name, 1)
+	}
+	cooperativeDone := make(chan struct{})
+	cooperativeCompletion := mustLeafCancelled(context.Canceled)
+	go func() {
+		<-starts["cooperative"][0].cancelObserved
+		starts["cooperative"][0].complete(cooperativeCompletion)
+		close(cooperativeDone)
+	}()
+
+	triggerErr := errors.New("controlled fail-fast trigger")
+	starts["trigger"][0].complete(mustLeafFailure(t, MechanicalFailure, triggerErr))
+	waitClosed(t, starts["cooperative"][0].cancelObserved, "cooperative sibling did not observe cancellation")
+	waitClosed(t, starts["noncooperative"][0].cancelObserved, "noncooperative sibling did not observe cancellation")
+	waitClosed(t, cooperativeDone, "cooperative sibling did not terminalize after cancellation")
+	result := waitResult(t, execution)
+	waitClosed(t, starts["noncooperative"][0].forceObserved, "noncooperative sibling was not force-stopped after grace")
+
+	want := stressResultSignature(normalize([]diagnostic{
+		failed(Path{}.AuthoredChild("trigger"), MechanicalFailure, triggerErr),
+		parentCancelled(Path{}.AuthoredChild("cooperative")),
+		parentCancelled(Path{}.AuthoredChild("noncooperative")),
+	}, nil))
+	if got := stressResultSignature(result); got != want {
+		t.Fatalf("fail-fast result = %q, want %q", got, want)
+	}
+	for name, counts := range map[string][2]int{
+		"trigger":        {1, 0},
+		"cooperative":    {1, 0},
+		"noncooperative": {1, 1},
+	} {
+		started := starts[name][0]
+		if started.terminalizations() != counts[0] || started.forceCalls() != counts[1] {
+			t.Fatalf("%q terminal/force counts = %d/%d, want %d/%d", name, started.terminalizations(), started.forceCalls(), counts[0], counts[1])
+		}
+	}
+	if runner.count() != 3 {
+		t.Fatalf("fail-fast started %d leaves, want 3 and no dependent later leaf", runner.count())
+	}
+	if runner.activeCount() != 0 {
+		t.Fatalf("fail-fast left %d active leaf executions, want quiescence", runner.activeCount())
+	}
+	if _, ok := result.Output(); ok {
+		t.Fatal("fail-fast graph exposed non-success output")
+	}
+	assertSettledPathsNeverCommit(t, boundary.snapshot())
+}
+
+func conformanceSchedule(size, rank int) []int {
+	available := make([]int, size)
+	factorial := 1
+	for index := range available {
+		available[index] = index
+		factorial *= index + 1
+	}
+	if factorial != 0 {
+		rank %= factorial
+	}
+	result := make([]int, 0, size)
+	for remaining := size; remaining > 0; remaining-- {
+		block := factorial / remaining
+		choice := rank / block
+		rank %= block
+		result = append(result, available[choice])
+		available = append(available[:choice], available[choice+1:]...)
+		factorial = block
+	}
+	return result
+}
+
+type settlementSignalBoundary struct {
+	base    *pathRecordingBoundary
+	settled chan Path
+}
+
+func newSettlementSignalBoundary(trace *eventTrace, capacity int) *settlementSignalBoundary {
+	return &settlementSignalBoundary{base: newPathRecordingBoundary(trace), settled: make(chan Path, capacity)}
+}
+
+func (b *settlementSignalBoundary) Enter(ctx context.Context, instance Instance) error {
+	return b.base.Enter(ctx, instance)
+}
+
+func (b *settlementSignalBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
+	return b.base.Commit(ctx, instance, output)
+}
+
+func (b *settlementSignalBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
+	if err := b.base.Settle(ctx, instance, result); err != nil {
+		return err
+	}
+	b.settled <- instance.Path()
+	return nil
+}
+
+func (b *settlementSignalBoundary) waitSettled(t *testing.T, want Path) {
+	t.Helper()
+	select {
+	case got := <-b.settled:
+		if comparePath(got, want) != 0 {
+			t.Fatalf("settled path = %#v, want %#v", got.Components(), want.Components())
+		}
+	case <-time.After(testTimeout):
+		t.Fatalf("path %#v did not settle", want.Components())
 	}
 }
 
