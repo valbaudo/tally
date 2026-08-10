@@ -1,7 +1,10 @@
 package workflow
 
 import (
+	"os"
+	"os/exec"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -254,6 +257,35 @@ func TestCompileRejectsRawLLMTreeInputAtAnyDepth(t *testing.T) {
 				t.Fatalf("Compile() error = %v, want raw-LLM tree rejection", err)
 			}
 		})
+	}
+}
+
+func TestCompileDeliveryDeepRawLLMTreeInputDoesNotOverflowStack(t *testing.T) {
+	const childCase = "DAWN_DEEP_DELIVERY_TYPE_CASE"
+	if os.Getenv(childCase) != "" {
+		typ := value.Tree()
+		for range 2048 {
+			typ = deliveryList(t, typ)
+		}
+		inputs := deliveryContract(t, deliveryRequired(t, "input", typ))
+		outputs := value.EmptyContract()
+		debug.SetMaxStack(64 << 10)
+		result := make(chan error, 1)
+		go func() {
+			_, err := compileDelivery(LeafDraft{Kind: LLM}, inputs, outputs)
+			result <- err
+		}()
+		err := <-result
+		if err == nil || !strings.Contains(err.Error(), "tree") {
+			t.Fatalf("compileDelivery() error = %v, want ordinary raw-LLM tree rejection", err)
+		}
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestCompileDeliveryDeepRawLLMTreeInputDoesNotOverflowStack$")
+	command.Env = append(os.Environ(), childCase+"=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("deep delivery validation did not return an ordinary result: %v\n%s", err, output)
 	}
 }
 

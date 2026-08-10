@@ -139,19 +139,24 @@ func resolvesRequiredTree(contract value.Contract, path []string) bool {
 }
 
 func typeContains(typ value.Type, kind value.Kind) bool {
-	if typ.Kind() == kind {
-		return true
-	}
-	switch typ.Kind() {
-	case value.ObjectKind:
-		for _, field := range typ.Fields() {
-			if typeContains(field.Type(), kind) {
-				return true
+	pending := []value.Type{typ}
+	for len(pending) != 0 {
+		last := len(pending) - 1
+		current := pending[last]
+		pending = pending[:last]
+		if current.Kind() == kind {
+			return true
+		}
+		switch current.Kind() {
+		case value.ObjectKind:
+			for _, field := range current.Fields() {
+				pending = append(pending, field.Type())
+			}
+		case value.ListKind, value.MapKind:
+			if element, ok := current.Element(); ok {
+				pending = append(pending, element)
 			}
 		}
-	case value.ListKind, value.MapKind:
-		element, ok := typ.Element()
-		return ok && typeContains(element, kind)
 	}
 	return false
 }
