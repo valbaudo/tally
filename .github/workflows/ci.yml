@@ -32,7 +32,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
-      - run: go test -race ./...
+      # The ordinary pass above owns the 50,000-case stack/resource proof.
+      # Re-running that subprocess suite under the race runtime exceeds the
+      # macOS runner's package timeout without adding race-specific coverage.
+      - run: go test -race ./... -skip '^TestStructuredControlFiniteExecutionSubprocess$'
       - run: go vet ./...
 
   unsupported-platforms-refuse:
