@@ -361,11 +361,13 @@ The design is complete when:
 
 ## Implementation Evidence — 2026-08-11
 
-Task 9 conformance is captured by the implementation range
-`7dfe848b3d60ee688dcdc0694ebdd5f1e64a8db5..c8245169bcebb7b8c26cb810a033850baa1e51df`.
+Task 9 conformance and final cancellation/runtime hardening are captured by the
+immutable source-and-test range
+`7dfe848b3d60ee688dcdc0694ebdd5f1e64a8db5..f5ff103773965ba8e1021fd3e597bdde97e836e6`.
 The original conformance commit is
-`92cde7d574a066a6513c3bfcdcab2fa0ad78e496`; the endpoint is the focused
-conformance-hardening commit `c8245169bcebb7b8c26cb810a033850baa1e51df`.
+`92cde7d574a066a6513c3bfcdcab2fa0ad78e496`, the first focused hardening
+endpoint is `c8245169bcebb7b8c26cb810a033850baa1e51df`, and the final source/test
+endpoint is `f5ff103773965ba8e1021fd3e597bdde97e836e6`.
 The Prestige-shaped
 trace, deterministic arbitration/cancellation permutations, deferred edge
 matrices, and 50,000-depth/50,000-item finite-execution subprocesses were
@@ -384,6 +386,12 @@ go test ./... -count=1
 go vet ./...
 git diff --check
 ```
+
+The final endpoint additionally proves controller-linearized cleanup-outcome
+capture and success publication, claim-first immutability, one-shot closed
+cancellation observation, indexed linear graph readiness/dataflow, complete
+cleanup-cause retention, and a 50,000-node completion chain under the same
+1 MiB maximum Go stack and runtime capacity one.
 
 This evidence implements and hardens only the structured-control runtime in
 this specification. It does not claim implementation of GitHub #8–#12.
