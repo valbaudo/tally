@@ -37,8 +37,9 @@ func (r *runState) runBranch(ctx context.Context, path Path, branch workflow.Bra
 	}
 
 	casePath := path.BranchCase(caseName)
-	done := r.runNested(ctx, func(nestedContext context.Context) Result {
-		return r.runGraph(nestedContext, casePath, selected.Graph(), input)
+	caseRun := r.childRun()
+	done := caseRun.runNested(ctx, func(nestedContext context.Context) Result {
+		return caseRun.runGraph(nestedContext, casePath, selected.Graph(), input)
 	})
 	result, ok := <-done
 	if !ok || !result.Valid() {
@@ -55,14 +56,7 @@ func (r *runState) runBranch(ctx context.Context, path Path, branch workflow.Bra
 	if err := branch.Outputs().Validate(output); err != nil {
 		return r.settle(ctx, instance, resultFrom(failed(path, ContractFailure, err), nil))
 	}
-	if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
-	}
-	result, err = NewSucceededResult(output)
-	if err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
-	}
-	return result
+	return r.commit(ctx, instance, output)
 }
 
 func resolveBranchCase(branch workflow.Branch, input value.Value) (string, error) {

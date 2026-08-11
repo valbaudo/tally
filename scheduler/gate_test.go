@@ -104,10 +104,11 @@ const (
 )
 
 type cancellationResponsiveBoundary struct {
-	phase   cancellationPhase
-	blocked chan struct{}
-	base    *recordingBoundary
-	once    sync.Once
+	phase          cancellationPhase
+	blocked        chan struct{}
+	base           *recordingBoundary
+	once           sync.Once
+	claimedContext context.Context
 }
 
 func (b *cancellationResponsiveBoundary) Enter(ctx context.Context, instance Instance) error {
@@ -124,6 +125,11 @@ func (b *cancellationResponsiveBoundary) Enter(ctx context.Context, instance Ins
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	workCommit := (b.phase == cancelLeafCommit || b.phase == cancelGraphCommit) && name == "work"
+	gateCommit := b.phase == cancelGateCommit && name == "allow"
+	if workCommit || gateCommit {
+		b.claimedContext = ctx
+	}
 	return b.base.Enter(ctx, instance)
 }
 
@@ -132,10 +138,11 @@ func (b *cancellationResponsiveBoundary) Commit(ctx context.Context, instance In
 	workBlocked := (b.phase == cancelLeafCommit || b.phase == cancelGraphCommit) && name == "work"
 	gateBlocked := b.phase == cancelGateCommit && name == "allow"
 	if workBlocked || gateBlocked {
-		b.base.trace.record(traceEvent{kind: traceCommit, child: name})
 		b.signalBlocked()
-		<-ctx.Done()
-		return ctx.Err()
+		// The scope claimed success before entering Commit. Observe the
+		// original scope cancellation to prove fail-fast linearized later,
+		// then let the protected commit finish successfully.
+		<-b.claimedContext.Done()
 	}
 	return b.base.Commit(ctx, instance, output)
 }

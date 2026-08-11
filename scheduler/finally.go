@@ -12,13 +12,19 @@ import (
 func (r *runState) finishGraph(ctx context.Context, path Path, graph workflow.Graph, protectedInput value.Value, instance Instance, state *graphState, body Result) Result {
 	result := body
 	if cleanup, present := graph.Finally(); present {
+		if r.control.beforeBodyOutcomeClaim != nil {
+			r.control.beforeBodyOutcomeClaim(ctx, path)
+		}
+		var snapshot scopeSnapshot
+		body, snapshot = r.scope.capture(path, body)
+		result = body
 		cleanupPath := path.Cleanup()
 		cleanupInput, inputErr := assembleCleanupInput(cleanup, protectedInput, state, body.Status())
 		if inputErr != nil {
 			result = applyCleanupPrecedence(body, resultFrom(cleanupFailed(cleanupPath, inputErr), nil), cleanupPath, false)
 		} else {
-			cleanupContext, cancel, cancellation := r.control.cleanupContext(ctx)
-			cleanupRun := &runState{scheduler: r.scheduler, control: r.control, cancellation: cancellation}
+			cleanupContext, cancel, cancellation, cleanupScope := r.control.cleanupContext(ctx, r.scope, snapshot)
+			cleanupRun := &runState{scheduler: r.scheduler, control: r.control, cancellation: cancellation, scope: cleanupScope}
 			done := cleanupRun.runNested(cleanupContext, func(nestedContext context.Context) Result {
 				return cleanupRun.runGraph(nestedContext, cleanupPath, cleanup.Graph(), cleanupInput)
 			})
@@ -38,21 +44,11 @@ func (r *runState) finishGraph(ctx context.Context, path Path, graph workflow.Gr
 	if result.Status() != Succeeded {
 		return r.settle(ctx, instance, result)
 	}
-	if ctx.Err() != nil {
-		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
-	}
 	output, present := result.Output()
 	if !present {
 		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("successful graph omitted its output")), nil))
 	}
-	if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
-	}
-	committed, err := NewSucceededResult(output)
-	if err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
-	}
-	return committed
+	return r.commit(ctx, instance, output)
 }
 
 func assembleCleanupInput(cleanup workflow.Finally, protectedInput value.Value, state *graphState, status Status) (value.Value, error) {
@@ -126,14 +122,20 @@ func applyCleanupPrecedence(body, cleanup Result, cleanupPath Path, parentInterr
 		return resultFrom(primary, secondary)
 	}
 	failure := cleanupFailed(cleanupPath, cleanupResultError(cleanup))
+	cleanupDiagnostics := contextualCleanupDiagnostics(cleanup)
 	if body.Status() == Succeeded {
-		return resultFrom(failure, nil)
+		secondary := appendUniqueDiagnostics(nil, cleanupDiagnostics...)
+		sortDiagnostics(secondary)
+		return resultFrom(failure, secondary)
 	}
 	primary, present := body.Primary()
 	if !present {
-		return resultFrom(failure, nil)
+		secondary := appendUniqueDiagnostics(nil, cleanupDiagnostics...)
+		sortDiagnostics(secondary)
+		return resultFrom(failure, secondary)
 	}
-	secondary := append(body.Secondary(), failure)
+	secondary := appendUniqueDiagnostics(body.Secondary(), failure)
+	secondary = appendUniqueDiagnostics(secondary, cleanupDiagnostics...)
 	sortDiagnostics(secondary)
 	return resultFrom(primary, secondary)
 }

@@ -16,6 +16,7 @@ type graphCompletion struct {
 
 type activeNode struct {
 	cancel context.CancelFunc
+	scope  *scopeTerminal
 }
 
 func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph, input value.Value) Result {
@@ -39,22 +40,25 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 	causes := make([]diagnostic, 0)
 	failFast := false
 	contextObserved := false
+	contextDone := ctx.Done()
 
 	cancelActive := func() {
 		for _, activeChild := range active {
+			activeChild.scope.cancelParent()
 			activeChild.cancel()
 		}
 	}
 
 	launchReady := func() {
-		for index := range state.nodes {
-			nodeState := &state.nodes[index]
-			if failFast || nodeState.started || nodeState.done || nodeState.remaining != 0 {
-				continue
+		for !failFast {
+			index, ready := state.popReady()
+			if !ready {
+				return
 			}
+			nodeState := &state.nodes[index]
 			if ctx.Err() != nil {
 				failFast = true
-				break
+				return
 			}
 			nodeState.started = true
 			childPath := path.AuthoredChild(nodeState.node.Name())
@@ -68,7 +72,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 				}
 			}
 			if buildErr != nil {
-				nodeState.done = true
+				state.markDone(index)
 				causes = append(causes, failed(childPath, ContractFailure, buildErr))
 				failFast = true
 				cancelActive()
@@ -76,10 +80,11 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 			}
 
 			childContext, cancel := context.WithCancel(ctx)
-			active[index] = activeNode{cancel: cancel}
+			childRun := r.childRun()
+			active[index] = activeNode{cancel: cancel, scope: childRun.scope}
 			node := nodeState.node
-			done := r.runNested(childContext, func(nestedContext context.Context) Result {
-				return r.runNode(nestedContext, childPath, node, childInput)
+			done := childRun.runNested(childContext, func(nestedContext context.Context) Result {
+				return childRun.runNode(nestedContext, childPath, node, childInput)
 			})
 			go func(index int, done <-chan Result) {
 				result, ok := <-done
@@ -100,14 +105,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 				}
 				return r.finishGraph(ctx, path, graph, input, instance, state, normalize(causes, r.externalError()))
 			}
-			allDone := true
-			for _, node := range state.nodes {
-				if !node.done {
-					allDone = false
-					break
-				}
-			}
-			if allDone {
+			if state.allDone() {
 				output, outputErr := objectValue(state.outputs)
 				if outputErr == nil {
 					outputErr = graph.Outputs().Validate(output)
@@ -133,7 +131,7 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 			delete(active, completion.index)
 			activeChild.cancel()
 			nodeState := &state.nodes[completion.index]
-			nodeState.done = true
+			state.markDone(completion.index)
 			if !completion.result.Valid() {
 				completion.result = resultFrom(failed(path.AuthoredChild(nodeState.node.Name()), MechanicalFailure, errors.New("nested execution returned malformed result")), nil)
 			}
@@ -156,12 +154,16 @@ func (r *runState) runGraph(ctx context.Context, path Path, graph workflow.Graph
 			if failFast {
 				continue
 			}
-			if applyErr := state.applyChildOutput(nodeState.node.Name(), output); applyErr != nil {
+			if applyErr := state.applyChildOutput(completion.index, output); applyErr != nil {
 				causes = append(causes, failed(path.AuthoredChild(nodeState.node.Name()), ContractFailure, applyErr))
 				failFast = true
 				cancelActive()
 			}
-		case <-ctx.Done():
+		case <-contextDone:
+			contextDone = nil
+			if r.control.graphCancellationObserved != nil {
+				r.control.graphCancellationObserved(path)
+			}
 			if !contextObserved {
 				contextObserved = true
 				causes = append(causes, parentCancelled(path))
@@ -186,7 +188,7 @@ func (r *runState) runNode(ctx context.Context, path Path, node workflow.Node, i
 			return result
 		}
 	}
-	return resultFrom(failed(path, MechanicalFailure, fmt.Errorf("unsupported node scope %q", node.ScopeKind())), nil)
+	return r.withExternalCancellation(resultFrom(failed(path, MechanicalFailure, fmt.Errorf("unsupported node scope %q", node.ScopeKind())), nil))
 }
 
 func resultDiagnostics(result Result) []diagnostic {
@@ -200,11 +202,31 @@ func resultDiagnostics(result Result) []diagnostic {
 }
 
 func (r *runState) settle(ctx context.Context, instance Instance, result Result) Result {
-	result = r.withExternalCancellation(result)
+	result, claim := r.claimTerminal(ctx, instance.Path(), result)
+	return r.settleClaimed(ctx, instance, result, claim)
+}
+
+func (r *runState) settleClaimed(ctx context.Context, instance Instance, result Result, claim terminalClaim) Result {
 	if err := r.scheduler.boundary.Settle(context.WithoutCancel(ctx), instance, result); err != nil {
 		causes := resultDiagnostics(result)
 		causes = append(causes, failed(instance.Path(), MechanicalFailure, err))
-		return normalize(causes, r.externalError())
+		return normalize(causes, claim.external)
+	}
+	return result
+}
+
+func (r *runState) commit(ctx context.Context, instance Instance, output value.Value) Result {
+	result, err := NewSucceededResult(output)
+	if err != nil {
+		return r.settle(ctx, instance, resultFrom(failed(instance.Path(), MechanicalFailure, err), nil))
+	}
+	result, claim := r.claimTerminal(ctx, instance.Path(), result)
+	if result.Status() != Succeeded {
+		return r.settleClaimed(ctx, instance, result, claim)
+	}
+	if err := r.scheduler.boundary.Commit(context.WithoutCancel(ctx), instance, output); err != nil {
+		failure := resultFrom(failed(instance.Path(), MechanicalFailure, err), nil)
+		return r.settleClaimed(ctx, instance, failure, claim)
 	}
 	return result
 }

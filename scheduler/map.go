@@ -18,6 +18,7 @@ type mapCompletion struct {
 type activeMapItem struct {
 	cancel context.CancelFunc
 	path   Path
+	scope  *scopeTerminal
 }
 
 func (r *runState) runMap(ctx context.Context, path Path, mapped workflow.Map, input value.Value) Result {
@@ -47,6 +48,7 @@ func (r *runState) runMap(ctx context.Context, path Path, mapped workflow.Map, i
 
 	cancelActive := func() {
 		for _, activeItem := range active {
+			activeItem.scope.cancelParent()
 			activeItem.cancel()
 		}
 	}
@@ -140,10 +142,11 @@ func (r *runState) runMap(ctx context.Context, path Path, mapped workflow.Map, i
 		}
 
 		bodyContext, cancel := context.WithCancel(ctx)
-		active[index] = activeMapItem{cancel: cancel, path: bodyPath}
+		bodyRun := r.childRun()
+		active[index] = activeMapItem{cancel: cancel, path: bodyPath, scope: bodyRun.scope}
 		bodyIndex, nestedPath, nestedInput := index, bodyPath, bodyInput
-		r.runNested(bodyContext, func(nestedContext context.Context) Result {
-			result := r.runGraph(nestedContext, nestedPath, mapped.Body(), nestedInput)
+		bodyRun.runNested(bodyContext, func(nestedContext context.Context) Result {
+			result := bodyRun.runGraph(nestedContext, nestedPath, mapped.Body(), nestedInput)
 			completed <- mapCompletion{index: bodyIndex, path: nestedPath, result: result}
 			return result
 		})
@@ -184,12 +187,5 @@ func (r *runState) runMap(ctx context.Context, path Path, mapped workflow.Map, i
 	if ctx.Err() != nil {
 		return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 	}
-	if commitErr := r.scheduler.boundary.Commit(ctx, instance, output); commitErr != nil {
-		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, commitErr), nil))
-	}
-	result, constructErr := NewSucceededResult(output)
-	if constructErr != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, constructErr), nil))
-	}
-	return result
+	return r.commit(ctx, instance, output)
 }

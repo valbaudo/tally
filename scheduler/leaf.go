@@ -12,14 +12,14 @@ import (
 
 func (r *runState) runLeaf(ctx context.Context, path Path, leaf workflow.Leaf, input value.Value) Result {
 	if err := leaf.Inputs().Validate(input); err != nil {
-		return resultFrom(failed(path, ContractFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(failed(path, ContractFailure, err), nil))
 	}
 	instance, err := NewInstance(path)
 	if err != nil {
-		return resultFrom(failed(path, MechanicalFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(failed(path, MechanicalFailure, err), nil))
 	}
 	if err := r.scheduler.boundary.Enter(ctx, instance); err != nil {
-		return resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 	}
 
 	select {
@@ -85,10 +85,10 @@ func (r *runState) forceLeaf(ctx context.Context, instance Instance, leaf workfl
 		result := r.leafCompletion(ctx, instance, leaf, completion, channelOpen)
 		consequence := failed(instance.Path(), MechanicalFailure, fmt.Errorf("force stop leaf: %w", err))
 		consequence.parentCancelled = true
-		result = appendSecondaryConsequence(result, consequence)
 		if result.Status() == Succeeded {
-			return result
+			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(instance.Path()), consequence}, nil))
 		}
+		result = appendSecondaryConsequence(result, consequence)
 		return r.settle(ctx, instance, result)
 	}
 	return r.settle(ctx, instance, resultFrom(parentCancelled(instance.Path()), nil))
@@ -106,7 +106,8 @@ func availableCompletion(done <-chan LeafCompletion) (LeafCompletion, bool, bool
 func (r *runState) completeLeaf(ctx context.Context, instance Instance, leaf workflow.Leaf, completion LeafCompletion, channelOpen bool) Result {
 	result := r.leafCompletion(ctx, instance, leaf, completion, channelOpen)
 	if result.Status() == Succeeded {
-		return result
+		output, _ := result.Output()
+		return r.commit(ctx, instance, output)
 	}
 	return r.settle(ctx, instance, result)
 }
@@ -124,9 +125,6 @@ func (r *runState) leafCompletion(ctx context.Context, instance Instance, leaf w
 		}
 		if err := leaf.Outputs().Validate(output); err != nil {
 			return resultFrom(failed(path, ContractFailure, err), nil)
-		}
-		if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-			return resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil)
 		}
 		result, err := NewSucceededResult(output)
 		if err != nil {
@@ -147,14 +145,14 @@ func (r *runState) leafCompletion(ctx context.Context, instance Instance, leaf w
 
 func (r *runState) runGate(ctx context.Context, path Path, leaf workflow.Leaf, input value.Value) Result {
 	if err := leaf.Inputs().Validate(input); err != nil {
-		return resultFrom(failed(path, ContractFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(failed(path, ContractFailure, err), nil))
 	}
 	instance, err := NewInstance(path)
 	if err != nil {
-		return resultFrom(failed(path, MechanicalFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(failed(path, MechanicalFailure, err), nil))
 	}
 	if err := r.scheduler.boundary.Enter(ctx, instance); err != nil {
-		return resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil)
+		return r.withExternalCancellation(resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
 	}
 	if ctx.Err() != nil {
 		return r.settle(ctx, instance, resultFrom(parentCancelled(path), nil))
@@ -178,14 +176,7 @@ func (r *runState) runGate(ctx context.Context, path Path, leaf workflow.Leaf, i
 	if err != nil {
 		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
 	}
-	if err := r.scheduler.boundary.Commit(ctx, instance, output); err != nil {
-		return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, err), nil))
-	}
-	result, err := NewSucceededResult(output)
-	if err != nil {
-		return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, err), nil))
-	}
-	return result
+	return r.commit(ctx, instance, output)
 }
 
 func appendSecondaryConsequence(result Result, consequence diagnostic) Result {

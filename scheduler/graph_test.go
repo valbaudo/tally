@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,6 +98,68 @@ func TestDAGBindingSuppliesExactNestedValueAndSourceOrderDoesNotChangeOutput(t *
 		if !output.Equal(consumerResult) {
 			t.Fatalf("output = %s, want %s", output.Canonical(), consumerResult.Canonical())
 		}
+	}
+}
+
+func TestGraphExecutionIndexKeepsLexicalReadinessAndDirectDataflow(t *testing.T) {
+	producerOutput := testContract(t, testRequired(t, "payload", value.String()))
+	consumerInput := testContract(t, testRequired(t, "selected", value.String()))
+	consumerOutput := testContract(t, testRequired(t, "result", value.String()))
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: value.EmptyContract(), Outputs: consumerOutput,
+		Nodes: []workflow.NodeDraft{
+			testLeaf("z-independent", value.EmptyContract(), value.EmptyContract()),
+			testLeaf("m-direct", consumerInput, consumerOutput),
+			testLeaf("n-unrelated", value.EmptyContract(), value.EmptyContract()),
+			testLeaf("a-source", value.EmptyContract(), producerOutput),
+		},
+		Edges: []workflow.EdgeDraft{
+			{
+				From: workflow.EndpointDraft{Kind: workflow.Child, Child: "a-source"}, To: workflow.EndpointDraft{Kind: workflow.Child, Child: "m-direct"},
+				Bindings: []workflow.BindingDraft{{From: []string{"payload"}, To: "selected"}},
+			},
+			{
+				From: workflow.EndpointDraft{Kind: workflow.Child, Child: "m-direct"}, To: workflow.EndpointDraft{Kind: workflow.Boundary},
+				Bindings: []workflow.BindingDraft{{From: []string{"result"}, To: "result"}},
+			},
+		},
+	})
+	state, err := applyGraphInputs(definition.Root(), emptyValue(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ready := state.popReady()
+	if !ready || state.nodes[source].node.Name() != "a-source" {
+		t.Fatalf("first ready node = %q/%v, want lexical source", state.nodes[source].node.Name(), ready)
+	}
+	state.nodes[source].started = true
+	exact := value.NewString("direct value")
+	if err := state.applyChildOutput(source, testValue(t, map[string]value.Value{"payload": exact})); err != nil {
+		t.Fatal(err)
+	}
+
+	wantReady := []string{"m-direct", "n-unrelated", "z-independent"}
+	for _, want := range wantReady {
+		index, ok := state.popReady()
+		if !ok || state.nodes[index].node.Name() != want {
+			t.Fatalf("next ready node = %q/%v, want %q", state.nodes[index].node.Name(), ok, want)
+		}
+		if want != "m-direct" {
+			continue
+		}
+		input, inputErr := state.childInput(index)
+		wantInput := testValue(t, map[string]value.Value{"selected": exact})
+		if inputErr != nil || !input.Equal(wantInput) {
+			t.Fatalf("direct consumer input = %x/%v, want %x", input.Canonical(), inputErr, wantInput.Canonical())
+		}
+		if err := state.applyChildOutput(index, testValue(t, map[string]value.Value{"result": exact})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output, err := objectValue(state.outputs)
+	wantOutput := testValue(t, map[string]value.Value{"result": exact})
+	if err != nil || !output.Equal(wantOutput) {
+		t.Fatalf("indexed boundary output = %x/%v, want %x", output.Canonical(), err, wantOutput.Canonical())
 	}
 }
 
@@ -383,7 +446,7 @@ func TestExternalCancelWinsIntrinsicFailure(t *testing.T) {
 	}
 }
 
-func TestExternalCancelWinsDirectRootTerminalPaths(t *testing.T) {
+func TestExternalCancellationRespectsDirectRootTerminalClaimOrder(t *testing.T) {
 	for _, mode := range []rootCancellationMode{rootEnterCancellation, rootCommitCancellation} {
 		t.Run(string(mode), func(t *testing.T) {
 			trace := &eventTrace{}
@@ -403,26 +466,20 @@ func TestExternalCancelWinsDirectRootTerminalPaths(t *testing.T) {
 			waitClosed(t, boundary.blocked, "root terminal path did not block")
 			execution.Cancel()
 			result := waitResult(t, execution)
-			if !result.Valid() || result.Status() != Cancelled {
-				t.Fatalf("status = %v (valid %v), want %v", result.Status(), result.Valid(), Cancelled)
+			if mode == rootCommitCancellation {
+				requireStatus(t, result, Succeeded)
+				if _, committed := boundary.base.commits()["root"]; !committed {
+					t.Fatal("root success claimed before cancellation did not commit")
+				}
+				if settlements := boundary.base.settlements("root"); len(settlements) != 0 {
+					t.Fatalf("late cancellation produced root settlement %#v", settlements)
+				}
+				return
 			}
+			requireStatus(t, result, Cancelled)
 			primary, _ := result.Primary()
 			if !errors.Is(primary.Error(), context.Canceled) {
 				t.Fatalf("primary = %#v", primary)
-			}
-			if mode == rootCommitCancellation {
-				settled := false
-				for _, event := range trace.snapshot() {
-					if event.kind == traceSettle && event.child == "root" {
-						settled = true
-						if event.status != Cancelled {
-							t.Fatalf("root settled as %v instead of its externally normalized outcome", event.status)
-						}
-					}
-				}
-				if !settled {
-					t.Fatal("root did not publish its normalized settlement")
-				}
 			}
 		})
 	}
@@ -494,6 +551,165 @@ func TestExternalCancelAfterSettlementStartsDoesNotMutateTerminalResult(t *testi
 	}
 }
 
+func TestExternalCancellationClaimBeforeRootCommitPreventsPublication(t *testing.T) {
+	empty := value.EmptyContract()
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{testLeaf("work", empty, empty)},
+	})
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 1})
+	claimReached := make(chan struct{})
+	var once sync.Once
+	execution.control.beforeTerminalClaim = func(ctx context.Context, path Path) {
+		if len(path.Components()) != 0 {
+			return
+		}
+		once.Do(func() { close(claimReached) })
+		<-ctx.Done()
+	}
+
+	runner.execution(t, "work").complete(mustLeafSuccess(t, emptyValue(t)))
+	waitClosed(t, claimReached, "root did not reach its successful terminal claim")
+	execution.Cancel()
+	result := waitResult(t, execution)
+
+	requireStatus(t, result, Cancelled)
+	if _, committed := boundary.commits()["root"]; committed {
+		t.Fatal("root published success after external cancellation claimed the terminal transition")
+	}
+	settled := boundary.settlements("root")
+	if len(settled) != 1 || !reflect.DeepEqual(settled[0], result) {
+		t.Fatalf("root settlement and Wait differ: settled = %#v, returned = %#v", settled, result)
+	}
+	if countExternalCancellations(result) != 1 {
+		t.Fatalf("external cancellation diagnostics = %d, want exactly one: %#v", countExternalCancellations(result), result)
+	}
+	if diagnostics := resultDiagnostics(result); len(diagnostics) != 1 {
+		t.Fatalf("cancel-first root claim produced duplicate diagnostics: %#v", diagnostics)
+	}
+}
+
+func TestAncestorFailFastClaimBeforeProtectedCommitPreventsPublication(t *testing.T) {
+	empty := value.EmptyContract()
+	protected := workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{testLeaf("protected-work", empty, empty)},
+	}
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{
+			{Name: "protected", Graph: &protected},
+			testLeaf("trigger", empty, empty),
+		},
+	})
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 2})
+	claimReached := make(chan struct{})
+	protectedPath := Path{}.AuthoredChild("protected")
+	var once sync.Once
+	execution.control.beforeTerminalClaim = func(ctx context.Context, path Path) {
+		if comparePath(path, protectedPath) != 0 {
+			return
+		}
+		once.Do(func() { close(claimReached) })
+		<-ctx.Done()
+	}
+
+	runner.waitStarts(t, 2)
+	runner.execution(t, "protected-work").complete(mustLeafSuccess(t, emptyValue(t)))
+	waitClosed(t, claimReached, "protected graph did not reach its successful terminal claim")
+	triggerErr := errors.New("ancestor fail-fast trigger")
+	runner.execution(t, "trigger").complete(mustLeafFailure(t, MechanicalFailure, triggerErr))
+	result := waitResult(t, execution)
+
+	requireStatus(t, result, Failed)
+	primary, _ := result.Primary()
+	if !errors.Is(primary.Error(), triggerErr) {
+		t.Fatalf("root primary = %#v, want trigger failure", primary)
+	}
+	if _, committed := boundary.commits()["protected"]; committed {
+		t.Fatal("protected graph published success after ancestor fail-fast claimed cancellation")
+	}
+	protectedSettlements := boundary.settlements("protected")
+	if len(protectedSettlements) != 1 {
+		t.Fatalf("protected settlements = %d, want exactly one", len(protectedSettlements))
+	}
+	requireStatus(t, protectedSettlements[0], Cancelled)
+	protectedPrimary, _ := protectedSettlements[0].Primary()
+	if !protectedPrimary.parentCancelled || protectedPrimary.external {
+		t.Fatalf("protected settlement = %#v, want one parent-induced cancellation", protectedSettlements[0])
+	}
+	if diagnostics := resultDiagnostics(protectedSettlements[0]); len(diagnostics) != 1 {
+		t.Fatalf("protected cancellation produced duplicate diagnostics: %#v", diagnostics)
+	}
+	rootSettlements := boundary.settlements("root")
+	if len(rootSettlements) != 1 || !reflect.DeepEqual(rootSettlements[0], result) {
+		t.Fatalf("root settlement and Wait differ: settled = %#v, returned = %#v", rootSettlements, result)
+	}
+}
+
+func TestSuccessfulTerminalClaimWinsLaterExternalCancellation(t *testing.T) {
+	empty := value.EmptyContract()
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{testLeaf("work", empty, empty)},
+	})
+	trace := &eventTrace{}
+	base := newRecordingBoundary(trace)
+	boundary := &blockingSuccessfulRootCommitBoundary{
+		base: base, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := newControlledRunner(trace)
+	execution := startPathExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 1})
+	runner.execution(t, "work").complete(mustLeafSuccess(t, emptyValue(t)))
+	waitClosed(t, boundary.entered, "root successful commit did not begin")
+	execution.Cancel()
+	close(boundary.release)
+	result := waitResult(t, execution)
+
+	requireStatus(t, result, Succeeded)
+	if _, committed := base.commits()["root"]; !committed {
+		t.Fatal("root terminal claim did not publish its successful output")
+	}
+	if settlements := base.settlements("root"); len(settlements) != 0 {
+		t.Fatalf("late cancellation produced root settlements: %#v", settlements)
+	}
+	if repeated := execution.Wait(); !reflect.DeepEqual(repeated, result) {
+		t.Fatalf("repeated Wait = %#v, first = %#v", repeated, result)
+	}
+}
+
+type blockingSuccessfulRootCommitBoundary struct {
+	base    *recordingBoundary
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingSuccessfulRootCommitBoundary) Enter(ctx context.Context, instance Instance) error {
+	return b.base.Enter(ctx, instance)
+}
+
+func (b *blockingSuccessfulRootCommitBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
+	if err := b.base.Commit(ctx, instance, output); err != nil {
+		return err
+	}
+	if instanceName(instance) == "root" {
+		b.once.Do(func() { close(b.entered) })
+		<-b.release
+	}
+	return nil
+}
+
+func (b *blockingSuccessfulRootCommitBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
+	return b.base.Settle(ctx, instance, result)
+}
+
 type blockingSettlementBoundary struct {
 	base    *recordingBoundary
 	entered chan struct{}
@@ -550,19 +766,23 @@ const (
 )
 
 type rootCancellationBoundary struct {
-	mode    rootCancellationMode
-	blocked chan struct{}
-	base    *recordingBoundary
-	once    sync.Once
+	mode        rootCancellationMode
+	blocked     chan struct{}
+	base        *recordingBoundary
+	once        sync.Once
+	rootContext context.Context
 }
 
 func (b *rootCancellationBoundary) Enter(ctx context.Context, instance Instance) error {
+	if instanceName(instance) == "root" {
+		b.rootContext = ctx
+	}
 	if b.mode != rootEnterCancellation || instanceName(instance) != "root" {
 		return b.base.Enter(ctx, instance)
 	}
 	b.signalBlocked()
-	<-ctx.Done()
-	return errors.New("commit failed independently after cancellation")
+	<-b.rootContext.Done()
+	return errors.New("enter failed independently after cancellation")
 }
 
 func (b *rootCancellationBoundary) Commit(ctx context.Context, instance Instance, output value.Value) error {
@@ -570,8 +790,8 @@ func (b *rootCancellationBoundary) Commit(ctx context.Context, instance Instance
 		return b.base.Commit(ctx, instance, output)
 	}
 	b.signalBlocked()
-	<-ctx.Done()
-	return errors.New("commit failed independently after cancellation")
+	<-b.rootContext.Done()
+	return b.base.Commit(ctx, instance, output)
 }
 
 func (b *rootCancellationBoundary) Settle(ctx context.Context, instance Instance, result Result) error {
@@ -619,6 +839,38 @@ func TestExternalForceStopImmediatelyStopsActiveLeaves(t *testing.T) {
 		if elapsed := leaf.forceTime().Sub(started); elapsed > 250*time.Millisecond {
 			t.Fatalf("%s force stop waited %v", name, elapsed)
 		}
+	}
+}
+
+func TestGraphObservesClosedCancellationSignalOnlyOnceWhileChildDrains(t *testing.T) {
+	empty := value.EmptyContract()
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{testLeaf("noncooperative", empty, empty)},
+	})
+	trace := &eventTrace{}
+	runner := newMapTestRunner()
+	boundary := newPathRecordingBoundary(trace)
+	execution := startMapTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 1, CancellationGrace: 100 * time.Millisecond})
+	started := runner.waitStarts(t, 1)[0]
+	var observations atomic.Int32
+	execution.control.graphCancellationObserved = func(path Path) {
+		if len(path.Components()) == 0 {
+			observations.Add(1)
+		}
+	}
+
+	execution.Cancel()
+	result := waitResult(t, execution)
+	requireStatus(t, result, Cancelled)
+	if got := observations.Load(); got != 1 {
+		t.Fatalf("root graph observed its permanently closed cancellation signal %d times, want exactly once", got)
+	}
+	if started.terminalizations() != 1 || started.forceCalls() != 1 {
+		t.Fatalf("noncooperative child terminal/force counts = %d/%d, want 1/1", started.terminalizations(), started.forceCalls())
+	}
+	if runner.activeCount() != 0 {
+		t.Fatalf("active child executions = %d, want quiescence", runner.activeCount())
 	}
 }
 

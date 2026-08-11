@@ -406,12 +406,17 @@ func (e *loopTestExecution) complete(completion LeafCompletion) {
 }
 
 type cancelAfterLoopBodyCommitBoundary struct {
-	base   *pathRecordingBoundary
-	cancel context.CancelFunc
-	once   sync.Once
+	base        *pathRecordingBoundary
+	cancel      context.CancelFunc
+	once        sync.Once
+	bodyContext context.Context
 }
 
 func (b *cancelAfterLoopBodyCommitBoundary) Enter(ctx context.Context, instance Instance) error {
+	components := instance.Path().Components()
+	if len(components) > 0 && components[len(components)-1].Kind() == LoopIterationComponent {
+		b.bodyContext = ctx
+	}
 	return b.base.Enter(ctx, instance)
 }
 
@@ -422,7 +427,7 @@ func (b *cancelAfterLoopBodyCommitBoundary) Commit(ctx context.Context, instance
 	components := instance.Path().Components()
 	if len(components) > 0 && components[len(components)-1].Kind() == LoopIterationComponent {
 		b.once.Do(b.cancel)
-		<-ctx.Done()
+		<-b.bodyContext.Done()
 	}
 	return nil
 }

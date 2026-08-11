@@ -55,7 +55,7 @@ func (s *Scheduler) Start(ctx context.Context, definition workflow.Definition, i
 	runContext, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	control := newRunController(cancel)
 	execution := &Execution{control: control, done: make(chan struct{})}
-	run := &runState{scheduler: s, control: control, cancellation: control.rootCancellationView()}
+	run := &runState{scheduler: s, control: control, cancellation: control.rootCancellationView(), scope: control.root}
 
 	if err := ctx.Err(); err != nil {
 		control.cancel(err)
@@ -91,6 +91,14 @@ type runState struct {
 	scheduler    *Scheduler
 	control      *runController
 	cancellation cancellationView
+	scope        *scopeTerminal
+}
+
+func (r *runState) childRun() *runState {
+	return &runState{
+		scheduler: r.scheduler, control: r.control, cancellation: r.cancellation,
+		scope: r.control.childScope(r.scope),
+	}
 }
 
 func (r *runState) runScope(ctx context.Context, path Path, scope workflow.Scope, input value.Value) (Result, bool) {
@@ -141,11 +149,29 @@ func cancellationAwareDiagnostic(ctx context.Context, path Path, kind FailureKin
 }
 
 func (r *runState) withExternalCancellation(result Result) Result {
+	path := Path{}
+	if primary, present := result.Primary(); present {
+		path = primary.Path()
+	}
+	if r.scope != nil {
+		result, _ = r.scope.claim(path, result)
+		return result
+	}
 	external := r.externalError()
 	if external == nil || result.Status() == Succeeded {
 		return result
 	}
 	return normalize(resultDiagnostics(result), external)
+}
+
+func (r *runState) claimTerminal(ctx context.Context, path Path, result Result) (Result, terminalClaim) {
+	if r.control != nil && r.control.beforeTerminalClaim != nil {
+		r.control.beforeTerminalClaim(ctx, path)
+	}
+	if r.scope == nil {
+		return r.withExternalCancellation(result), terminalClaim{external: r.externalError()}
+	}
+	return r.scope.claim(path, result)
 }
 
 func (r *runState) externalError() error {

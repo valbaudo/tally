@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"container/heap"
 	"fmt"
 
 	"github.com/valbaudo/dawn/value"
@@ -48,29 +49,67 @@ type graphNodeState struct {
 	node      workflow.Node
 	inputs    map[string]value.Value
 	remaining int
+	queued    bool
 	started   bool
 	done      bool
 }
 
+type graphExecutionBinding struct {
+	from []string
+	to   string
+}
+
+type graphExecutionEdge struct {
+	target   int
+	bindings []graphExecutionBinding
+}
+
+type graphReadyNode struct {
+	index int
+	name  string
+}
+
+type graphReadyHeap []graphReadyNode
+
+func (h graphReadyHeap) Len() int { return len(h) }
+
+func (h graphReadyHeap) Less(left, right int) bool { return h[left].name < h[right].name }
+
+func (h graphReadyHeap) Swap(left, right int) { h[left], h[right] = h[right], h[left] }
+
+func (h *graphReadyHeap) Push(item any) { *h = append(*h, item.(graphReadyNode)) }
+
+func (h *graphReadyHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	item := old[last]
+	old[last] = graphReadyNode{}
+	*h = old[:last]
+	return item
+}
+
 type graphState struct {
-	graph     workflow.Graph
-	input     value.Value
-	nodes     []graphNodeState
-	byName    map[string]int
-	outputs   map[string]value.Value
-	committed map[string]value.Value
+	nodes      []graphNodeState
+	byName     map[string]int
+	outputs    map[string]value.Value
+	committed  map[string]value.Value
+	outgoing   [][]graphExecutionEdge
+	ready      graphReadyHeap
+	unfinished int
 }
 
 // applyGraphInputs resolves boundary bindings and typed literals. Child-source
 // bindings remain pending until that child's boundary has committed.
 func applyGraphInputs(graph workflow.Graph, input value.Value) (*graphState, error) {
 	state := &graphState{
-		graph: graph, input: input, byName: make(map[string]int), outputs: make(map[string]value.Value), committed: make(map[string]value.Value),
+		byName: make(map[string]int), outputs: make(map[string]value.Value), committed: make(map[string]value.Value),
 	}
 	for index, node := range graph.Nodes() {
 		state.byName[node.Name()] = index
 		state.nodes = append(state.nodes, graphNodeState{node: node, inputs: make(map[string]value.Value)})
 	}
+	state.outgoing = make([][]graphExecutionEdge, len(state.nodes))
+	state.unfinished = len(state.nodes)
 	for index := range state.nodes {
 		node := state.nodes[index].node
 		inputs, ok := nodeInputContract(node)
@@ -92,30 +131,44 @@ func applyGraphInputs(graph workflow.Graph, input value.Value) (*graphState, err
 
 	for _, edge := range graph.Edges() {
 		from, to := edge.From(), edge.To()
-		if from.Kind() == workflow.Child && to.Kind() == workflow.Child {
+		target := -1
+		if to.Kind() == workflow.Child {
 			index, ok := state.byName[to.Child()]
 			if !ok {
 				return nil, fmt.Errorf("unknown edge target %q", to.Child())
 			}
-			state.nodes[index].remaining++
+			target = index
 		}
-		if from.Kind() != workflow.Boundary {
+		bindings := make([]graphExecutionBinding, 0, len(edge.Bindings()))
+		for _, binding := range edge.Bindings() {
+			bindings = append(bindings, graphExecutionBinding{from: binding.From(), to: binding.To()})
+		}
+		if from.Kind() == workflow.Child {
+			source, ok := state.byName[from.Child()]
+			if !ok {
+				return nil, fmt.Errorf("unknown edge source %q", from.Child())
+			}
+			state.outgoing[source] = append(state.outgoing[source], graphExecutionEdge{target: target, bindings: bindings})
+			if target >= 0 {
+				state.nodes[target].remaining++
+			}
 			continue
 		}
-		for _, binding := range edge.Bindings() {
-			selected, present := selectValue(input, binding.From())
+		for _, binding := range bindings {
+			selected, present := selectValue(input, binding.from)
 			if !present {
 				continue
 			}
-			if to.Kind() == workflow.Boundary {
-				state.outputs[binding.To()] = selected
+			if target < 0 {
+				state.outputs[binding.to] = selected
 				continue
 			}
-			index, ok := state.byName[to.Child()]
-			if !ok {
-				return nil, fmt.Errorf("unknown edge target %q", to.Child())
-			}
-			state.nodes[index].inputs[binding.To()] = selected
+			state.nodes[target].inputs[binding.to] = selected
+		}
+	}
+	for index := range state.nodes {
+		if state.nodes[index].remaining == 0 {
+			state.enqueueReady(index)
 		}
 	}
 	return state, nil
@@ -125,34 +178,56 @@ func (s *graphState) childInput(index int) (value.Value, error) {
 	return objectValue(s.nodes[index].inputs)
 }
 
-func (s *graphState) applyChildOutput(name string, output value.Value) error {
-	for _, edge := range s.graph.Edges() {
-		if edge.From().Kind() != workflow.Child || edge.From().Child() != name {
-			continue
-		}
-		to := edge.To()
-		for _, binding := range edge.Bindings() {
-			selected, present := selectValue(output, binding.From())
+func (s *graphState) applyChildOutput(index int, output value.Value) error {
+	for _, edge := range s.outgoing[index] {
+		for _, binding := range edge.bindings {
+			selected, present := selectValue(output, binding.from)
 			if !present {
 				continue
 			}
-			if to.Kind() == workflow.Boundary {
-				s.outputs[binding.To()] = selected
+			if edge.target < 0 {
+				s.outputs[binding.to] = selected
 			} else {
-				index, ok := s.byName[to.Child()]
-				if !ok {
-					return fmt.Errorf("unknown edge target %q", to.Child())
-				}
-				s.nodes[index].inputs[binding.To()] = selected
+				s.nodes[edge.target].inputs[binding.to] = selected
 			}
 		}
-		if to.Kind() == workflow.Child {
-			index := s.byName[to.Child()]
-			s.nodes[index].remaining--
+		if edge.target >= 0 {
+			s.nodes[edge.target].remaining--
+			if s.nodes[edge.target].remaining == 0 {
+				s.enqueueReady(edge.target)
+			}
 		}
 	}
 	return nil
 }
+
+func (s *graphState) enqueueReady(index int) {
+	node := &s.nodes[index]
+	if node.queued || node.started || node.done || node.remaining != 0 {
+		return
+	}
+	node.queued = true
+	heap.Push(&s.ready, graphReadyNode{index: index, name: node.node.Name()})
+}
+
+func (s *graphState) popReady() (int, bool) {
+	if len(s.ready) == 0 {
+		return 0, false
+	}
+	ready := heap.Pop(&s.ready).(graphReadyNode)
+	s.nodes[ready.index].queued = false
+	return ready.index, true
+}
+
+func (s *graphState) markDone(index int) {
+	if s.nodes[index].done {
+		return
+	}
+	s.nodes[index].done = true
+	s.unfinished--
+}
+
+func (s *graphState) allDone() bool { return s.unfinished == 0 }
 
 func (s *graphState) recordCommittedChild(name string, output value.Value) {
 	if s == nil || !output.Valid() {

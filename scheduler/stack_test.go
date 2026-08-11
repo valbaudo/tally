@@ -32,13 +32,15 @@ func TestStructuredControlFiniteExecutionSubprocess(t *testing.T) {
 			runFiniteDependencyCase(t)
 		case "compile-worklist":
 			runFiniteCompileWorklistCase(t)
+		case "graph-chain":
+			runFiniteGraphChainCase(t)
 		default:
 			t.Fatalf("unknown finite execution case %q", childCase)
 		}
 		return
 	}
 
-	for _, childCase := range []string{"depth", "map", "dependency", "compile-worklist"} {
+	for _, childCase := range []string{"depth", "map", "dependency", "compile-worklist", "graph-chain"} {
 		t.Run(childCase, func(t *testing.T) {
 			command := exec.Command(os.Args[0], "-test.run=^TestStructuredControlFiniteExecutionSubprocess$", "-test.count=1")
 			command.Env = append(os.Environ(), finiteExecutionCase+"="+childCase)
@@ -50,6 +52,25 @@ func TestStructuredControlFiniteExecutionSubprocess(t *testing.T) {
 }
 
 func runFiniteDependencyCase(t *testing.T) {
+	t.Helper()
+	definition := compileFiniteDependencyDefinition(t)
+	if len(definition.Canonical()) == 0 {
+		t.Fatal("finite dependency definition omitted its canonical form")
+	}
+}
+
+func runFiniteGraphChainCase(t *testing.T) {
+	t.Helper()
+	definition := compileFiniteDependencyDefinition(t)
+	result := runFiniteDefinition(t, definition, emptyValue(t))
+	requireStatus(t, result, Succeeded)
+	output, ok := result.Output()
+	if !ok || !output.Equal(emptyValue(t)) {
+		t.Fatalf("finite graph-chain output = %x/%v, want exact empty object", output.Canonical(), ok)
+	}
+}
+
+func compileFiniteDependencyDefinition(t *testing.T) workflow.Definition {
 	t.Helper()
 	empty := value.EmptyContract()
 	gateInputs := testContract(t,
@@ -78,9 +99,7 @@ func runFiniteDependencyCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile finite dependency chain: %v", err)
 	}
-	if len(definition.Canonical()) == 0 {
-		t.Fatal("finite dependency definition omitted its canonical form")
-	}
+	return definition
 }
 
 func runFiniteCompileWorklistCase(t *testing.T) {

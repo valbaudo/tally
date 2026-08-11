@@ -52,8 +52,9 @@ func (r *runState) runLoop(ctx context.Context, path Path, loop workflow.Loop, i
 			return r.settle(ctx, instance, resultFrom(failed(iterationPath, ContractFailure, inputErr), nil))
 		}
 
-		done := r.runNested(ctx, func(nestedContext context.Context) Result {
-			return r.runGraph(nestedContext, iterationPath, loop.Body(), bodyInput)
+		iterationRun := r.childRun()
+		done := iterationRun.runNested(ctx, func(nestedContext context.Context) Result {
+			return iterationRun.runGraph(nestedContext, iterationPath, loop.Body(), bodyInput)
 		})
 		result, ok := <-done
 		if !ok || !result.Valid() {
@@ -89,14 +90,7 @@ func (r *runState) runLoop(ctx context.Context, path Path, loop workflow.Loop, i
 		if ctx.Err() != nil {
 			return r.settle(ctx, instance, normalize([]diagnostic{parentCancelled(path)}, r.externalError()))
 		}
-		if commitErr := r.scheduler.boundary.Commit(ctx, instance, output); commitErr != nil {
-			return r.settle(ctx, instance, resultFrom(cancellationAwareDiagnostic(ctx, path, MechanicalFailure, commitErr), nil))
-		}
-		committed, constructErr := NewSucceededResult(output)
-		if constructErr != nil {
-			return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, constructErr), nil))
-		}
-		return committed
+		return r.commit(ctx, instance, output)
 	}
 
 	return r.settle(ctx, instance, resultFrom(failed(path, MechanicalFailure, errors.New("compiled loop executed no iterations")), nil))

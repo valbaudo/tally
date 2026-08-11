@@ -78,6 +78,46 @@ func TestFinallyRunsAfterEveryQuiescentBodyOutcome(t *testing.T) {
 	}
 }
 
+func TestFinallyCancellationClaimedBeforeCleanupEntryUsesCancelledOutcome(t *testing.T) {
+	definition := finallySimpleDefinition(t, testLeaf("body", value.EmptyContract(), value.EmptyContract()))
+	trace := &eventTrace{}
+	runner := newControlledRunner(trace)
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 1})
+	claimReached := make(chan struct{})
+	var once sync.Once
+	execution.control.beforeBodyOutcomeClaim = func(ctx context.Context, path Path) {
+		if len(path.Components()) != 0 {
+			return
+		}
+		once.Do(func() { close(claimReached) })
+		<-ctx.Done()
+	}
+
+	runner.execution(t, "body").complete(mustLeafSuccess(t, emptyValue(t)))
+	waitClosed(t, claimReached, "protected body did not reach its cleanup-outcome claim")
+	execution.Cancel()
+	cleanup := runner.execution(t, "cleanup")
+	assertFinallyOutcomeInput(t, runnerInput(t, runner, "cleanup"), "cancelled")
+	cleanup.complete(mustLeafSuccess(t, emptyValue(t)))
+
+	result := waitResult(t, execution)
+	requireStatus(t, result, Cancelled)
+	if trace.index(traceCommit, "root") >= 0 {
+		t.Fatal("protected graph committed after cancellation won cleanup-outcome capture")
+	}
+	settled := boundary.settlements("root")
+	if len(settled) != 1 || !reflect.DeepEqual(settled[0], result) {
+		t.Fatalf("protected settlement and Wait differ: settled = %#v, returned = %#v", settled, result)
+	}
+	if countExternalCancellations(result) != 1 {
+		t.Fatalf("external cancellation diagnostics = %d, want exactly one: %#v", countExternalCancellations(result), result)
+	}
+	if diagnostics := resultDiagnostics(result); len(diagnostics) != 1 {
+		t.Fatalf("cancel-first cleanup outcome produced duplicate diagnostics: %#v", diagnostics)
+	}
+}
+
 // Removing the distinction between pre-entry validation and post-entry body
 // failure either skips required cleanup or runs cleanup without a valid scope.
 func TestFinallyGuaranteeBeginsOnlyAfterProtectedEntry(t *testing.T) {
@@ -121,7 +161,8 @@ func TestFinallyGuaranteeBeginsOnlyAfterProtectedEntry(t *testing.T) {
 }
 
 // Replacing the declared binding walk with captured state, transitive lookup,
-// or zero-value filling changes this exact closed cleanup request.
+// zero-value filling, or a success that lost its terminal claim changes this
+// exact closed cleanup request.
 func TestFinallyCleanupInputContainsOnlyDeclaredCommittedValues(t *testing.T) {
 	requestType := testObject(t, testRequired(t, "payload", value.String()))
 	protectedInputs := testContract(t, testRequired(t, "request", requestType))
@@ -163,25 +204,27 @@ func TestFinallyCleanupInputContainsOnlyDeclaredCommittedValues(t *testing.T) {
 	})
 	trace := &eventTrace{}
 	runner := newControlledRunner(trace)
-	execution := startTestExecution(t, definition, input, runner, newRecordingBoundary(trace), Policy{Capacity: 2, CancellationGrace: time.Second})
+	boundary := newRecordingBoundary(trace)
+	execution := startTestExecution(t, definition, input, runner, boundary, Policy{Capacity: 2, CancellationGrace: time.Second})
 	runner.waitStarts(t, 2)
 	committed := runner.execution(t, "committed")
 	runner.execution(t, "failed").complete(mustLeafFailure(t, MechanicalFailure, errBoom))
 	waitClosed(t, committed.cancelObserved, "still-active committed child did not observe fail-fast")
 	committed.complete(mustLeafSuccess(t, committedOutput))
-	waitForTrace(t, trace, traceCommit, "committed")
 
 	cleanup := runner.execution(t, "cleanup")
 	want := testValue(t, map[string]value.Value{
 		"original": exact,
 		"outcome":  value.NewString("failed"),
-		"handle":   value.NewString("committed handle"),
 	})
 	if got := runnerInput(t, runner, "cleanup"); !got.Equal(want) {
 		t.Fatalf("cleanup input = %x, want exact closed input %x", got.Canonical(), want.Canonical())
 	}
 	if trace.index(traceStart, "never") >= 0 {
 		t.Fatal("unstarted child ran or contributed cleanup data")
+	}
+	if _, published := boundary.commits()["committed"]; published {
+		t.Fatal("cancel-first child published and contributed an unclaimed success")
 	}
 	cleanup.complete(mustLeafSuccess(t, emptyValue(t)))
 	requireStatus(t, waitResult(t, execution), Failed)
@@ -243,6 +286,116 @@ func TestFinallyCleanupFailureUsesUnwindingPrecedenceAndExactSettlement(t *testi
 			}
 			if _, output := result.Output(); output || trace.index(traceCommit, "root") >= 0 {
 				t.Fatal("cleanup failure allowed protected publication")
+			}
+			settled := boundary.settlements("root")
+			if len(settled) != 1 || !reflect.DeepEqual(settled[0], result) {
+				t.Fatalf("protected settlement and Wait differ: settled = %#v, returned = %#v", settled, result)
+			}
+		})
+	}
+}
+
+func TestFinallyPreservesEveryConcurrentCleanupFailureCause(t *testing.T) {
+	empty := value.EmptyContract()
+	cleanupInputs := finallyOutcomeInputs(t)
+	cleanupGraph := workflow.GraphDraft{
+		Inputs: cleanupInputs, Outputs: empty,
+		Nodes: []workflow.NodeDraft{
+			testLeaf("cleanup-failure", empty, empty),
+			testLeaf("cleanup-timeout", empty, empty),
+		},
+	}
+	definition := testDefinition(t, workflow.GraphDraft{
+		Inputs: empty, Outputs: empty,
+		Nodes: []workflow.NodeDraft{testLeaf("body", empty, empty)},
+		Finally: &workflow.FinallyDraft{
+			Graph: cleanupGraph,
+			Bindings: []workflow.CleanupBindingDraft{{
+				From: workflow.CleanupSourceDraft{Kind: workflow.CleanupOutcome}, To: "outcome",
+			}},
+		},
+	})
+	bodyErr := errors.New("protected body failed")
+	cleanupErr := errors.New("cleanup intrinsic failure")
+	timeoutErr := errors.New("cleanup timed out")
+
+	for _, bodyFailure := range []bool{false, true} {
+		name := "body success"
+		if bodyFailure {
+			name = "body failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			trace := &eventTrace{}
+			runner := newControlledRunner(trace)
+			boundary := newRecordingBoundary(trace)
+			execution := startTestExecution(t, definition, emptyValue(t), runner, boundary, Policy{Capacity: 2, CancellationGrace: time.Second})
+			body := runner.execution(t, "body")
+			if bodyFailure {
+				body.complete(mustLeafFailure(t, MechanicalFailure, bodyErr))
+			} else {
+				body.complete(mustLeafSuccess(t, emptyValue(t)))
+			}
+			cleanupNames := runner.waitStarts(t, 2)
+			cleanup := make(map[string]*controlledLeafExecution, len(cleanupNames))
+			for _, cleanupName := range cleanupNames {
+				cleanup[cleanupName] = runner.execution(t, cleanupName)
+			}
+			cleanup["cleanup-failure"].complete(mustLeafFailure(t, MechanicalFailure, cleanupErr))
+			waitClosed(t, cleanup["cleanup-timeout"].cancelObserved, "cleanup timeout sibling did not observe fail-fast")
+			cleanup["cleanup-timeout"].complete(mustLeafTimeout(t, timeoutErr))
+
+			result := waitResult(t, execution)
+			requireStatus(t, result, Failed)
+			diagnostics := resultDiagnostics(result)
+			wantCount := 3
+			if bodyFailure {
+				wantCount = 4
+				primary, _ := result.Primary()
+				if !errors.Is(primary.Error(), bodyErr) || comparePath(primary.Path(), Path{}.AuthoredChild("body")) != 0 {
+					t.Fatalf("body primary = %#v, want exact protected failure", primary)
+				}
+			}
+			if len(diagnostics) != wantCount {
+				t.Fatalf("terminal diagnostics = %#v, want aggregate plus both distinct cleanup causes", diagnostics)
+			}
+
+			cleanupPath := Path{}.Cleanup()
+			failurePath := cleanupPath.AuthoredChild("cleanup-failure")
+			timeoutPath := cleanupPath.AuthoredChild("cleanup-timeout")
+			cleanupOffset := 0
+			if bodyFailure {
+				cleanupOffset = 1
+			}
+			orderedPaths := []Path{cleanupPath, failurePath, timeoutPath}
+			orderedKinds := []FailureKind{CleanupFailure, MechanicalFailure, TimeoutFailure}
+			for index := range orderedPaths {
+				diagnostic := diagnostics[cleanupOffset+index]
+				kind, failed := diagnostic.Failure()
+				if !failed || kind != orderedKinds[index] || comparePath(diagnostic.Path(), orderedPaths[index]) != 0 {
+					t.Fatalf("cleanup diagnostic %d = %#v, want kind %v at %#v", index, diagnostic, orderedKinds[index], orderedPaths[index].Components())
+				}
+			}
+			aggregateFound, failureFound, timeoutFound := false, false, false
+			parentCancellations := 0
+			for _, diagnostic := range diagnostics {
+				kind, failed := diagnostic.Failure()
+				switch {
+				case failed && kind == CleanupFailure && comparePath(diagnostic.Path(), cleanupPath) == 0:
+					aggregateFound = errors.Is(diagnostic.Error(), cleanupErr)
+				case failed && kind == MechanicalFailure && comparePath(diagnostic.Path(), failurePath) == 0:
+					failureFound = diagnostic.cleanup && errors.Is(diagnostic.Error(), cleanupErr)
+				case failed && kind == TimeoutFailure && comparePath(diagnostic.Path(), timeoutPath) == 0:
+					timeoutFound = diagnostic.cleanup && errors.Is(diagnostic.Error(), timeoutErr)
+				}
+				if diagnostic.parentCancelled || diagnostic.external {
+					parentCancellations++
+				}
+			}
+			if !aggregateFound || !failureFound || !timeoutFound || parentCancellations != 0 {
+				t.Fatalf("cleanup diagnostics = %#v, aggregate/failure/timeout/cancellations = %v/%v/%v/%d", diagnostics, aggregateFound, failureFound, timeoutFound, parentCancellations)
+			}
+			if _, output := result.Output(); output || trace.index(traceCommit, "root") >= 0 {
+				t.Fatal("cleanup failures exposed or committed a protected output")
 			}
 			settled := boundary.settlements("root")
 			if len(settled) != 1 || !reflect.DeepEqual(settled[0], result) {
