@@ -187,3 +187,37 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 	if err != nil {
 ```
 
+
+## A platform is a decision, not a fallback
+
+`platform.go` (deleted; the constraint returns when v0 has a primitive to constrain)
+
+```go
+//go:build !darwin && !linux
+
+package dawn
+
+// dawn supports macOS and Linux. Building anywhere else stops here, on purpose,
+// with the identifier below as the message.
+//
+// The alternative was what shipped before: build everywhere, and hand the
+// unsupported platforms a no-op. On Windows that meant `lockFile` returned nil,
+// so "one run per state directory" was not enforced and two runs both paid; and
+// `killGroup` killed only the direct child, so a timed-out agent left its tool
+// subprocesses holding the inherited pipe — the exact hang the proc package
+// exists to prevent. Both guarantees are documented. Neither held. Nothing said
+// so, because a binary that builds looks like a binary that works.
+//
+// Adding a platform is therefore a DECISION, not a fallback: implement the two
+// primitives there (on Windows, LockFileEx and a Job Object, which need
+// golang.org/x/sys/windows and would be dawn's second dependency), prove them,
+// and delete a term from the constraint above. Until someone does that, WSL is
+// Linux and works today.
+//
+// The refusal lives in the root package because every other package imports it,
+// so one file covers the whole module.
+var _ = dawn_supports_macOS_and_Linux_only__see_platform_go
+```
+
+Note for v0: the netns-only-route-out guarantee is Linux-native; on macOS Docker runs in a VM.
+Whether the boundary holds identically on both is an open question the design does not settle.
