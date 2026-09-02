@@ -242,8 +242,8 @@ func TestFactsReachTheReport(t *testing.T) {
 	sw := open(t, "s-report", 100, 0, upstreamOK(t).URL)
 	sp := sw.Span(nil, "arvo:10400", sw.Budget().Sub("arvo:10400", 5))
 	call(t, sp, req)
-	sp.Fact(glue.FactTask, []byte("arvo:10400"))
-	sp.Fact(glue.FactPoCLen, []byte("412"))
+	sp.Fact("cybergym.task", []byte("arvo:10400"))
+	sp.Fact("poc.bytes", []byte("412"))
 	sp.Close(glue.OK, "")
 
 	lines, err := sw.Report(io.Discard)

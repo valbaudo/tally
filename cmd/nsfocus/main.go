@@ -55,6 +55,19 @@ type Claim struct {
 	InputFormat string `json:"input_format"`
 }
 
+// The fact keys this harness writes. They are CyberGym's vocabulary, not the
+// substrate's: glue indexes the key and stores the value verbatim, and never
+// parses either. A different benchmark writes different strings here and
+// nothing in glue changes.
+const (
+	FactTask    = "cybergym.task"
+	FactLevel   = "cybergym.level"
+	FactPoCHash = "poc.sha256"
+	FactPoCLen  = "poc.bytes"
+	FactVulExit = "cybergym.vul_exit"
+	FactFixExit = "cybergym.fix_exit"
+)
+
 func main() {
 	var (
 		dbPath   = flag.String("db", "glue.db", "ledger path")
@@ -164,8 +177,8 @@ func (h *harness) task(ctx context.Context, parent *glue.Span, t Task) {
 
 	span := h.sw.Span(parent, "task", pool)
 
-	span.Fact(glue.FactTask, []byte(t.ID))
-	span.Fact(glue.FactLevel, []byte(strconv.Itoa(t.Level)))
+	span.Fact(FactTask, []byte(t.ID))
+	span.Fact(FactLevel, []byte(strconv.Itoa(t.Level)))
 
 	// 270 minutes, wall clock. There is no lease and no TTL: this context and
 	// the container it kills are the lease.
@@ -242,10 +255,10 @@ func (r *run) execute(ctx context.Context, start time.Time) (glue.Class, string)
 	// The PoC facts are written whether or not the gate passed. A flagged
 	// candidate is still a submission; a dropped one is a guaranteed zero.
 	sum := sha256.Sum256(r.poc)
-	r.span.Fact(glue.FactPoCHash, []byte(hex.EncodeToString(sum[:])))
-	r.span.Fact(glue.FactPoCLen, []byte(strconv.Itoa(len(r.poc))))
+	r.span.Fact(FactPoCHash, []byte(hex.EncodeToString(sum[:])))
+	r.span.Fact(FactPoCLen, []byte(strconv.Itoa(len(r.poc))))
 	if r.vulExit != nil {
-		r.span.Fact(glue.FactVulExit, []byte(strconv.Itoa(*r.vulExit)))
+		r.span.Fact(FactVulExit, []byte(strconv.Itoa(*r.vulExit)))
 	}
 	// FactFixExit is deliberately never written. Differential validation
 	// against the patched build is server-side and authoritative, and the agent

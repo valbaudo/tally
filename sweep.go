@@ -341,14 +341,3 @@ func (s *Sweep) Report(csv io.Writer) ([]string, error) {
 	return tui.TableLines(s.cfg.Sweep, rows), nil
 }
 
-// The keys glue table reads out of Fact rows. They are re-exported here because
-// they are part of the contract between a harness and the report, and a harness
-// cannot import the package that renders it.
-const (
-	FactTask    = tui.FactTask    // "arvo:10400"
-	FactLevel   = tui.FactLevel   // CyberGym difficulty level
-	FactPoCHash = tui.FactPoCHash // sha256 of the submitted crash input
-	FactPoCLen  = tui.FactPoCLen  // its length in bytes
-	FactVulExit = tui.FactVulExit // exit code against the vulnerable build
-	FactFixExit = tui.FactFixExit // exit code against the patched build
-)

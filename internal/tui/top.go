@@ -471,6 +471,15 @@ type Row struct {
 // factKeys are the Fact() keys glue table reads. The harness writes them; glue
 // does not compute them.
 const (
+	// DEBT: these six keys are CyberGym's vocabulary, and tui reading them
+	// means `glue table` renders one benchmark's submission format rather than
+	// any harness's. They were removed from the public API (a harness now
+	// declares its own), but the table still hardcodes them.
+	//
+	// The fix when a second benchmark appears: the table takes its column spec
+	// from the caller instead of a const block. Not done now because one
+	// benchmark cannot tell you which parts generalise, and guessing produces
+	// exactly the config schema this project exists to avoid.
 	FactPoCHash = "poc.sha256"
 	FactPoCLen  = "poc.bytes"
 	FactVulExit = "cybergym.vul_exit"
