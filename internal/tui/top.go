@@ -1,4 +1,4 @@
-package glue
+package tui
 
 // glue top and glue table.
 //
@@ -14,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/valbaudo/dawn/internal/proxy"
+	"github.com/valbaudo/dawn/internal/store"
 )
 
 // ------------------------------------------------------------------ model
@@ -25,15 +28,15 @@ type Node struct {
 	Name         string
 	Opened       time.Time
 	Closed       time.Time // zero while open
-	Class        Class
+	Class        store.Class
 	Outcome      string
 	LastSeen     time.Time
 	Model        string
 
 	// Subtree totals, rolled up in Go from Parent.
 	In, Out, CacheR int64
-	Spend           USD
-	Cap             USD // 0 means "inherits", rendered blank
+	Spend           store.USD
+	Cap             store.USD // 0 means "inherits", rendered blank
 	Calls, Attempts int64
 	PriceKnown      bool
 	State           LiveState
@@ -54,7 +57,7 @@ type Frame struct {
 	OK, Rejected, Failed, Cancelled     int
 	Calls, Attempts, AttemptsSinceFrame int64
 	In, Out, CacheR                     int64
-	Spend, Cap                          USD
+	Spend, Cap                          store.USD
 	Unpriced                            int
 }
 
@@ -92,7 +95,7 @@ SELECT span,
 // Load reads every span in the sweep and rolls the subtree totals up the parent
 // chain. caps supplies each span's pool ceiling; it comes from the Pools the
 // supervisor is holding, not from events.
-func Load(db *sql.DB, sweep string, caps map[string]USD) ([]*Node, error) {
+func Load(db *sql.DB, sweep string, caps map[string]store.USD) ([]*Node, error) {
 	rows, err := db.Query(scan, sweep)
 	if err != nil {
 		return nil, err
@@ -114,7 +117,7 @@ func Load(db *sql.DB, sweep string, caps map[string]USD) ([]*Node, error) {
 			return nil, err
 		}
 		n.Name, n.Parent, n.Outcome, n.Model = name.String, parent.String, out.String, model.String
-		n.Class = Class(class.Int64)
+		n.Class = store.Class(class.Int64)
 		n.PriceKnown = priceKnown != 0
 		n.Opened, n.Closed, n.LastSeen = ms(opened), ms(closed), ms(seen)
 		n.Cap = caps[n.Span]
@@ -165,7 +168,7 @@ func ms(v sql.NullInt64) time.Time {
 // OpenTree returns the open spans as roots, with their open children attached,
 // ordered by open time. Closed spans stay out of glue top but their numbers are
 // already inside their ancestors' rollups.
-func OpenTree(all []*Node, w *Watch, p *Proxy, now time.Time) []*Node {
+func OpenTree(all []*Node, w *Watch, p *proxy.Proxy, now time.Time) []*Node {
 	open := map[string]*Node{}
 	for _, n := range all {
 		if n.Closed.IsZero() && !n.Opened.IsZero() {
@@ -200,7 +203,7 @@ func OpenTree(all []*Node, w *Watch, p *Proxy, now time.Time) []*Node {
 // Snapshot turns a Load result into a renderable Frame. The caller supplies the
 // three things events cannot know — what the sweep is called, when it started,
 // and how many tasks the board has — and everything else is counted here.
-func Snapshot(base Frame, all []*Node, w *Watch, p *Proxy, now time.Time) Frame {
+func Snapshot(base Frame, all []*Node, w *Watch, p *proxy.Proxy, now time.Time) Frame {
 	f := base
 	f.Now = now
 	f.Roots = OpenTree(all, w, p, now)
@@ -223,13 +226,13 @@ func Snapshot(base Frame, all []*Node, w *Watch, p *Proxy, now time.Time) Frame 
 		}
 		f.Tasks++
 		switch n.Class {
-		case OK:
+		case store.OK:
 			f.OK++
-		case Rejected:
+		case store.Rejected:
 			f.Rejected++
-		case Failed:
+		case store.Failed:
 			f.Failed++
-		case Cancelled:
+		case store.Cancelled:
 			f.Cancelled++
 		}
 	}
@@ -239,7 +242,7 @@ func Snapshot(base Frame, all []*Node, w *Watch, p *Proxy, now time.Time) Frame 
 // RunTop is the command. One SQL scan and one repaint per tick; the container
 // poll runs on its own slower ticker because it costs a syscall per worker and
 // staleness is a 90-second question, not a one-second one.
-func RunTop(ctx context.Context, db *sql.DB, p *Proxy, w *Watch, base Frame, caps map[string]USD, out *os.File) error {
+func RunTop(ctx context.Context, db *sql.DB, p *proxy.Proxy, w *Watch, base Frame, caps map[string]store.USD, out *os.File) error {
 	scr := NewScreen(out)
 	defer scr.Close()
 
@@ -450,7 +453,7 @@ func Width(f *os.File) int {
 type Row struct {
 	Task       string
 	Level      string
-	Class      Class
+	Class      store.Class
 	Outcome    string
 	PoC        string // sha256 of the submitted blob
 	Bytes      int64
@@ -459,7 +462,7 @@ type Row struct {
 	Calls      int64
 	Attempts   int64
 	In, Out    int64
-	Spend      USD
+	Spend      store.USD
 	Wall       time.Duration
 	Model      string
 	PriceKnown bool
@@ -545,7 +548,7 @@ func TableLines(sweep string, rows []Row) []string {
 		t.In += r.In
 		t.Out += r.Out
 		t.Spend += r.Spend
-		if r.Class == OK {
+		if r.Class == store.OK {
 			ok++
 		}
 		if !r.PriceKnown {
@@ -583,7 +586,7 @@ func TableLines(sweep string, rows []Row) []string {
 		comma(t.Calls), comma(t.Attempts), hnum(t.In), hnum(t.Out), "$"+money(t.Spend), "", "", ""), " "))
 	out = append(out, "")
 	line := fmt.Sprintf("reproduced %d/%d  %.1f%%   spend $%s   $%s/task",
-		ok, len(rows), pctN(ok, len(rows)), money(t.Spend), money(t.Spend/USD(max(1, len(rows)))))
+		ok, len(rows), pctN(ok, len(rows)), money(t.Spend), money(t.Spend/store.USD(max(1, len(rows)))))
 	if unpriced > 0 {
 		line += fmt.Sprintf("   %s priced at the map ceiling — reconcile before publishing", plural(unpriced, "row"))
 	}
@@ -666,7 +669,7 @@ func meter(v, cap float64, n int) string {
 	return strings.Repeat("█", full) + strings.Repeat("░", n-full)
 }
 
-func pct(v, cap USD) float64 {
+func pct(v, cap store.USD) float64 {
 	if cap <= 0 {
 		return 0
 	}
@@ -680,7 +683,7 @@ func pctN(a, b int) float64 {
 	return float64(a) / float64(b) * 100
 }
 
-func money(v USD) string { return strconv.FormatFloat(float64(v), 'f', 2, 64) }
+func money(v store.USD) string { return strconv.FormatFloat(float64(v), 'f', 2, 64) }
 
 // hms is h:mm:ss over an hour, m:ss under it. Sortable by eye at a glance,
 // which is the only thing the elapsed column is for.
@@ -744,4 +747,11 @@ func comma(n int64) string {
 // say nothing.
 func shortModel(m string) string {
 	return clip(strings.TrimPrefix(m, "claude-"), 12)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

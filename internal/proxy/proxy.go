@@ -1,8 +1,9 @@
-package glue
+package proxy
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/valbaudo/dawn/internal/store"
 )
 
 // The proxy is the only route out of the container's network namespace, so it
@@ -148,8 +151,19 @@ type wireRequest struct {
 
 // ---- proxy ---------------------------------------------------------------
 
+// Target is everything the proxy needs to know about a span, which is
+// deliberately not much: an id to attribute rows to, its place in the tree, and
+// the name of the pool that pays. The proxy has no Span type, no Ledger and no
+// Pool — package glue owns those, and if the proxy could name them the import
+// would run the wrong way and the harness could reach the metering path.
+type Target struct {
+	ID, Parent, Run string
+	Pool            string
+}
+
 type Proxy struct {
-	Ledger   *Ledger
+	db       *store.DB
+	resolve  func(spanID string) (Target, bool)
 	Upstream *url.URL // https://api.anthropic.com
 	key      string   // the real API key; it never leaves this process
 	rp       *httputil.ReverseProxy
@@ -168,6 +182,13 @@ type Proxy struct {
 // thinking from being reaped as stale, with no threshold tuned to model
 // latency and no heartbeat sidecar in any of the 19 images.
 func (p *Proxy) InFlight(span string) int {
+	// nil is the out-of-process reader: `glue top` running beside the sweep
+	// cannot see the supervisor's open connections, and 0 is the honest answer
+	// there. Liveness then rests on last_seen and the container CPU counter,
+	// which is exactly what a second process CAN observe.
+	if p == nil {
+		return 0
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.live[span]
@@ -213,9 +234,10 @@ func (p *Proxy) leave(span string) {
 // Hand-rolling those is ~150 lines to re-derive stdlib. The Rewrite hook (not
 // Director) is used because Rewrite drops inbound X-Forwarded-* by default,
 // and the container is not trusted to set them.
-func NewProxy(l *Ledger, apiKey string) *Proxy {
+func New(db *store.DB, apiKey string, resolve func(spanID string) (Target, bool)) *Proxy {
 	p := &Proxy{
-		Ledger:   l,
+		db:       db,
+		resolve:  resolve,
 		Upstream: &url.URL{Scheme: "https", Host: "api.anthropic.com"},
 		key:      apiKey,
 		live:     map[string]int{},
@@ -231,13 +253,13 @@ func NewProxy(l *Ledger, apiKey string) *Proxy {
 // call is the per-request state, carried in the context so the Rewrite,
 // ModifyResponse and body-Close hooks can all reach it.
 type call struct {
-	span     *Span
+	span     Target
 	path     string
 	body     []byte
 	hash     string
 	model    string
 	stream   bool
-	reserved USD
+	reserved store.USD
 	callID   string
 	attempt  int
 	started  time.Time
@@ -263,8 +285,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// not mint gets nothing, and writes nothing: there is no span to attribute
 	// a row to, and letting an unknown id create rows is a write primitive
 	// handed to whoever guessed it.
-	span := p.Ledger.LookupSpan(spanID)
-	if span == nil {
+	span, ok := p.resolve(spanID)
+	if !ok {
 		http.Error(w, "unknown span", http.StatusNotFound)
 		return
 	}
@@ -292,9 +314,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// c.reserved is assigned only on success, so the refusal path below has
 	// nothing to settle and cannot drive pool.spent negative.
 	want := reservation(req, len(body))
-	if err := c.span.Pool.Reserve(want); err != nil {
+	charged, err := p.db.Reserve(c.span.Pool, want)
+	if err != nil || charged == 0 {
 		// Rejected, not Failed: the substrate refused this, no gate did.
-		p.finish(c, Usage{Model: req.Model, Complete: true}, Rejected, "budget", 0)
+		p.finish(c, Usage{Model: req.Model, Complete: true}, store.Rejected, "budget", 0)
 		w.Header().Set("Content-Type", "application/json")
 		// 429 is the only honest status for "you may not spend", but the SDK
 		// retries every 429 twice by default, and a budget that is out will
@@ -307,7 +330,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"type": "error",
 			"error": map[string]string{
 				"type":    "rate_limit_error",
-				"message": "glue: " + err.Error(),
+				"message": "glue: over budget, pool " + c.span.Pool,
 			},
 		})
 		return
@@ -333,7 +356,7 @@ func splitSpanPath(p string) (span, rest string, ok bool) {
 
 // reservation prices the worst case: every output token the caller allowed,
 // plus an estimate of the input it just handed us.
-func reservation(req wireRequest, bodyLen int) USD {
+func reservation(req wireRequest, bodyLen int) store.USD {
 	u := Usage{
 		Model: req.Model,
 		In:    int64(bodyLen / bytesPerToken),
@@ -354,14 +377,20 @@ func reservation(req wireRequest, bodyLen int) USD {
 // which is sequential by construction; if a harness ever fans out inside a
 // single span, this becomes a transaction.
 func (p *Proxy) identify(c *call) {
-	if prev, ok := p.Ledger.LastCall(c.span.ID); ok &&
+	if prev, ok := p.db.LastCall(c.span.ID); ok &&
 		prev.Retry && prev.BodyHash == c.hash &&
 		c.started.Sub(prev.End) <= retryWindow {
 		c.callID, c.attempt = prev.CallID, prev.Attempt+1
 		return
 	}
-	sum := sha256.Sum256(append([]byte(c.span.ID+c.hash), byte(time.Now().UnixNano())))
-	c.callID, c.attempt = hex.EncodeToString(sum[:8]), 1
+	// A fresh logical call gets a fresh random id. The obvious cheaper thing —
+	// hashing span+body with a timestamp mixed in — was here and was wrong: it
+	// took only the low byte of UnixNano, so two genuinely distinct calls with
+	// the same body on the same span collided 1 time in 256 and silently
+	// merged. COUNT(DISTINCT call_id) is a published number; a 0.4% quiet
+	// under-count is worse than no number. rand.Text cannot fail and cannot
+	// collide.
+	c.callID, c.attempt = rand.Text(), 1
 }
 
 // retryWindow bounds how long after a failed attempt its retry may still join
@@ -454,7 +483,7 @@ func (p *Proxy) modifyResponse(res *http.Response) error {
 		// we know it exactly: usage_complete=1 with zeros, not an unknown.
 		// Anything else makes a retry storm look like unmeasured spend.
 		c.retry = willRetry(res.StatusCode, res.Header)
-		p.finish(c, Usage{Model: c.model, Complete: true}, Failed,
+		p.finish(c, Usage{Model: c.model, Complete: true}, store.Failed,
 			errorType(res.StatusCode, b), 0)
 		return nil
 	}
@@ -473,13 +502,13 @@ func (p *Proxy) modifyResponse(res *http.Response) error {
 func (p *Proxy) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	c, ok := r.Context().Value(ctxKey{}).(*call)
 	if ok {
-		class, outcome := Failed, "transport_error"
+		class, outcome := store.Failed, "transport_error"
 		// APIConnectionError / APITimeoutError are retried unconditionally by
 		// _should_retry_exception. A client that has gone away is not going to
 		// retry anything.
 		c.retry = true
 		if errors.Is(err, context.Canceled) {
-			class, outcome, c.retry = Cancelled, "client_gone", false
+			class, outcome, c.retry = store.Cancelled, "client_gone", false
 		}
 		// Nothing was generated: release the whole reservation.
 		p.finish(c, Usage{Model: c.model, Complete: true}, class, outcome, 0)
@@ -615,7 +644,7 @@ func (t *tap) Close() error {
 			// to be wrong in either direction.
 			t.c.retry = t.errT == "overloaded_error" ||
 				t.errT == "api_error" || t.errT == "timeout_error"
-			t.p.finish(t.c, t.u, Failed, t.errT, maxUSD(usd, t.c.reserved))
+			t.p.finish(t.c, t.u, store.Failed, t.errT, maxUSD(usd, t.c.reserved))
 		case !t.u.Complete:
 			// The client went away, or the stream broke, before message_stop.
 			// The row is written anyway with usage_complete=0 and the
@@ -630,15 +659,15 @@ func (t *tap) Close() error {
 			// means a harness that resends after a truncated stream gets a new
 			// call_id: attempts and calls both go up by one, which over-counts
 			// calls rather than hiding a real second call inside the first.
-			t.p.finish(t.c, t.u, Cancelled, "stream_incomplete", maxUSD(usd, t.c.reserved))
+			t.p.finish(t.c, t.u, store.Cancelled, "stream_incomplete", maxUSD(usd, t.c.reserved))
 		default:
-			t.p.finish(t.c, t.u, OK, "", usd)
+			t.p.finish(t.c, t.u, store.OK, "", usd)
 		}
 	})
 	return err
 }
 
-func maxUSD(a, b USD) USD {
+func maxUSD(a, b store.USD) store.USD {
 	if a > b {
 		return a
 	}
@@ -647,15 +676,24 @@ func maxUSD(a, b USD) USD {
 
 // finish trues the reservation up to the real charge and appends the row.
 // Once per call, whichever hook gets there first.
-func (p *Proxy) finish(c *call, u Usage, class Class, outcome string, usd USD) {
+func (p *Proxy) finish(c *call, u Usage, class store.Class, outcome string, usd store.USD) {
 	c.once.Do(func() {
 		p.leave(c.span.ID)
 		if u.Model == "" {
 			u.Model = c.model
 		}
 		_, known := rateFor(u.Model)
-		c.span.Pool.Settle(c.reserved, usd)
-		p.Ledger.Record(Event{
+		// The true-up is unconditional and may push the pool past its cap; see
+		// store.TrueUp. c.reserved is zero on the refusal path, which is why
+		// that path cannot drive spent negative.
+		p.db.TrueUp(c.span.Pool, usd-c.reserved)
+		meta, _ := json.Marshal(map[string]any{
+			"body":   c.hash, // request body hash; never the body itself
+			"stream": c.stream,
+			"path":   c.path,
+			"retry":  c.retry, // will the client resend? read back by identify()
+		})
+		p.db.Append(store.Row{
 			TS:            c.started,
 			LastSeen:      time.Now(), // ts..last_seen is the call's wall clock, no UPDATE needed
 			Span:          c.span.ID,
@@ -674,12 +712,7 @@ func (p *Proxy) finish(c *call, u Usage, class Class, outcome string, usd USD) {
 			USD:           usd,
 			PriceKnown:    known,
 			UsageComplete: u.Complete,
-			Meta: map[string]any{
-				"body":   c.hash, // request body hash; never the body itself
-				"stream": c.stream,
-				"path":   c.path,
-				"retry":  c.retry, // will the client resend? read back by identify()
-			},
+			Meta:          string(meta),
 		})
 	})
 }

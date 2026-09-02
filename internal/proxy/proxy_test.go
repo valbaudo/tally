@@ -1,9 +1,10 @@
-package glue
+package proxy
 
 import (
 	"bufio"
 	"context"
-	"database/sql"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,10 +12,11 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/valbaudo/dawn/internal/store"
 )
 
 // The SSE bodies below are the verbatim examples from
@@ -48,47 +50,40 @@ data: {"type":"message_stop"}
 type callRow struct {
 	CallID                  string
 	Attempt                 int
-	Class                   Class
+	Class                   store.Class
 	Outcome, Model          string
 	In, Out, CacheR, CacheW int64
-	USD                     USD
+	USD                     store.USD
 	PriceKnown, Complete    bool
 }
 
 type fixture struct {
 	t    *testing.T
 	p    *Proxy
-	l    *Ledger
-	span *Span
-	pool *Pool
+	db   *store.DB
+	span Target
 	fe   *httptest.Server // the supervisor listener
 	up   *httptest.Server // stands in for api.anthropic.com
 	seen chan *http.Request
+
+	mu    sync.Mutex
+	spans map[string]Target
 }
 
-func newFixture(t *testing.T, cap USD, upstream http.HandlerFunc) *fixture {
+func newFixture(t *testing.T, cap store.USD, upstream http.HandlerFunc) *fixture {
 	t.Helper()
-	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "glue.db"))
+	db, err := store.Open(filepath.Join(t.TempDir(), "glue.db"), "sweep-test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	db.SetMaxOpenConns(1) // one handle, one writer: the supervisor
-
-	l, err := Open(db, "sweep-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool, err := l.Root("root", cap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	span, err := l.NewSpan(nil, "worker-0", pool)
-	if err != nil {
+	if err := db.NewPool("root", "", cap, 0); err != nil {
 		t.Fatal(err)
 	}
 
-	f := &fixture{t: t, l: l, span: span, pool: pool, seen: make(chan *http.Request, 8)}
+	f := &fixture{t: t, db: db, seen: make(chan *http.Request, 8),
+		spans: map[string]Target{}}
+	f.span = f.mint("worker-0", "root")
 	f.up = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body.Close()
 		f.seen <- r
@@ -96,7 +91,7 @@ func newFixture(t *testing.T, cap USD, upstream http.HandlerFunc) *fixture {
 	}))
 	t.Cleanup(f.up.Close)
 
-	f.p = NewProxy(l, "sk-ant-REAL-KEY")
+	f.p = New(db, "sk-ant-REAL-KEY", f.lookup)
 	f.p.Upstream, _ = url.Parse(f.up.URL)
 	mux := http.NewServeMux()
 	mux.Handle("/s/", f.p)
@@ -105,12 +100,45 @@ func newFixture(t *testing.T, cap USD, upstream http.HandlerFunc) *fixture {
 	return f
 }
 
+// mint stands in for glue.Ledger.Span: it registers a bearer id the proxy will
+// accept. The proxy resolves through this func and nothing else, which is what
+// keeps it from importing the ledger.
+func (f *fixture) mint(name, pool string) Target {
+	f.t.Helper()
+	var b [16]byte
+	rand.Read(b[:])
+	tg := Target{ID: hex.EncodeToString(b[:]), Run: name, Pool: pool}
+	if err := f.db.Append(store.Row{TS: time.Now(), Span: tg.ID, Run: tg.Run,
+		Kind: "span_open", Outcome: name}); err != nil {
+		f.t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.spans[tg.ID] = tg
+	f.mu.Unlock()
+	return tg
+}
+
+func (f *fixture) lookup(id string) (Target, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tg, ok := f.spans[id]
+	return tg, ok
+}
+
+func (f *fixture) spent(pool string) store.USD {
+	sp, _, _, err := f.db.Spent(pool)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return sp
+}
+
 func (f *fixture) base() string { return f.fe.URL + "/s/" + f.span.ID }
 
 // rows returns every call callRow on the span, oldest first.
 func (f *fixture) rows() []callRow {
 	f.t.Helper()
-	rs, err := f.l.db.Query(`SELECT call_id, attempt, class, outcome, model,
+	rs, err := f.db.SQL().Query(`SELECT call_id, attempt, class, outcome, model,
 		in_tok, out_tok, cache_r, cache_w, usd, price_known, usage_complete
 		FROM events WHERE kind='call' ORDER BY id`)
 	if err != nil {
@@ -199,7 +227,7 @@ func TestStreamingUsage(t *testing.T) {
 	}
 
 	r := f.only()
-	want := callRow{Attempt: 1, Class: OK, Model: "claude-opus-5",
+	want := callRow{Attempt: 1, Class: store.OK, Model: "claude-opus-5",
 		In: 25, Out: 15, CacheR: 1800, CacheW: 248, PriceKnown: true, Complete: true}
 	want.CallID, want.USD = r.CallID, r.USD
 	if r != want {
@@ -211,7 +239,7 @@ func TestStreamingUsage(t *testing.T) {
 		t.Fatalf("usd = %v, want %v", r.USD, exp)
 	}
 	// Reservation must have been given back.
-	if spent, _ := f.pool.Spent(); float64(spent)-exp > 1e-12 {
+	if spent := f.spent("root"); float64(spent)-exp > 1e-12 {
 		t.Fatalf("pool spent = %v, want %v (reservation not trued up)", spent, exp)
 	}
 }
@@ -283,7 +311,7 @@ func TestClientDisconnectMidStreamStillWritesRow(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if r.Outcome != "stream_incomplete" || r.Class != Cancelled {
+	if r.Outcome != "stream_incomplete" || r.Class != store.Cancelled {
 		t.Fatalf("row = %+v, want Cancelled/stream_incomplete", r)
 	}
 	if r.Complete {
@@ -314,7 +342,7 @@ func TestNonStreamingUsage(t *testing.T) {
 	if r.In != 2048 || r.Out != 503 || r.CacheR != 1800 || r.CacheW != 248 {
 		t.Fatalf("usage = %+v", r)
 	}
-	if !r.Complete || r.Class != OK || r.Model != "claude-sonnet-5" {
+	if !r.Complete || r.Class != store.OK || r.Model != "claude-sonnet-5" {
 		t.Fatalf("row = %+v", r)
 	}
 }
@@ -343,13 +371,13 @@ func TestProviderErrorRowAndReleasedReservation(t *testing.T) {
 				t.Fatalf("status=%d body=%q, want %d %q", res.StatusCode, got, tc.status, tc.body)
 			}
 			r := f.only()
-			if r.Class != Failed || r.Outcome != tc.outcome {
+			if r.Class != store.Failed || r.Outcome != tc.outcome {
 				t.Fatalf("row = %+v, want Failed/%s", r, tc.outcome)
 			}
 			if r.USD != 0 || !r.Complete {
 				t.Fatalf("a refused request generated nothing: want usd=0 usage_complete=1, got %+v", r)
 			}
-			if spent, _ := f.pool.Spent(); spent != 0 {
+			if spent := f.spent("root"); spent != 0 {
 				t.Fatalf("reservation not released: pool spent = %v", spent)
 			}
 		})
@@ -382,10 +410,10 @@ func TestBudgetRefusalNeverLeavesTheProcess(t *testing.T) {
 	default:
 	}
 	r := f.only()
-	if r.Class != Rejected || r.Outcome != "budget" || r.USD != 0 {
+	if r.Class != store.Rejected || r.Outcome != "budget" || r.USD != 0 {
 		t.Fatalf("row = %+v, want Rejected/budget/0", r)
 	}
-	if spent, _ := f.pool.Spent(); spent != 0 {
+	if spent := f.spent("root"); spent != 0 {
 		t.Fatalf("a refused reservation must leave nothing behind, got %v", spent)
 	}
 }
@@ -394,20 +422,16 @@ func TestBudgetRefusalNeverLeavesTheProcess(t *testing.T) {
 // when the child's does not.
 func TestSubPoolChargesParent(t *testing.T) {
 	f := newFixture(t, 0.001, sseHandler(sseBody))
-	sub, err := f.pool.Sub("salvage", 1000) // huge child cap, tiny root cap
-	if err != nil {
+	if err := f.db.NewPool("child", "root", 1000, 0); err != nil { // huge child cap, tiny root cap
 		t.Fatal(err)
 	}
-	span, err := f.l.NewSpan(nil, "w1", sub)
-	if err != nil {
-		t.Fatal(err)
-	}
+	span := f.mint("w1", "child")
 	res := post(t, f.fe.URL+"/s/"+span.ID, streamReq)
 	res.Body.Close()
 	if res.StatusCode != 429 {
 		t.Fatalf("status = %d, want 429: the root cap must bind", res.StatusCode)
 	}
-	if spent, _ := sub.Spent(); spent != 0 {
+	if spent := f.spent("child"); spent != 0 {
 		t.Fatalf("failed reserve left %v on the child pool", spent)
 	}
 }
@@ -425,7 +449,7 @@ func TestUnknownModelIsChargedAtTheCeiling(t *testing.T) {
 	if r.PriceKnown {
 		t.Error("price_known must be 0 for an unrecognized model")
 	}
-	if r.USD != USD(maxRate.In) { // 1M input tokens at the ceiling input rate
+	if r.USD != store.USD(maxRate.In) { // 1M input tokens at the ceiling input rate
 		t.Fatalf("usd = %v, want the ceiling %v: unknown models are never free", r.USD, maxRate.In)
 	}
 }
@@ -539,7 +563,7 @@ func TestMidStreamErrorEvent(t *testing.T) {
 	res.Body.Close()
 
 	r := f.only()
-	if r.Class != Failed || r.Outcome != "overloaded_error" {
+	if r.Class != store.Failed || r.Outcome != "overloaded_error" {
 		t.Fatalf("row = %+v", r)
 	}
 	if r.Complete {

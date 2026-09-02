@@ -1,9 +1,11 @@
-package glue
+package oci
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -76,7 +78,12 @@ func (n *Net) Reap() error {
 
 // runArgs builds the argv for one agent container. Kept pure so the flags
 // that carry the guarantee are testable without a daemon.
-func (n *Net) runArgs(span, image string, cmd []string) []string {
+//
+// mounts is the only per-container knob, and it is deliberately a list of
+// volume specs rather than a list of docker flags: a caller that could pass
+// arbitrary argv could pass --network host and delete the boundary this file
+// exists to enforce.
+func (n *Net) runArgs(span, image string, mounts, cmd []string) []string {
 	a := []string{"run", "-d",
 		"--name", "glue-" + span,
 		"--label", "glue.sweep=" + n.Sweep,
@@ -88,14 +95,26 @@ func (n *Net) runArgs(span, image string, cmd []string) []string {
 		"--cap-drop", "NET_RAW",
 		"--security-opt", "no-new-privileges",
 		"-e", "ANTHROPIC_BASE_URL=" + n.BaseURL(span),
-		image,
 	}
+	for _, m := range mounts {
+		a = append(a, "-v", m)
+	}
+	a = append(a, image)
 	return append(a, cmd...)
 }
 
-func (n *Net) Launch(span, image string, cmd ...string) (string, error) {
-	out, err := docker(n.runArgs(span, image, cmd)...)
+// Launch starts one agent container. mounts are host:container[:ro] specs.
+func (n *Net) Launch(span, image string, mounts []string, cmd ...string) (string, error) {
+	out, err := docker(n.runArgs(span, image, mounts, cmd)...)
 	return strings.TrimSpace(out), err
+}
+
+// Kill stops and removes one agent's container. `docker rm -f` rather than
+// `docker kill` so a container that is already dead but not yet collected takes
+// the same path as a live one; there is no "was it running?" branch.
+func (n *Net) Kill(span string) error {
+	_, err := docker("rm", "-f", "glue-"+span)
+	return err
 }
 
 // Predicate runs inside a live container and exits non-zero the moment the
@@ -147,4 +166,35 @@ func docker(args ...string) (string, error) {
 			strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
+}
+
+// Wait blocks until the container exits and returns its exit code.
+//
+// On context cancellation it kills the container and returns ctx.Err(). That
+// ordering is the point: the container is the lease, so cancelling the caller
+// has to actually stop the spend. Returning early and leaving the container
+// running is how a cancelled sweep keeps billing.
+func (n *Net) Wait(ctx context.Context, id string) (int, error) {
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := docker("wait", id)
+		if err != nil {
+			done <- result{0, err}
+			return
+		}
+		code, err := strconv.Atoi(strings.TrimSpace(out))
+		done <- result{code, err}
+	}()
+	select {
+	case r := <-done:
+		return r.code, r.err
+	case <-ctx.Done():
+		_, _ = docker("kill", id)
+		<-done // do not leak the goroutine; docker wait returns once killed
+		return 0, ctx.Err()
+	}
 }

@@ -1,10 +1,10 @@
-package glue
+package proxy
 
-import "strings"
+import (
+	"strings"
 
-// USD is dollars. float64 is exact enough for a budget cap: the largest error
-// term over 10^5 calls at ~10^-6 dollars of resolution is ~10^-11 relative.
-type USD float64
+	"github.com/valbaudo/dawn/internal/store"
+)
 
 // Rate is dollars per million tokens for one model.
 //
@@ -73,7 +73,7 @@ func rateFor(model string) (Rate, bool) {
 
 // Cost prices a usage snapshot. known is false when the model was unrecognized
 // and the ceiling rate was applied instead.
-func Cost(u Usage) (usd USD, known bool) {
+func Cost(u Usage) (usd store.USD, known bool) {
 	r, known := rateFor(u.Model)
 	// The single cache_w column loses the 5m/1h split, so price from the
 	// breakdown when the response carried one and fall back to the 1h (higher)
@@ -88,5 +88,5 @@ func Cost(u Usage) (usd USD, known bool) {
 		float64(u.CacheR)*r.CacheRead +
 		float64(w5)*r.Cache5m +
 		float64(w1)*r.Cache1h
-	return USD(cents / 1e6), known
+	return store.USD(cents / 1e6), known
 }

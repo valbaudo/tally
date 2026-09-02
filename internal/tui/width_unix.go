@@ -1,6 +1,6 @@
 //go:build darwin || linux || freebsd || netbsd || openbsd || dragonfly
 
-package glue
+package tui
 
 import (
 	"os"

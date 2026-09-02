@@ -1,4 +1,4 @@
-package glue
+package tui
 
 // Open span != live work.
 //
@@ -14,7 +14,7 @@ package glue
 // two as stale. Two more signals fix that, and both are already on the
 // supervisor's side of the boundary:
 //
-//	an in-flight upstream request for the span  (Proxy.InFlight, proxy.go)
+//	an in-flight upstream request for the span  (proxy.Proxy.InFlight, proxy.go)
 //	the container's CPU counter advancing       (the poll below)
 //
 // The first one is why there is no threshold tuned to model latency. A span
@@ -222,7 +222,7 @@ func (e errStatus) Error() string { return string(e) }
 // State is the whole rule.
 //
 //	lastSeen  MAX(last_seen) over the span's events rows
-//	inflight  Proxy.InFlight(span)
+//	inflight  proxy.Proxy.InFlight(span)
 //
 // Quiet time is measured from the LATER of the two silent-but-alive signals, so
 // a span only goes Stale when the ledger, the proxy and the kernel all agree
