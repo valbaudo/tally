@@ -10,3 +10,8 @@ run.json
 
 # isolated agent worktrees
 /.worktrees/
+
+# tooling scratch
+.superpowers/
+.gstack/
+.dawn/
