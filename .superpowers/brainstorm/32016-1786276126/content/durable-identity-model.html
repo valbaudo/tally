@@ -1,0 +1,65 @@
+<h2>What identifies one piece of work?</h2>
+<p class="subtitle">The identity model decides whether Dawn can resume precisely, reuse expensive agent work after edits, and repeat side effects without accidental duplication.</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">Recommended model: identity is layered, not overloaded</div>
+    <div class="mockup-body">
+      <div style="display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;gap:10px;align-items:center;text-align:center">
+        <div style="padding:16px;border:2px solid #2563eb;border-radius:12px;background:#eff6ff">
+          <div class="label">Runtime address</div>
+          <strong>Where is it?</strong>
+          <div style="font-size:13px;margin-top:6px">run + branch/map/loop path</div>
+        </div>
+        <div style="font-size:22px">＋</div>
+        <div style="padding:16px;border:2px solid #7c3aed;border-radius:12px;background:#f5f3ff">
+          <div class="label">Work fingerprint</div>
+          <strong>What will it do?</strong>
+          <div style="font-size:13px;margin-top:6px">operation + exact inputs + behavior</div>
+        </div>
+        <div style="font-size:22px">＋</div>
+        <div style="padding:16px;border:2px solid #059669;border-radius:12px;background:#ecfdf5">
+          <div class="label">Attempt</div>
+          <strong>Which try?</strong>
+          <div style="font-size:13px;margin-top:6px">1, 2, 3… for diagnostics</div>
+        </div>
+        <div style="font-size:22px">＋</div>
+        <div style="padding:16px;border:2px solid #d97706;border-radius:12px;background:#fffbeb">
+          <div class="label">Effect key</div>
+          <strong>Same logical effect</strong>
+          <div style="font-size:13px;margin-top:6px">stable across retry/restart</div>
+        </div>
+      </div>
+      <div style="margin-top:18px;padding:14px 16px;border-left:4px solid #2563eb;background:rgba(37,99,235,.06)">
+        <strong>Continue</strong> finds committed work by runtime address. <strong>Derive</strong> can reuse a moved or renamed node by matching the work it actually performs. Intentional duplicate nodes remain separate executions because their addresses are distinct.
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3>Choose the foundation</h3>
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Layered identity <span style="font-size:12px;color:#2563eb;text-transform:uppercase;letter-spacing:.06em">Recommended</span></h3>
+      <p>Separate address, reusable-work fingerprint, attempt, and effect key. Preserves precise continuation, broad derivation reuse, intentional duplicates, and safe retry semantics without burdening workflow authors with knobs.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Address is identity</h3>
+      <p>Very simple, but moving or renaming a node destroys reuse even when its operation and inputs are unchanged. Derivation becomes much less valuable.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Fingerprint is identity</h3>
+      <p>Maximizes deduplication, but identical-looking nodes may represent two intentional executions. It can collapse work that should happen twice, especially external effects.</p>
+    </div>
+  </div>
+</div>
+
+<p style="margin-top:18px;font-size:13px;opacity:.75">This is an internal runtime model. Workflow authors do not name or manage these identities.</p>
