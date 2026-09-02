@@ -79,6 +79,8 @@ func (p *Pool) Sub(name string, cap USD) *Pool   // caps only; no Remaining()
 
 `CAS` takes a slice — one transaction over N names — so MopMonk's seven layers cannot expose mixed generations. Five lines, free because refs already live in SQLite.
 
+> **NOT BUILT, as of 2026-09-03.** There is no refs table: `internal/store/store.go` creates `events` and `pool` and nothing else, and no `CAS` is exported. "Free because refs already live in SQLite" was an assumption about code that was never written. Every harness built so far is read-only on its target, so nothing has needed it yet.
+
 Sandbox kill is the container runtime's, not a process group. `proc.go` comes back for host-side children only.
 
 ---

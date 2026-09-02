@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	glue "github.com/valbaudo/dawn"
@@ -114,11 +115,6 @@ func TestModelPredicateIsChargedAndLedgeredLikeAnyOther(t *testing.T) {
 	// shape from an agent's own call except for which span it hangs under.
 	// Note what the harness is NOT holding to check this: a database handle.
 	span.Close(glue.OK, "")
-	rows, err := sw.Report(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = rows
 	var n int
 	var model string
 	var usd float64
@@ -164,14 +160,15 @@ func TestJudgeRefusedWhenTheTaskPoolIsOut(t *testing.T) {
 }
 
 // sweep brings up a real supervisor with no agent image: a real ledger, a real
-// listener, a real proxy, and no Docker. Config.Image being empty is what says
+// listener, a real proxy, and no Docker. Config.Isolate being false is what says
 // "this sweep launches no containers", so there is no test-only switch here.
 func sweep(t *testing.T, id, upstream string, cap float64) *glue.Sweep {
 	t.Helper()
 	sw, err := glue.Open(glue.Config{
 		Sweep: id, DB: filepath.Join(t.TempDir(), "glue.db"),
-		APIKey: "sk-test", Budget: glue.USD(cap),
-		Upstream: upstream,
+		Keys:     map[string]string{"anthropic": "sk-test"},
+		Budget:   glue.USD(cap),
+		Upstream: map[string]string{"anthropic": upstream},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -194,4 +191,46 @@ func peek(t *testing.T, sw *glue.Sweep) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// The submission CSV is the artifact a leaderboard reads. Sixteen fields per
+// row, outcome quoted because it is free text a human wrote.
+func TestSubmissionCSVIsMachineReadable(t *testing.T) {
+	rows := []Row{
+		{Task: "arvo:10400", Level: "1", Class: "ok", PoC: "3f9a1c2e77b4", Bytes: 412,
+			VulExit: "1", FixExit: "0", Calls: 37, Attempts: 39, In: 1_940_000, Out: 28_400,
+			Spend: 4.11, Wall: 12*time.Minute + 41*time.Second, Model: "claude-opus-5", PriceKnown: true},
+		{Task: "arvo:3938", Level: "1", Class: "failed", Outcome: "no crash, 270m",
+			Calls: 58, Attempts: 61, Spend: 9.88, Wall: 31 * time.Minute, Model: "claude-opus-5"},
+	}
+	var b strings.Builder
+	if err := writeCSV(&b, rows); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) != len(rows)+1 {
+		t.Fatalf("want header + %d rows, got %d lines", len(rows), len(lines))
+	}
+	for i, l := range lines {
+		n, inQ := 1, false
+		for _, c := range l {
+			switch {
+			case c == '"':
+				inQ = !inQ
+			case c == ',' && !inQ:
+				n++
+			}
+		}
+		if n != 16 {
+			t.Fatalf("line %d has %d fields, want 16:\n%s", i, n, l)
+		}
+	}
+	// The human table is the same numbers, never a re-typing.
+	var h strings.Builder
+	printTable(&h, rows)
+	for _, want := range []string{"arvo:10400", "$4.11", "1 reproduced", "50.0%"} {
+		if !strings.Contains(h.String(), want) {
+			t.Fatalf("table lost %q:\n%s", want, h.String())
+		}
+	}
 }

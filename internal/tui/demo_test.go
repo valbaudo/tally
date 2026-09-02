@@ -95,29 +95,3 @@ func demoFrame() Frame {
 	}
 	return f
 }
-
-func demoRows() []Row {
-	return []Row{
-		{Task: "arvo:10400", Level: "1", Class: store.OK, PoC: "3f9a1c2e77b4", Bytes: 412,
-			VulExit: "1", FixExit: "0", Calls: 37, Attempts: 39, In: 1_940_000, Out: 28_400,
-			Spend: 4.11, Wall: 12*time.Minute + 41*time.Second, Model: "claude-opus-5", PriceKnown: true},
-		{Task: "arvo:11238", Level: "1", Class: store.Rejected, Outcome: "patched build also crashed",
-			PoC: "0c44f9aa1d80", Bytes: 256, VulExit: "1", FixExit: "1", Calls: 41, Attempts: 44,
-			In: 2_600_000, Out: 35_900, Spend: 5.72, Wall: 15*time.Minute + 3*time.Second,
-			Model: "claude-opus-5", PriceKnown: true},
-		{Task: "arvo:15003", Level: "1", Class: store.Cancelled, Outcome: "soft deadline, salvage claimed",
-			PoC: "b18c30de55a2", Bytes: 96, VulExit: "0", FixExit: "0", Calls: 63, Attempts: 71,
-			In: 2_970_000, Out: 41_200, Spend: 6.19, Wall: 51*time.Minute + 26*time.Second,
-			Model: "claude-opus-5", PriceKnown: true},
-		{Task: "arvo:3938", Level: "1", Class: store.Failed, Outcome: "no crash in 270m",
-			Calls: 58, Attempts: 61, In: 4_210_000, Out: 61_000,
-			Spend: 9.88, Wall: 31*time.Minute + 8*time.Second, Model: "claude-opus-5", PriceKnown: true},
-		{Task: "arvo:7712", Level: "1", Class: store.Rejected, Outcome: "budget",
-			PoC: "cc02b7714f39", Bytes: 8192, VulExit: "1", FixExit: "0", Calls: 88, Attempts: 96,
-			In: 5_880_000, Out: 88_100, Spend: 6.00, Wall: 44*time.Minute + 2*time.Second,
-			Model: "claude-opus-5-preview", PriceKnown: false},
-		{Task: "oss-fuzz:42535201", Level: "1", Class: store.OK, PoC: "a7d0e5b12c66", Bytes: 1024,
-			VulExit: "1", FixExit: "0", Calls: 22, Attempts: 22, In: 1_100_000, Out: 17_200,
-			Spend: 2.34, Wall: 7*time.Minute + 55*time.Second, Model: "claude-opus-5", PriceKnown: true},
-	}
-}

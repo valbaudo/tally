@@ -30,15 +30,24 @@ type Net struct {
 
 func (n *Net) name() string { return "glue-" + n.Sweep }
 
+// isolation is the flag set EVERY container this package starts carries,
+// whatever network it is on. It was copied in three places (agent, predicate,
+// and — in the harness that needed an unnetworked validator — user code); one
+// slice is what stops the three drifting.
+//
+// The label is the load-bearing one: Reap collects by it, so a container
+// started without it survives the sweep that started it.
+var isolation = []string{
+	// The route table is the boundary; NET_ADMIN would let root in the
+	// container edit it, NET_RAW would let it forge frames on the bridge.
+	"--cap-drop", "NET_ADMIN",
+	"--cap-drop", "NET_RAW",
+	"--security-opt", "no-new-privileges",
+}
+
 // Addr is what the supervisor passes to net.Listen. Binding the gateway
 // rather than 0.0.0.0 keeps the proxy off the host's real NICs.
 func (n *Net) Addr() string { return fmt.Sprintf("%s:%d", n.GW, n.Port) }
-
-// BaseURL is the value of ANTHROPIC_BASE_URL for one span. SDKs append
-// /v1/messages, so the span id survives with zero client cooperation.
-func (n *Net) BaseURL(span string) string {
-	return fmt.Sprintf("http://%s:%d/s/%s", n.GW, n.Port, span)
-}
 
 // Up reaps anything left by a previous supervisor with this sweep id and
 // creates the network. Both statements are the crash cleanup.
@@ -83,18 +92,20 @@ func (n *Net) Reap() error {
 // volume specs rather than a list of docker flags: a caller that could pass
 // arbitrary argv could pass --network host and delete the boundary this file
 // exists to enforce.
-func (n *Net) runArgs(span, image string, mounts, cmd []string) []string {
+//
+// env comes from the span, not from this file: the base URL a container is
+// handed is read back off the bound listener, and computing it a second time
+// here is how the two disagree.
+func (n *Net) runArgs(span, image string, env, mounts, cmd []string) []string {
 	a := []string{"run", "-d",
 		"--name", "glue-" + span,
 		"--label", "glue.sweep=" + n.Sweep,
 		"--label", "glue.span=" + span,
 		"--network", n.name(),
-		// The route table is the boundary; NET_ADMIN would let root in the
-		// container edit it, NET_RAW would let it forge frames on the bridge.
-		"--cap-drop", "NET_ADMIN",
-		"--cap-drop", "NET_RAW",
-		"--security-opt", "no-new-privileges",
-		"-e", "ANTHROPIC_BASE_URL=" + n.BaseURL(span),
+	}
+	a = append(a, isolation...)
+	for _, e := range env {
+		a = append(a, "-e", e)
 	}
 	for _, m := range mounts {
 		a = append(a, "-v", m)
@@ -104,9 +115,57 @@ func (n *Net) runArgs(span, image string, mounts, cmd []string) []string {
 }
 
 // Launch starts one agent container. mounts are host:container[:ro] specs.
-func (n *Net) Launch(span, image string, mounts []string, cmd ...string) (string, error) {
-	out, err := docker(n.runArgs(span, image, mounts, cmd)...)
+func (n *Net) Launch(span, image string, env, mounts []string, cmd ...string) (string, error) {
+	out, err := docker(n.runArgs(span, image, env, mounts, cmd)...)
 	return strings.TrimSpace(out), err
+}
+
+// Sandbox runs one throwaway container with NO network at all and returns its
+// combined output and its exit code.
+//
+// It exists because the agent container is not the only container a harness
+// runs. Executing a candidate proof-of-concept, or running a generated test
+// against an untouched checkout, is attacker-controlled code that has nothing
+// to say to any API — so it gets --network none rather than the sweep network,
+// and a non-zero exit is the expected result rather than an error.
+//
+// The reason this is here and not in the harness: a container the harness
+// starts itself carries no glue.sweep label, so Reap never collects it and the
+// isolation spec this package publishes stops being true of every container in
+// the sweep. The label is the whole point of the method.
+//
+// ponytail: on ctx cancellation the docker CLI dies but --rm may not fire, so
+// the container can outlive the call. It is labelled, so the next boot's Reap
+// collects it. That is the same guarantee the agent containers have and it
+// needs no second mechanism.
+func (n *Net) Sandbox(ctx context.Context, span, image string, mounts, cmd []string) (string, int, error) {
+	var buf bytes.Buffer
+	c := exec.CommandContext(ctx, "docker", n.sandboxArgs(span, image, mounts, cmd)...)
+	c.Stdout, c.Stderr = &buf, &buf // sanitizers report on stderr
+	err := c.Run()
+	if ee, ok := err.(*exec.ExitError); ok {
+		return buf.String(), ee.ExitCode(), nil
+	}
+	if err != nil {
+		return buf.String(), 0, fmt.Errorf("docker run %s: %w", image, err)
+	}
+	return buf.String(), 0, nil
+}
+
+// sandboxArgs is split out for the same reason runArgs is: the flags carry the
+// guarantee, so they are asserted without a daemon.
+func (n *Net) sandboxArgs(span, image string, mounts, cmd []string) []string {
+	a := []string{"run", "--rm",
+		"--label", "glue.sweep=" + n.Sweep,
+		"--label", "glue.span=" + span,
+		"--network", "none",
+	}
+	a = append(a, isolation...)
+	for _, m := range mounts {
+		a = append(a, "-v", m)
+	}
+	a = append(a, image)
+	return append(a, cmd...)
 }
 
 // Kill stops and removes one agent's container. `docker rm -f` rather than
@@ -141,13 +200,14 @@ echo BOUNDARY-OK`
 // supervisor calls this once at boot and refuses to launch agents if it
 // fails. Engine version strings are not evidence; this is.
 func (n *Net) Verify() error {
-	out, err := docker("run", "--rm",
-		"--label", "glue.sweep="+n.Sweep,
+	args := []string{"run", "--rm",
+		"--label", "glue.sweep=" + n.Sweep,
 		"--network", n.name(),
-		"--cap-drop", "NET_ADMIN", "--cap-drop", "NET_RAW",
-		"-e", "GW="+n.GW, "-e", "SUB="+n.Subnet,
+		"-e", "GW=" + n.GW, "-e", "SUB=" + n.Subnet,
 		"-e", fmt.Sprintf("PORT=%d", n.Port),
-		"alpine:3", "sh", "-c", Predicate)
+	}
+	args = append(args, isolation...)
+	out, err := docker(append(args, "alpine:3", "sh", "-c", Predicate)...)
 	if err != nil {
 		return fmt.Errorf("network boundary predicate failed: %w", err)
 	}

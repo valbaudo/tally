@@ -12,14 +12,25 @@ The scaffold around the model is worth +4 to +23 points of success rate — more
 model generation. Every team hand-built the same four things badly, and disagreed about
 everything else.
 
-The four:
+Three are implemented. The fourth is designed and not built, and this table says so
+rather than shipping the claim:
 
-| Fact | Enforced by | Not by |
-|---|---|---|
-| what it spent | the proxy is the only route out of the netns | asking |
-| whether it succeeded | `class` written only by supervisor-side code | a label check inside the agent |
-| shared state generations | refs in a database the container cannot reach | file locks in the workspace |
-| its own isolation spec | recorded from the effective container config | trusting the digest field |
+| Fact | Enforced by | Not by | State |
+|---|---|---|---|
+| what it spent | the proxy is the only route out of the netns | asking | **built** |
+| whether it succeeded | `class` written only by supervisor-side code | a label check inside the agent | **built** |
+| its own isolation spec | recorded from the effective container config | trusting the digest field | **built** |
+| shared state generations | refs + CAS in a database the container cannot reach | file locks in the workspace | **NOT BUILT** |
+
+`grep -n 'CREATE TABLE' internal/store/store.go` returns two: `events` and `pool`. There is
+no refs table and `go doc` exports no `CAS`. Earlier revisions of this file and of
+docs/GLUE-DESIGN.md asserted otherwise; they were wrong.
+
+Why it survived unnoticed is the interesting part: CyberGym, Glasswing and MDASH are all
+**read-only on their target** — 50 hunters share nothing — so no harness we built needed
+it. The unimplemented fact is exactly the one only the harnesses we did not build require:
+Cloudflare's Fixing stage writing patches, or any non-security harness with N agents
+editing one workspace. It gets built when that second caller exists, not before.
 
 Membership rule: a fact belongs inside iff the agent would profit from forging it **and**
 the agent's code is the natural place to produce it. Memory fails that rule — authoring

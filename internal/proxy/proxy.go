@@ -13,7 +13,6 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +80,11 @@ type Usage struct {
 	// a stream, a parsed body for a non-stream. False means the numbers are a
 	// floor and the reservation stands as the charge.
 	Complete bool
+
+	// Err is the provider's own error type when a 200 turned into an error
+	// partway through. It lives here rather than on the tap because only the
+	// per-provider parser can recognise one.
+	Err string
 }
 
 // apply folds one wire usage object in. It OVERWRITES; it never sums.
@@ -143,11 +147,20 @@ type wireMessage struct {
 	Usage usageWire `json:"usage"`
 }
 
+// wireRequest is every provider's request in one shape. The three output-cap
+// keys are the only real divergence: Anthropic REQUIRES max_tokens, OpenAI Chat
+// Completions takes max_completion_tokens (max_tokens is its deprecated alias),
+// and Responses takes max_output_tokens — and all three may be absent on the
+// OpenAI wires, where cap() returns 0 and the provider's ceiling applies.
 type wireRequest struct {
-	Model     string `json:"model"`
-	MaxTokens int64  `json:"max_tokens"`
-	Stream    bool   `json:"stream"`
+	Model         string `json:"model"`
+	MaxTokens     int64  `json:"max_tokens"`
+	MaxCompletion int64  `json:"max_completion_tokens"`
+	MaxOutput     int64  `json:"max_output_tokens"`
+	Stream        bool   `json:"stream"`
 }
+
+func (r wireRequest) cap() int64 { return max(r.MaxTokens, r.MaxCompletion, r.MaxOutput) }
 
 // ---- proxy ---------------------------------------------------------------
 
@@ -159,14 +172,23 @@ type wireRequest struct {
 type Target struct {
 	ID, Parent, Run string
 	Pool            string
+
+	// Providers is the set of provider names this span may reach. The span id
+	// in the path is a bearer capability; the provider segment beside it is
+	// not, so without this a container could spend the sweep's OpenAI key on a
+	// span the harness minted for Anthropic alone. Empty means none.
+	Providers []string
 }
 
 type Proxy struct {
-	db       *store.DB
-	resolve  func(spanID string) (Target, bool)
-	Upstream *url.URL // https://api.anthropic.com
-	key      string   // the real API key; it never leaves this process
-	rp       *httputil.ReverseProxy
+	db      *store.DB
+	resolve func(spanID string) (Target, bool)
+
+	// Providers is the routing table, keyed by the path segment that selects
+	// it. Every credential this sweep holds lives in here and nowhere else.
+	Providers map[string]Provider
+
+	rp *httputil.ReverseProxy
 
 	// live counts the attempts currently open per span. It is the second of the
 	// three liveness signals in live.go, and it is free: the supervisor is
@@ -180,7 +202,7 @@ type Proxy struct {
 // A span with a request in flight is alive BY CONSTRUCTION, for as long as the
 // call runs — which is what keeps a twelve-minute Opus call with extended
 // thinking from being reaped as stale, with no threshold tuned to model
-// latency and no heartbeat sidecar in any of the 19 images.
+// latency and no heartbeat sidecar in any agent image.
 func (p *Proxy) InFlight(span string) int {
 	// nil is the out-of-process reader: `glue top` running beside the sweep
 	// cannot see the supervisor's open connections, and 0 is the honest answer
@@ -234,13 +256,12 @@ func (p *Proxy) leave(span string) {
 // Hand-rolling those is ~150 lines to re-derive stdlib. The Rewrite hook (not
 // Director) is used because Rewrite drops inbound X-Forwarded-* by default,
 // and the container is not trusted to set them.
-func New(db *store.DB, apiKey string, resolve func(spanID string) (Target, bool)) *Proxy {
+func New(db *store.DB, keys map[string]string, resolve func(spanID string) (Target, bool)) *Proxy {
 	p := &Proxy{
-		db:       db,
-		resolve:  resolve,
-		Upstream: &url.URL{Scheme: "https", Host: "api.anthropic.com"},
-		key:      apiKey,
-		live:     map[string]int{},
+		db:        db,
+		resolve:   resolve,
+		Providers: Providers(keys),
+		live:      map[string]int{},
 	}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:        p.rewrite,
@@ -254,6 +275,7 @@ func New(db *store.DB, apiKey string, resolve func(spanID string) (Target, bool)
 // ModifyResponse and body-Close hooks can all reach it.
 type call struct {
 	span     Target
+	prov     Provider
 	path     string
 	body     []byte
 	hash     string
@@ -276,9 +298,9 @@ type call struct {
 type ctxKey struct{}
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	spanID, path, ok := splitSpanPath(r.URL.Path)
+	spanID, provName, path, ok := splitSpanPath(r.URL.Path)
 	if !ok {
-		http.Error(w, "want /s/<span>/<upstream path>", http.StatusNotFound)
+		http.Error(w, "want /s/<span>/<provider>/<upstream path>", http.StatusNotFound)
 		return
 	}
 	// The span id is a bearer capability minted by the supervisor. An id it did
@@ -291,6 +313,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The provider is resolved BEFORE anything is read, because the reservation
+	// below has to price the call and the price map is keyed by provider. The
+	// alternative — recording one provider per span, or sniffing the body
+	// shape — cannot answer that question until the response echoes a model
+	// back, which is after the money is already committed.
+	prov, ok := p.Providers[provName]
+	if !ok || !allowed(span.Providers, provName) {
+		http.Error(w, "unknown provider for span", http.StatusNotFound)
+		return
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
@@ -300,8 +333,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req wireRequest
 	json.Unmarshal(body, &req) // a body we cannot parse still gets forwarded; the API judges it
 
+	if req.Stream && prov.InjectUsage != nil {
+		body = prov.InjectUsage(body)
+	}
+
 	c := &call{
-		span: span, path: path, body: body, model: req.Model,
+		span: span, prov: prov, path: path, body: body, model: req.Model,
 		stream: req.Stream, started: time.Now(),
 	}
 	sum := sha256.Sum256(body)
@@ -313,11 +350,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// budget mechanism: one conditional UPDATE per pool, RowsAffected checked.
 	// c.reserved is assigned only on success, so the refusal path below has
 	// nothing to settle and cannot drive pool.spent negative.
-	want := reservation(req, len(body))
+	want := reservation(prov, req, len(body))
 	charged, err := p.db.Reserve(c.span.Pool, want)
 	if err != nil || charged == 0 {
 		// Rejected, not Failed: the substrate refused this, no gate did.
 		p.finish(c, Usage{Model: req.Model, Complete: true}, store.Rejected, "budget", 0)
+		// The refusal is spoken in the wire dialect the client is expecting;
+		// an Anthropic error envelope handed to an OpenAI SDK is an unparsed
+		// 429 that the SDK retries on its own schedule.
 		w.Header().Set("Content-Type", "application/json")
 		// 429 is the only honest status for "you may not spend", but the SDK
 		// retries every 429 twice by default, and a budget that is out will
@@ -342,27 +382,56 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, c)))
 }
 
-// splitSpanPath turns /s/<id>/v1/messages into <id>, /v1/messages.
-func splitSpanPath(p string) (span, rest string, ok bool) {
+// splitSpanPath turns /s/<id>/anthropic/v1/messages into
+// <id>, anthropic, /v1/messages.
+//
+// The provider lives in the path rather than in a per-span field because the
+// base URL is a string dawn mints anyway — ANTHROPIC_BASE_URL for Claude Code,
+// base_url in ~/.codex/config.toml for Codex, baseUrl in a droid settings file
+// — so a second segment costs nothing at the mint site and buys the case both
+// reference harnesses actually need: ONE span that calls two providers, because
+// droid can be handed several customModels at once and picks between them
+// per-turn. A per-span field would have to be re-derived from the model string,
+// which is a second mapping that goes stale every model launch.
+func splitSpanPath(p string) (span, prov, rest string, ok bool) {
 	if !strings.HasPrefix(p, "/s/") {
-		return "", "", false
+		return "", "", "", false
 	}
-	i := strings.IndexByte(p[3:], '/')
+	p = p[3:]
+	i := strings.IndexByte(p, '/')
 	if i <= 0 {
-		return "", "", false
+		return "", "", "", false
 	}
-	return p[3 : 3+i], p[3+i:], true
+	span, p = p[:i], p[i+1:]
+	j := strings.IndexByte(p, '/')
+	if j <= 0 {
+		return "", "", "", false
+	}
+	return span, p[:j], p[j:], true
+}
+
+func allowed(set []string, name string) bool {
+	for _, s := range set {
+		if s == name {
+			return true
+		}
+	}
+	return false
 }
 
 // reservation prices the worst case: every output token the caller allowed,
 // plus an estimate of the input it just handed us.
-func reservation(req wireRequest, bodyLen int) store.USD {
+func reservation(prov Provider, req wireRequest, bodyLen int) store.USD {
+	out := req.cap()
+	if out == 0 {
+		out = prov.DefaultMaxOut
+	}
 	u := Usage{
 		Model: req.Model,
 		In:    int64(bodyLen / bytesPerToken),
-		Out:   req.MaxTokens,
+		Out:   out,
 	}
-	usd, _ := Cost(u)
+	usd, _ := Cost(prov.Name, u)
 	return usd
 }
 
@@ -444,19 +513,17 @@ func willRetry(status int, h http.Header) bool {
 
 func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 	c := r.In.Context().Value(ctxKey{}).(*call)
-	r.Out.URL.Scheme = p.Upstream.Scheme
-	r.Out.URL.Host = p.Upstream.Host
-	r.Out.Host = p.Upstream.Host // Host header and TLS SNI both follow this
-	r.Out.URL.Path = c.path      // /s/<id> stripped; /v1/messages survives verbatim
+	up := c.prov.Upstream
+	r.Out.URL.Scheme = up.Scheme
+	r.Out.URL.Host = up.Host
+	r.Out.Host = up.Host                                       // Host header and TLS SNI both follow this
+	r.Out.URL.Path = strings.TrimSuffix(up.Path, "/") + c.path // /s/<id>/<prov> stripped
 
-	// The container never holds a credential. Whatever it sent is discarded
-	// unread, and the real key is attached here and only here.
+	// The container never holds a credential for ANY provider. Whatever it sent
+	// is discarded unread, and the real key is attached here and only here.
 	r.Out.Header.Del("Authorization")
 	r.Out.Header.Del("X-Api-Key")
-	r.Out.Header.Set("X-Api-Key", p.key)
-	if r.Out.Header.Get("Anthropic-Version") == "" {
-		r.Out.Header.Set("Anthropic-Version", AnthropicVersion)
-	}
+	c.prov.Auth(r.Out.Header)
 
 	// Drop the client's Accept-Encoding so http.Transport adds its own gzip and
 	// therefore transparently decodes the body for us (Transport doc: "If the
@@ -489,7 +556,7 @@ func (p *Proxy) modifyResponse(res *http.Response) error {
 	}
 
 	ct, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type"))
-	t := &tap{src: res.Body, sse: ct == "text/event-stream", c: c, p: p}
+	t := &tap{src: res.Body, sse: ct == "text/event-stream", c: c, p: p, parse: c.prov.Parse()}
 	if !t.sse {
 		t.buf = new(bytes.Buffer)
 	}
@@ -529,15 +596,14 @@ func (p *Proxy) errorHandler(w http.ResponseWriter, r *http.Request, err error) 
 // allocation-free per event, and needs no synchronisation at all: Read and
 // Close are called by exactly one goroutine, ReverseProxy's.
 type tap struct {
-	src  io.ReadCloser
-	sse  bool
-	c    *call
-	p    *Proxy
-	u    Usage
-	line []byte        // partial SSE line carried between Reads
-	buf  *bytes.Buffer // non-SSE only
-	errT string        // mid-stream error type, if one arrived after the 200
-	once sync.Once
+	src   io.ReadCloser
+	sse   bool
+	c     *call
+	p     *Proxy
+	parse Parser
+	line  []byte        // partial SSE line carried between Reads
+	buf   *bytes.Buffer // non-SSE only
+	once  sync.Once
 }
 
 func (t *tap) Read(b []byte) (int, error) {
@@ -568,49 +634,9 @@ func (t *tap) observe(b []byte) {
 			t.line = append(t.line, line...)
 			line = t.line
 		}
-		t.event(bytes.TrimSuffix(line, []byte("\r")))
-		t.line = t.line[:0] // after event(), which does not retain the slice
+		t.parse.Event(bytes.TrimSuffix(line, []byte("\r")))
+		t.line = t.line[:0] // after Event(), which does not retain the slice
 		b = b[i+1:]
-	}
-}
-
-var dataPrefix = []byte("data:")
-
-// event handles one SSE line. Only "data:" lines carry JSON; the "event:" name
-// lines are redundant because every payload repeats the name in its own "type"
-// field ("Each event uses an SSE event name ... and includes the matching event
-// type in its data").
-func (t *tap) event(line []byte) {
-	if !bytes.HasPrefix(line, dataPrefix) {
-		return // event: lines, blank separators, : comments
-	}
-	var ev sseEvent
-	if json.Unmarshal(bytes.TrimSpace(line[len(dataPrefix):]), &ev) != nil {
-		return
-	}
-	switch ev.Type {
-	case "message_start":
-		// Carries input_tokens and both cache fields.
-		// $.message.usage.input_tokens, $.message.usage.cache_read_input_tokens,
-		// $.message.usage.cache_creation_input_tokens, and $.message.model.
-		if ev.Message != nil {
-			t.u.Model = ev.Message.Model
-			t.u.apply(ev.Message.Usage)
-		}
-	case "message_delta":
-		// Carries the final output_tokens at $.usage.output_tokens, and on the
-		// current API repeats the input and cache fields cumulatively.
-		if ev.Usage != nil {
-			t.u.apply(*ev.Usage)
-		}
-	case "message_stop":
-		t.u.Complete = true
-	case "error":
-		// A 200 that turns into an error partway. Tokens were already
-		// generated, so the reservation must stand.
-		if ev.Error != nil {
-			t.errT = ev.Error.Type
-		}
 	}
 }
 
@@ -620,17 +646,15 @@ func (t *tap) Close() error {
 	err := t.src.Close()
 	t.once.Do(func() {
 		if !t.sse {
-			var m wireMessage
-			if json.Unmarshal(t.buf.Bytes(), &m) == nil &&
-				m.Usage.InputTokens+m.Usage.OutputTokens > 0 {
-				t.u.Model = m.Model
-				t.u.apply(m.Usage)
-				t.u.Complete = true
-			}
+			t.parse.Body(t.buf.Bytes())
 		}
-		usd, _ := Cost(t.u)
+		u := t.parse.Usage()
+		if u.Model == "" {
+			u.Model = t.c.model
+		}
+		usd, _ := Cost(t.c.prov.Name, u)
 		switch {
-		case t.errT != "":
+		case u.Err != "":
 			// Partial generation then a mid-stream error. Charge the
 			// reservation: what was produced before the break is unknown.
 			//
@@ -642,10 +666,10 @@ func (t *tap) Close() error {
 			// is the harness's own retry, on its own clock. retryWindow is the
 			// only thing bounding that, and this is the merge case most likely
 			// to be wrong in either direction.
-			t.c.retry = t.errT == "overloaded_error" ||
-				t.errT == "api_error" || t.errT == "timeout_error"
-			t.p.finish(t.c, t.u, store.Failed, t.errT, maxUSD(usd, t.c.reserved))
-		case !t.u.Complete:
+			t.c.retry = u.Err == "overloaded_error" ||
+				u.Err == "api_error" || u.Err == "timeout_error"
+			t.p.finish(t.c, u, store.Failed, u.Err, maxUSD(usd, t.c.reserved))
+		case !u.Complete:
 			// The client went away, or the stream broke, before message_stop.
 			// The row is written anyway with usage_complete=0 and the
 			// reservation as the charge. A killed run reading as zero spend is
@@ -659,9 +683,9 @@ func (t *tap) Close() error {
 			// means a harness that resends after a truncated stream gets a new
 			// call_id: attempts and calls both go up by one, which over-counts
 			// calls rather than hiding a real second call inside the first.
-			t.p.finish(t.c, t.u, store.Cancelled, "stream_incomplete", maxUSD(usd, t.c.reserved))
+			t.p.finish(t.c, u, store.Cancelled, "stream_incomplete", maxUSD(usd, t.c.reserved))
 		default:
-			t.p.finish(t.c, t.u, store.OK, "", usd)
+			t.p.finish(t.c, u, store.OK, "", usd)
 		}
 	})
 	return err
@@ -682,7 +706,7 @@ func (p *Proxy) finish(c *call, u Usage, class store.Class, outcome string, usd 
 		if u.Model == "" {
 			u.Model = c.model
 		}
-		_, known := rateFor(u.Model)
+		_, known := rateFor(c.prov.Name, u.Model)
 		// The true-up is unconditional and may push the pool past its cap; see
 		// store.TrueUp. c.reserved is zero on the refusal path, which is why
 		// that path cannot drive spent negative.
@@ -692,6 +716,7 @@ func (p *Proxy) finish(c *call, u Usage, class store.Class, outcome string, usd 
 			"stream": c.stream,
 			"path":   c.path,
 			"retry":  c.retry, // will the client resend? read back by identify()
+			"prov":   c.prov.Name,
 		})
 		p.db.Append(store.Row{
 			TS:            c.started,

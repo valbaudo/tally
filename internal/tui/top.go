@@ -1,8 +1,8 @@
 package tui
 
-// glue top and glue table.
+// glue top, and the two reads Sweep.Outcomes is built from.
 //
-// Both read the same one query. Nothing here writes.
+// Nothing here writes.
 
 import (
 	"context"
@@ -21,10 +21,11 @@ import (
 
 // ------------------------------------------------------------------ model
 
-// Node is one span as glue top and glue table see it: its own row plus its
+// Node is one span as glue top sees it: its own row plus its
 // subtree's rolled-up numbers.
 type Node struct {
 	Span, Parent string
+	Run          string // the root span's name, inherited by the whole tree
 	Name         string
 	Opened       time.Time
 	Closed       time.Time // zero while open
@@ -55,6 +56,7 @@ type Frame struct {
 
 	Tasks, TasksTotal                   int
 	OK, Rejected, Failed, Cancelled     int
+	Unk                                 int
 	Calls, Attempts, AttemptsSinceFrame int64
 	In, Out, CacheR                     int64
 	Spend, Cap                          store.USD
@@ -75,6 +77,7 @@ const scan = `
 SELECT span,
        MAX(CASE WHEN kind='span_open'  THEN outcome END),
        MAX(CASE WHEN kind='span_open'  THEN parent  END),
+       MAX(CASE WHEN kind='span_open'  THEN run     END),
        MIN(CASE WHEN kind='span_open'  THEN ts      END),
        MAX(CASE WHEN kind='span_close' THEN ts      END),
        MAX(CASE WHEN kind='span_close' THEN class   END),
@@ -106,17 +109,18 @@ func Load(db *sql.DB, sweep string, caps map[string]store.USD) ([]*Node, error) 
 	var all []*Node
 	for rows.Next() {
 		var (
-			n                        Node
-			name, parent, out, model sql.NullString
-			opened, closed, seen     sql.NullInt64
-			class                    sql.NullInt64
-			priceKnown               int64
+			n                             Node
+			name, parent, run, out, model sql.NullString
+			opened, closed, seen          sql.NullInt64
+			class                         sql.NullInt64
+			priceKnown                    int64
 		)
-		if err := rows.Scan(&n.Span, &name, &parent, &opened, &closed, &class, &out, &seen,
+		if err := rows.Scan(&n.Span, &name, &parent, &run, &opened, &closed, &class, &out, &seen,
 			&n.In, &n.Out, &n.CacheR, &n.Spend, &n.Calls, &n.Attempts, &priceKnown, &model); err != nil {
 			return nil, err
 		}
-		n.Name, n.Parent, n.Outcome, n.Model = name.String, parent.String, out.String, model.String
+		n.Name, n.Parent, n.Run = name.String, parent.String, run.String
+		n.Outcome, n.Model = out.String, model.String
 		n.Class = store.Class(class.Int64)
 		n.PriceKnown = priceKnown != 0
 		n.Opened, n.Closed, n.LastSeen = ms(opened), ms(closed), ms(seen)
@@ -209,19 +213,26 @@ func Snapshot(base Frame, all []*Node, w *Watch, p *proxy.Proxy, now time.Time) 
 	f.Roots = OpenTree(all, w, p, now)
 	f.Workers = len(f.Roots)
 	for _, n := range all {
-		if n.Parent != "" {
-			continue // roots only; their numbers already include the subtree
+		// Money and tokens roll up, so summing anything but roots would count
+		// every call once per level of the tree.
+		if n.Parent == "" {
+			f.In += n.In
+			f.Out += n.Out
+			f.CacheR += n.CacheR
+			f.Spend += n.Spend
+			f.Calls += n.Calls
+			f.Attempts += n.Attempts
+			if !n.PriceKnown {
+				f.Unpriced++
+			}
 		}
-		f.In += n.In
-		f.Out += n.Out
-		f.CacheR += n.CacheR
-		f.Spend += n.Spend
-		f.Calls += n.Calls
-		f.Attempts += n.Attempts
-		if !n.PriceKnown {
-			f.Unpriced++
-		}
-		if n.Closed.IsZero() {
+		// Verdicts do NOT roll up: a class belongs to the span that closed,
+		// and counting roots only means a run whose tree is repo -> stage ->
+		// 50 hunters shows 0/0/0/0 for hours while fifty hunters fail. Count
+		// leaves — the span that did work rather than the span that delegated
+		// it. In a one-level tree, every root is a leaf and this is the same
+		// number it always was.
+		if len(n.kids) > 0 || n.Closed.IsZero() {
 			continue
 		}
 		f.Tasks++
@@ -234,6 +245,10 @@ func Snapshot(base Frame, all []*Node, w *Watch, p *proxy.Proxy, now time.Time) 
 			f.Failed++
 		case store.Cancelled:
 			f.Cancelled++
+		default:
+			// Unknown is a real outcome — a reaped span — and without a
+			// bucket for it the four counters silently stop summing to Tasks.
+			f.Unk++
 		}
 	}
 	return f
@@ -300,8 +315,8 @@ func (f Frame) Lines(width int) []string {
 	rule()
 
 	add("%s", pad(
-		fmt.Sprintf(" tasks   %-11s ok %-5d rej %-4d fail %-4d cancel %-4d",
-			fmt.Sprintf("%d/%d", f.Tasks, f.TasksTotal), f.OK, f.Rejected, f.Failed, f.Cancelled),
+		fmt.Sprintf(" tasks   %-11s ok %-5d rej %-4d fail %-4d cancel %-4d unk %-4d",
+			fmt.Sprintf("%d/%d", f.Tasks, f.TasksTotal), f.OK, f.Rejected, f.Failed, f.Cancelled, f.Unk),
 		fmt.Sprintf("spend  $%s / $%s   %s %5.1f%%",
 			money(f.Spend), money(f.Cap), meter(float64(f.Spend), float64(f.Cap), 16), pct(f.Spend, f.Cap)),
 		width))
@@ -431,194 +446,42 @@ func Width(f *os.File) int {
 	return 120
 }
 
-// ------------------------------------------------------------- glue table
+// ------------------------------------------------------------------ facts
 
-// Row is one CyberGym instance as it appears in the submission table.
-//
-// Levels, artifact and success criterion verified against the CyberGym paper
-// (arXiv 2506.02548v3) and sunblaze-ucb/cybergym on 2026-09-02:
-//
-//	level 0  pre-patch codebase, no description
-//	level 1  pre-patch codebase + text description   <- the board we target
-//	level 2  level 1 + crash stack trace from the ground-truth PoC
-//	level 3  level 2 + ground-truth patch and post-patch codebase
-//
-//	"(i) it triggers a sanitizer crash in the pre-patch version and (ii)
-//	 running it on the post-patch version does not produce any sanitizer crash"
-//
-// VUL and FIX are printed as the raw exit codes the verifier recorded, and CLASS
-// comes from the span_close row. glue never derives success from the exit codes
-// itself: class is written by supervisor-side code, and re-deriving it here
-// would put a second, disagreeing judge in the pipeline.
-type Row struct {
-	Task       string
-	Level      string
-	Class      store.Class
-	Outcome    string
-	PoC        string // sha256 of the submitted blob
-	Bytes      int64
-	VulExit    string
-	FixExit    string
-	Calls      int64
-	Attempts   int64
-	In, Out    int64
-	Spend      store.USD
-	Wall       time.Duration
-	Model      string
-	PriceKnown bool
-}
+// Fact is one fact row: the key the harness wrote and the value it wrote,
+// verbatim.
+type Fact struct{ Key, Value string }
 
-// factKeys are the Fact() keys glue table reads. The harness writes them; glue
-// does not compute them.
-const (
-	// DEBT: these six keys are CyberGym's vocabulary, and tui reading them
-	// means `glue table` renders one benchmark's submission format rather than
-	// any harness's. They were removed from the public API (a harness now
-	// declares its own), but the table still hardcodes them.
-	//
-	// The fix when a second benchmark appears: the table takes its column spec
-	// from the caller instead of a const block. Not done now because one
-	// benchmark cannot tell you which parts generalise, and guessing produces
-	// exactly the config schema this project exists to avoid.
-	FactPoCHash = "poc.sha256"
-	FactPoCLen  = "poc.bytes"
-	FactVulExit = "cybergym.vul_exit"
-	FactFixExit = "cybergym.fix_exit"
-	FactLevel   = "cybergym.level"
-	FactTask    = "cybergym.task"
-)
-
+// factScan reads every fact in the sweep in WRITE order. id is the rowid
+// alias, which is commit order — the only order the ledger actually has.
 const factScan = `
 SELECT span, outcome, CAST(meta AS TEXT)
   FROM events
- WHERE sweep = ? AND kind = 'fact'`
+ WHERE sweep = ? AND kind = 'fact'
+ ORDER BY id`
 
-// Table builds the submission rows: one per task span, i.e. per span that
-// carries a cybergym.task fact.
-func Table(db *sql.DB, sweep string, all []*Node) ([]Row, error) {
-	facts := map[string]map[string]string{}
+// Facts returns every fact row in the sweep, grouped by span, in write order.
+//
+// Duplicate keys are KEPT. That is the whole difference from what used to be
+// here: a stage that streams findings as it makes them writes N rows under one
+// key, all N are on disk, and a reader that folded them into a map showed the
+// last one. The ledger was never lossy; the reader was.
+func Facts(db *sql.DB, sweep string) (map[string][]Fact, error) {
 	rows, err := db.Query(factScan, sweep)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	out := map[string][]Fact{}
 	for rows.Next() {
-		var span, key, val string
-		if err := rows.Scan(&span, &key, &val); err != nil {
+		var span string
+		var f Fact
+		if err := rows.Scan(&span, &f.Key, &f.Value); err != nil {
 			return nil, err
 		}
-		if facts[span] == nil {
-			facts[span] = map[string]string{}
-		}
-		facts[span][key] = val
+		out[span] = append(out[span], f)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	var out []Row
-	for _, n := range all {
-		f := facts[n.Span]
-		if f[FactTask] == "" {
-			continue
-		}
-		end := n.Closed
-		if end.IsZero() {
-			end = time.Now()
-		}
-		b, _ := strconv.ParseInt(f[FactPoCLen], 10, 64)
-		out = append(out, Row{
-			Task: f[FactTask], Level: or(f[FactLevel], "1"),
-			Class: n.Class, Outcome: n.Outcome,
-			PoC: f[FactPoCHash], Bytes: b,
-			// Empty, not "—": the dash is a rendering choice and belongs in
-			// TableLines. A CSV that needs a typographic character stripped
-			// out of it is a CSV that needs hand-editing.
-			VulExit: f[FactVulExit], FixExit: f[FactFixExit],
-			Calls: n.Calls, Attempts: n.Attempts, In: n.In, Out: n.Out,
-			Spend: n.Spend, Wall: end.Sub(n.Opened),
-			Model: n.Model, PriceKnown: n.PriceKnown,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Task < out[j].Task })
-	return out, nil
-}
-
-// TableLines renders the human table. --csv renders TableCSV instead; the
-// numbers are identical, so the CSV the submission needs is never a re-typing
-// of what you read on screen.
-func TableLines(sweep string, rows []Row) []string {
-	var out []string
-	var t Row
-	ok, unpriced := 0, 0
-	for _, r := range rows {
-		t.Calls += r.Calls
-		t.Attempts += r.Attempts
-		t.In += r.In
-		t.Out += r.Out
-		t.Spend += r.Spend
-		if r.Class == store.OK {
-			ok++
-		}
-		if !r.PriceKnown {
-			unpriced++
-		}
-	}
-	level := "1"
-	if len(rows) > 0 {
-		level = rows[0].Level
-	}
-	out = append(out, fmt.Sprintf("CYBERGYM level %s   sweep %s   %d tasks   %d reproduced   %.1f%%",
-		level, sweep, len(rows), ok, pctN(ok, len(rows))))
-	out = append(out, "")
-	const hdr = "%-19s %-9s %-13s %7s %5s %5s %7s %6s %9s %9s %9s %7s  %-12s %s"
-	out = append(out, fmt.Sprintf(hdr, "TASK", "CLASS", "POC", "BYTES", "VUL", "FIX", "CALLS", "ATT", "IN", "OUT", "SPEND", "WALL", "MODEL", "NOTE"))
-	for _, r := range rows {
-		poc := "—"
-		if r.PoC != "" {
-			poc = clip(r.PoC, 12)
-		}
-		note := r.Outcome
-		if !r.PriceKnown {
-			note = strings.TrimSpace(note + " [ceiling-priced]")
-		}
-		out = append(out, strings.TrimRight(fmt.Sprintf(hdr,
-			r.Task, strings.ToLower(r.Class.String()), poc, comma(r.Bytes),
-			or(r.VulExit, "—"), or(r.FixExit, "—"),
-			comma(r.Calls), comma(r.Attempts), hnum(r.In), hnum(r.Out),
-			"$"+money(r.Spend), hms(r.Wall), shortModel(r.Model), note), " "))
-	}
-	out = append(out, strings.TrimRight(fmt.Sprintf(hdr, "", "", "", "", "", "",
-		strings.Repeat("─", 7), strings.Repeat("─", 6),
-		strings.Repeat("─", 9), strings.Repeat("─", 9), strings.Repeat("─", 9), "", "", ""), " "))
-	out = append(out, strings.TrimRight(fmt.Sprintf(hdr, fmt.Sprintf("%d tasks", len(rows)), "", "", "", "", "",
-		comma(t.Calls), comma(t.Attempts), hnum(t.In), hnum(t.Out), "$"+money(t.Spend), "", "", ""), " "))
-	out = append(out, "")
-	line := fmt.Sprintf("reproduced %d/%d  %.1f%%   spend $%s   $%s/task",
-		ok, len(rows), pctN(ok, len(rows)), money(t.Spend), money(t.Spend/store.USD(max(1, len(rows)))))
-	if unpriced > 0 {
-		line += fmt.Sprintf("   %s priced at the map ceiling — reconcile before publishing", plural(unpriced, "row"))
-	}
-	out = append(out, line)
-	return out
-}
-
-// TableCSV writes the submission CSV. Same numbers, no box drawing, exit codes
-// raw.
-func TableCSV(w io.Writer, rows []Row) error {
-	if _, err := io.WriteString(w, "task,level,class,outcome,poc_sha256,poc_bytes,vul_exit,fix_exit,calls,attempts,in_tok,out_tok,usd,wall_s,model,price_known\n"); err != nil {
-		return err
-	}
-	for _, r := range rows {
-		if _, err := fmt.Fprintf(w, "%s,%s,%s,%q,%s,%d,%s,%s,%d,%d,%d,%d,%.6f,%.0f,%s,%d\n",
-			r.Task, r.Level, strings.ToLower(r.Class.String()), r.Outcome,
-			r.PoC, r.Bytes, r.VulExit, r.FixExit,
-			r.Calls, r.Attempts, r.In, r.Out, float64(r.Spend), r.Wall.Seconds(),
-			r.Model, boolInt(r.PriceKnown)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------- helpers
@@ -756,11 +619,4 @@ func comma(n int64) string {
 // say nothing.
 func shortModel(m string) string {
 	return clip(strings.TrimPrefix(m, "claude-"), 12)
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }

@@ -1,5 +1,12 @@
 // Command glue reads a sweep's ledger from outside the sweep.
 //
+// It is `glue top` and nothing else. There used to be a `glue table` that
+// rendered a submission file; it rendered ONE benchmark's submission file, out
+// of six hardcoded fact keys, which made the monitoring binary an authority on
+// what a harness is doing. Reports are the harness's job — it has Outcomes()
+// and it knows what its own facts mean. This binary shows spend and liveness,
+// which are true of every harness.
+//
 // It never writes. It opens the same SQLite file the supervisor is writing,
 // read-only, which is safe and lock-free because the ledger is WAL and
 // append-only: a reader never blocks the writer and the writer never blocks a
@@ -29,9 +36,8 @@ func main() {
 	fs := flag.NewFlagSet("glue", flag.ExitOnError)
 	dbPath := fs.String("db", "glue.db", "ledger path")
 	sweep := fs.String("sweep", "", "sweep id")
-	csv := fs.Bool("csv", false, "table: emit CSV instead of the human table")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: glue top|table [flags]")
+		fmt.Fprintln(os.Stderr, "usage: glue top [flags]")
 		fs.PrintDefaults()
 	}
 	if len(os.Args) < 2 {
@@ -60,24 +66,6 @@ func main() {
 		base := tui.Frame{Sweep: *sweep, Started: time.Now()}
 		if err := tui.RunTop(ctx, db, nil, tui.NewWatch(), base, nil, os.Stdout); err != nil {
 			log.Fatal(err)
-		}
-	case "table":
-		nodes, err := tui.Load(db, *sweep, nil)
-		if err != nil {
-			log.Fatal(err)
-		}
-		rows, err := tui.Table(db, *sweep, nodes)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if *csv {
-			if err := tui.TableCSV(os.Stdout, rows); err != nil {
-				log.Fatal(err)
-			}
-			return
-		}
-		for _, l := range tui.TableLines(*sweep, rows) {
-			fmt.Println(l)
 		}
 	default:
 		fs.Usage()

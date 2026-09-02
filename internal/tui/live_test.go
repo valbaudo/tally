@@ -177,33 +177,6 @@ func TestFrameLinesAreFlush(t *testing.T) {
 	}
 }
 
-func TestTableCSVIsMachineReadable(t *testing.T) {
-	var b strings.Builder
-	if err := TableCSV(&b, demoRows()); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
-	if len(lines) != len(demoRows())+1 {
-		t.Fatalf("want header + %d rows, got %d lines", len(demoRows()), len(lines))
-	}
-	want := 16
-	for i, l := range lines {
-		// The outcome column is quoted, so count fields outside quotes.
-		n, inQ := 1, false
-		for _, c := range l {
-			switch {
-			case c == '"':
-				inQ = !inQ
-			case c == ',' && !inQ:
-				n++
-			}
-		}
-		if n != want {
-			t.Fatalf("line %d has %d fields, want %d:\n%s", i, n, want, l)
-		}
-	}
-}
-
 // Printed, not asserted: `go test -run Render -v` is how the layout gets looked
 // at. A golden file would freeze columns that are still being chosen.
 func TestRenderDemo(t *testing.T) {
@@ -211,6 +184,37 @@ func TestRenderDemo(t *testing.T) {
 		t.Skip("set -v or GLUE_DEMO=1 to print the frames")
 	}
 	fmt.Println(strings.Join(demoFrame().Lines(120), "\n"))
-	fmt.Println()
-	fmt.Println(strings.Join(TableLines("7f3a91c2", demoRows()), "\n"))
+}
+
+// Verdicts are counted on leaves, not on roots. Under repo -> stage -> hunters
+// the old reader showed 0/0/0/0 until an entire repo closed, so fifty failed
+// hunters were invisible for hours. And an Unknown span — a reaped one —
+// incremented Tasks without landing in any bucket, so the counters silently
+// stopped summing.
+func TestSnapshotCountsLeavesAndHasABucketForUnknown(t *testing.T) {
+	closed := demoNow.Add(-time.Minute)
+	repo := &Node{Span: "repo", Closed: closed, Class: store.OK, Spend: 9, Calls: 6}
+	stage := &Node{Span: "hunt", Parent: "repo", Closed: closed, Class: store.OK}
+	kids := []*Node{
+		{Span: "h1", Parent: "hunt", Closed: closed, Class: store.OK},
+		{Span: "h2", Parent: "hunt", Closed: closed, Class: store.Failed},
+		{Span: "h3", Parent: "hunt", Closed: closed, Class: store.Unknown},
+		{Span: "h4", Parent: "hunt"}, // still open: not counted at all
+	}
+	stage.kids = kids
+	repo.kids = []*Node{stage}
+	all := append([]*Node{repo, stage}, kids...)
+
+	f := Snapshot(Frame{}, all, NewWatch(), nil, demoNow)
+	if f.Tasks != 3 || f.OK != 1 || f.Failed != 1 || f.Unk != 1 {
+		t.Fatalf("leaves: tasks=%d ok=%d fail=%d unk=%d", f.Tasks, f.OK, f.Failed, f.Unk)
+	}
+	if f.OK+f.Rejected+f.Failed+f.Cancelled+f.Unk != f.Tasks {
+		t.Fatalf("counters do not sum to tasks: %+v", f)
+	}
+	// Money still rolls up from roots only, or the repo's spend is counted
+	// once per level of the tree.
+	if f.Spend != 9 || f.Calls != 6 {
+		t.Fatalf("rollup double-counted: spend=%v calls=%d", f.Spend, f.Calls)
+	}
 }

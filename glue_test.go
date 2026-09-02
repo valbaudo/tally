@@ -3,6 +3,7 @@ package glue_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,13 +34,13 @@ func upstreamOK(t *testing.T) *httptest.Server {
 }
 
 // open brings up a real supervisor: real SQLite, real listener, real proxy. No
-// Docker, because Config.Image is empty and a sweep that launches no containers
-// creates no container network.
+// Docker, because Config.Isolate is false and a sweep that launches no
+// containers creates no container network.
 func open(t *testing.T, id string, budget, salvage glue.USD, up string) *glue.Sweep {
 	t.Helper()
 	sw, err := glue.Open(glue.Config{
-		Sweep: id, DB: filepath.Join(t.TempDir(), "glue.db"), APIKey: "sk-real",
-		Budget: budget, Salvage: salvage, Upstream: up,
+		Sweep: id, DB: filepath.Join(t.TempDir(), "glue.db"), Keys: map[string]string{"anthropic": "sk-real"},
+		Budget: budget, Salvage: salvage, Upstream: map[string]string{"anthropic": up},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -236,23 +237,55 @@ func TestSalvageIsHeldThenClaimed(t *testing.T) {
 	}
 }
 
-// Facts are stored verbatim so a reader can parse them, and Report joins them
-// into the submission table without the harness ever holding a database handle.
-func TestFactsReachTheReport(t *testing.T) {
+// Outcomes is the harness's whole read: facts verbatim, in write order, with
+// duplicate keys kept, joined to the span's spend — and no database handle
+// anywhere in the harness.
+//
+// The duplicate-key half is the part that used to be broken. A stage that
+// streams N findings wrote N rows and the only reader folded them into a map,
+// so it showed the last one. Cloudflare's whole reason for streaming findings
+// is that a crash costs the task in flight and nothing else; a reader that
+// keeps one of forty gives that back.
+func TestOutcomesKeepEveryFactInWriteOrder(t *testing.T) {
 	sw := open(t, "s-report", 100, 0, upstreamOK(t).URL)
-	sp := sw.Span(nil, "arvo:10400", sw.Budget().Sub("arvo:10400", 5))
+	sp := sw.Span(nil, "hunt/uaf", sw.Budget().Sub("hunt/uaf", 5))
 	call(t, sp, req)
-	sp.Fact("cybergym.task", []byte("arvo:10400"))
+	for i := range 40 {
+		sp.Fact("finding", fmt.Appendf(nil, "f%02d", i))
+	}
 	sp.Fact("poc.bytes", []byte("412"))
 	sp.Close(glue.OK, "")
 
-	lines, err := sw.Report(io.Discard)
+	outs, err := sw.Outcomes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "arvo:10400") || !strings.Contains(joined, "412") {
-		t.Fatalf("report lost the facts:\n%s", joined)
+	var got *glue.Outcome
+	for i := range outs {
+		if outs[i].Span == sp.ID() {
+			got = &outs[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("the span that was just closed is not in Outcomes")
+	}
+	var findings []string
+	for _, f := range got.Facts {
+		if f.Key == "finding" {
+			findings = append(findings, f.Value)
+		}
+	}
+	if len(findings) != 40 {
+		t.Fatalf("kept %d of 40 findings", len(findings))
+	}
+	if findings[0] != "f00" || findings[39] != "f39" {
+		t.Fatalf("write order lost: %q .. %q", findings[0], findings[39])
+	}
+	if got.Name != "hunt/uaf" || got.Run != "hunt/uaf" || got.Class != glue.OK {
+		t.Fatalf("span identity lost: %+v", *got)
+	}
+	if got.Spend <= 0 || got.Calls != 1 {
+		t.Fatalf("spend did not join: %v over %d calls", got.Spend, got.Calls)
 	}
 	if err := sw.Err(); err != nil {
 		t.Fatalf("ledger error: %v", err)
@@ -263,7 +296,7 @@ func TestFactsReachTheReport(t *testing.T) {
 // The kernel refuses it; there is no lease to expire and no TTL to tune.
 func TestTwoSupervisorsOnOneSweepIsRefused(t *testing.T) {
 	dir := t.TempDir()
-	cfg := glue.Config{Sweep: "dup", DB: filepath.Join(dir, "glue.db"), APIKey: "k"}
+	cfg := glue.Config{Sweep: "dup", DB: filepath.Join(dir, "glue.db"), Keys: map[string]string{"anthropic": "k"}}
 	first, err := glue.Open(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +311,7 @@ func TestTwoSupervisorsOnOneSweepIsRefused(t *testing.T) {
 // The boot reap closes what a crash left open, as Unknown — not as a failure.
 func TestBootReapClosesAbandonedSpans(t *testing.T) {
 	dir := t.TempDir()
-	cfg := glue.Config{Sweep: "crash", DB: filepath.Join(dir, "glue.db"), APIKey: "k"}
+	cfg := glue.Config{Sweep: "crash", DB: filepath.Join(dir, "glue.db"), Keys: map[string]string{"anthropic": "k"}}
 	first, err := glue.Open(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -304,11 +337,15 @@ func TestBootReapClosesAbandonedSpans(t *testing.T) {
 	}
 }
 
-// A sweep that declares no image launches no containers, and says so rather
-// than half-working.
-func TestLaunchWithoutAnImageIsAnError(t *testing.T) {
+// A sweep that declares no container boundary launches nothing — neither an
+// agent nor a validator — and says so rather than half-working.
+func TestContainersWithoutIsolateAreAnError(t *testing.T) {
 	sw := open(t, "s-noimage", 1, 0, upstreamOK(t).URL)
-	if _, err := sw.Launch(sw.Span(nil, "w", nil), nil, "agent"); err == nil {
-		t.Fatal("want an error")
+	sp := sw.Span(nil, "w", nil)
+	if _, err := sw.Launch(sp, "img", nil, nil, "agent"); err == nil {
+		t.Fatal("Launch: want an error")
+	}
+	if _, _, err := sw.Sandbox(context.Background(), sp, "img", nil, "/poc"); err == nil {
+		t.Fatal("Sandbox: want an error")
 	}
 }

@@ -19,7 +19,7 @@ package tui
 //
 // The first one is why there is no threshold tuned to model latency. A span
 // with a request in flight is Live by construction, for as long as the call
-// runs, with no heartbeat sidecar in any of the 19 images.
+// runs, with no heartbeat sidecar in any agent image.
 
 import (
 	"context"

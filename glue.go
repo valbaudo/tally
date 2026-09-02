@@ -9,13 +9,13 @@
 // alive. Kill it and the sweep is over.
 //
 // Every agent runs in a container that has no credential, no database, and one
-// route out: the supervisor's listener. The container is handed
-// ANTHROPIC_BASE_URL=http://<listener>/s/<span id> and nothing else, so the
-// span id rides in the request path with zero cooperation from the SDK — every
-// Anthropic client appends /v1/messages to whatever base you give it. Spend is
-// therefore observed and refused in the one place it passes through, and an
-// agent cannot opt out of accounting because there is nowhere else to send a
-// request.
+// route out: the supervisor's listener. The container is handed a base URL of
+// http://<listener>/s/<span id>/<provider> and nothing else, so both the span
+// id and the vendor ride in the request path with zero cooperation from the
+// SDK — every client appends its own path (/v1/messages, /responses,
+// /chat/completions) to whatever base you give it. Spend is therefore observed
+// and refused in the one place it passes through, and an agent cannot opt out
+// of accounting because there is nowhere else to send a request.
 //
 // # The package layout, and what it refuses to compile
 //
@@ -23,7 +23,7 @@
 //	internal/store/     the SQLite handle, the schema, every statement.
 //	internal/proxy/     the listener, the SSE tap, pricing, call_id inference.
 //	internal/oci/       the Docker network, container launch, the boot reap.
-//	internal/tui/       glue top and glue table. Read-only.
+//	internal/tui/       glue top. Read-only.
 //	cmd/glue/           the CLI.
 //
 // Go's internal rule is not a convention here, it is the enforcement. A package
@@ -49,20 +49,28 @@
 // # Shape of a harness
 //
 //	sw, err := glue.Open(glue.Config{
-//		Sweep: "nsfocus-l1", DB: "glue.db", APIKey: key,
-//		Image: "cybergym/agent:latest", Budget: 2000, Salvage: 400,
+//		Sweep: "hunt-7", DB: "glue.db", Isolate: true,
+//		Keys:  map[string]string{"anthropic": k1, "openai-responses": k2},
+//		Budget: 2000, Salvage: 400,
 //	})
 //	defer sw.Close()
 //	go sw.Serve(ctx)
 //
-//	for _, task := range tasks {
-//		pool := sw.Budget().Sub(task.ID, 12)
-//		span := sw.Span(nil, task.ID, pool)
-//		sw.Launch(span, []string{task.Dir + ":/work"}, "agent", "--task", "/work")
-//		// ... wait for the container, judge it ...
-//		span.Fact("cybergym.task", []byte(task.ID))
+//	for _, unit := range work {
+//		pool := sw.Budget().Sub(unit.ID, 12)
+//		span := sw.Span(nil, unit.ID, pool)
+//		id, _ := sw.Launch(span, unit.Image, unit.Env, []string{unit.Dir + ":/work"},
+//			"agent", "--task", "/work")
+//		sw.Wait(ctx, id)
+//		// ... judge it, with a juror span narrowed to a different vendor ...
+//		jury := sw.Span(span, unit.ID+"/jury", pool).Only("openai-responses")
+//		span.Fact("verdict", v)
+//		jury.Close(glue.OK, "")
 //		span.Close(glue.OK, "")
 //	}
+//
+// The verdict, the retry, the merge and the order are yours. glue holds four
+// facts and refuses the rest: see the list on Ledger.
 package glue
 
 import (
@@ -136,9 +144,10 @@ type USD = store.USD
 // history of a sweep is reconstructible after the fact rather than being
 // overwritten by its own summary.
 type Ledger struct {
-	db   *store.DB
-	base string // http://host:port — the listener a container is pointed at
-	root *Pool
+	db    *store.DB
+	base  string   // http://host:port — the listener a container is pointed at
+	provs []string // every provider this sweep holds a key for
+	root  *Pool
 
 	mu    sync.RWMutex
 	spans map[string]*Span
@@ -203,6 +212,7 @@ type Span struct {
 	parent string
 	run    string
 	pool   *Pool
+	provs  []string
 	closed sync.Once
 }
 
@@ -215,8 +225,9 @@ func (s *Span) ID() string { return s.id }
 // parent may be nil for a top-level span. pool may be nil, in which case the
 // span inherits its parent's pool, or the sweep's root pool if there is no
 // parent. A top-level span's name also becomes its run id, which every
-// descendant inherits — "run" is the outermost span in a tree, which for a
-// CyberGym sweep is exactly one task.
+// descendant inherits: "run" is the outermost span in a tree, so naming the
+// root after the unit of work — a task, a repo, a target — is how a whole
+// subtree gets one reporting key that is not a bearer capability.
 //
 // The id comes from crypto/rand, not from the rowid, a counter, or a hash of
 // the name. It is handed to exactly one container in a URL, and the proxy
@@ -229,7 +240,7 @@ func (s *Span) ID() string { return s.id }
 // ever derived from the rowid: rowids are commit order, and commit order is not
 // causal order the moment two workers are running.
 func (l *Ledger) Span(parent *Span, name string, pool *Pool) *Span {
-	s := &Span{l: l, id: rand.Text(), run: name, pool: pool}
+	s := &Span{l: l, id: rand.Text(), run: name, pool: pool, provs: l.provs}
 	if parent != nil {
 		s.parent, s.run = parent.id, parent.run
 		if s.pool == nil {
@@ -251,20 +262,42 @@ func (l *Ledger) Span(parent *Span, name string, pool *Pool) *Span {
 	return s
 }
 
-// Env is the entire configuration a container receives.
+// Env is the configuration glue itself puts in a container, and it is one
+// variable: the Anthropic base URL, because that is the one an agent reads from
+// the environment by convention. Codex and droid take a base URL in a config
+// file instead, which the harness writes and mounts using BaseURL — glue does
+// not know what agent is in the image.
 //
-// It is one variable. There is no config file to mount, no token to inject and
-// no sidecar to reach: the SDK inside the container appends /v1/messages to
-// whatever base URL it is given, so putting the span id in the path means the
-// capability survives into every request the agent makes without the agent
-// knowing it exists or being able to leave it out.
+// Launch appends this AFTER whatever the harness passes, so a container cannot
+// be pointed anywhere else by an env var the harness sets, deliberately or not.
 //
-// Note what is NOT here: ANTHROPIC_API_KEY. The real credential lives in the
-// supervisor's memory and is attached to the outbound request by the proxy. A
-// container that is compromised has nothing to exfiltrate and no second route
-// to exfiltrate it over.
+// Note what is NOT here: any credential. The real key lives in the supervisor's
+// memory and is attached to the outbound request by the proxy. A container that
+// is compromised has nothing to exfiltrate and no second route to exfiltrate it
+// over.
 func (s *Span) Env() []string {
-	return []string{fmt.Sprintf("ANTHROPIC_BASE_URL=%s/s/%s", s.l.base, s.id)}
+	return []string{"ANTHROPIC_BASE_URL=" + s.BaseURL("anthropic")}
+}
+
+// BaseURL is the span's endpoint for one provider. It is the string that goes
+// into ANTHROPIC_BASE_URL for Claude Code, base_url under [model_providers.X]
+// for Codex, and baseUrl in a droid customModels entry — three different
+// spellings of the same fact, which is why this returns a URL and not a
+// config file. Building the file is the harness's job; glue does not know what
+// agent is in the image.
+func (s *Span) BaseURL(provider string) string {
+	return fmt.Sprintf("%s/s/%s/%s", s.l.base, s.id, provider)
+}
+
+// Only narrows the set of providers this span may reach to the named ones. The
+// default is every provider the sweep holds a key for, because the sweep's
+// budget binds identically whichever upstream answers — the pool is the same
+// pool. Narrow when the answer to "which vendor got this money" has to be a
+// guarantee rather than a report: an independent jury span that must not be
+// able to call the driver's own model is the case that matters.
+func (s *Span) Only(providers ...string) *Span {
+	s.provs = providers
+	return s
 }
 
 // Fact records something the harness knows and glue does not: the sha256 of a
@@ -325,7 +358,8 @@ func (l *Ledger) target(id string) (proxy.Target, bool) {
 	if !ok {
 		return proxy.Target{}, false
 	}
-	return proxy.Target{ID: s.id, Parent: s.parent, Run: s.run, Pool: s.pool.name}, true
+	return proxy.Target{ID: s.id, Parent: s.parent, Run: s.run,
+		Pool: s.pool.name, Providers: s.provs}, true
 }
 
 // ------------------------------------------------------------------ pool

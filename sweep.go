@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,27 +28,40 @@ type Config struct {
 	// never mounted into a container.
 	DB string
 
-	// APIKey is the real Anthropic credential. It stays in this process's
-	// memory and is attached to outbound requests by the proxy; no container
-	// ever sees it.
-	APIKey string
-
-	// Image is the agent container image.
+	// Keys maps provider name -> real credential. Every key stays in this
+	// process's memory and is attached to outbound requests by the proxy; no
+	// container ever sees any of them.
 	//
-	// Leaving it empty declares a sweep that launches no containers, and no
-	// container network is then created: there is nothing to isolate. Such a
-	// sweep still meters, prices and ledgers every call, because a predicate a
-	// harness runs in its own process goes through the same proxy an agent
-	// does. It is also the only shape that works on macOS, where the bridge
-	// gateway lives inside a VM the host cannot bind. Launch returns an error.
-	Image string
+	// The set of names present here IS the set of upstreams this sweep can
+	// reach — a provider with no key is not registered and its path segment
+	// 404s. Known names: "anthropic", "openai", "openai-responses", "xai",
+	// "glm". Heterogeneity is a config fact, which is why it is one map and not
+	// five fields.
+	Keys map[string]string
 
-	// Upstream overrides the API endpoint the proxy forwards to. Empty means
-	// https://api.anthropic.com. It exists because "which endpoint" is a
-	// deployment fact — a regional gateway, a replay server, a staging
-	// account — and a deployment fact belongs in config, not in an env var the
-	// process reads behind its own back.
-	Upstream string
+	// Isolate declares that this sweep runs containers: the private network is
+	// created at Open, destroyed at Close, and Launch and Sandbox work.
+	//
+	// False declares a sweep that launches nothing, and then no network is
+	// created because there is nothing to isolate. Such a sweep still meters,
+	// prices and ledgers every call, because a predicate the harness runs in
+	// its own process goes through the same proxy an agent does. It is also the
+	// only shape that works on macOS, where the bridge gateway lives inside a
+	// VM the host cannot bind. Launch and Sandbox return an error.
+	//
+	// The image is NOT here. It used to be — one image per sweep — and that was
+	// the assumption that a sweep runs one kind of agent. A jury of three
+	// different CLIs is three images, and a validator that runs the target's
+	// own vulnerable build is a fourth that varies per task. The image is an
+	// argument to the call that starts a container, where it belongs.
+	Isolate bool
+
+	// Upstream overrides the endpoint one provider forwards to, keyed by
+	// provider name. Absent means the vendor's own host. It exists because
+	// "which endpoint" is a deployment fact — a regional gateway, a replay
+	// server, a staging account — and a deployment fact belongs in config, not
+	// in an env var the process reads behind its own back.
+	Upstream map[string]string
 
 	// Budget is the sweep-wide cap. Salvage is the part of it held back until
 	// Budget().Claim(); the effective cap until then is Budget - Salvage.
@@ -72,7 +84,7 @@ type Config struct {
 }
 
 func (c *Config) defaults() {
-	if c.Image == "" {
+	if !c.Isolate {
 		// No containers, so no bridge, so nothing to bind but loopback.
 		if c.GW == "" {
 			c.GW = "127.0.0.1"
@@ -89,6 +101,10 @@ func (c *Config) defaults() {
 		c.Port = 8080
 	}
 }
+
+// errIsolate is what every container call returns on a sweep that declared no
+// container boundary. One sentence, one variable, three call sites.
+var errIsolate = errors.New("glue: Config.Isolate is false; this sweep launches no containers")
 
 // Sweep is the supervisor: one ordinary Go process that owns the ledger, the
 // listener and every container.
@@ -138,8 +154,8 @@ type Sweep struct {
 // container that has already started.
 func Open(cfg Config) (*Sweep, error) {
 	cfg.defaults()
-	if cfg.Sweep == "" || cfg.DB == "" || cfg.APIKey == "" {
-		return nil, errors.New("glue: Config needs Sweep, DB and APIKey")
+	if cfg.Sweep == "" || cfg.DB == "" || len(cfg.Keys) == 0 {
+		return nil, errors.New("glue: Config needs Sweep, DB and at least one entry in Keys")
 	}
 
 	db, err := store.Open(cfg.DB, cfg.Sweep)
@@ -168,7 +184,7 @@ func Open(cfg Config) (*Sweep, error) {
 		cfg:    cfg,
 		net:    &oci.Net{Sweep: cfg.Sweep, Subnet: cfg.Subnet, GW: cfg.GW, Port: cfg.Port},
 	}
-	if cfg.Image != "" {
+	if cfg.Isolate {
 		// Statement two, plus the network this sweep's containers live on.
 		if err := s.net.Up(); err != nil {
 			db.Close()
@@ -186,14 +202,30 @@ func Open(cfg Config) (*Sweep, error) {
 	// The proxy resolves span ids through l.target and writes through store. It
 	// cannot name Span, Pool or Ledger — the import runs the other way — which
 	// is the same reason a harness cannot reach the metering path.
-	s.pr = proxy.New(db, cfg.APIKey, l.target)
-	if cfg.Upstream != "" {
-		u, err := url.Parse(cfg.Upstream)
+	s.pr = proxy.New(db, cfg.Keys, l.target)
+	for name := range s.pr.Providers {
+		l.provs = append(l.provs, name)
+	}
+	if len(s.pr.Providers) == 0 {
+		db.Close()
+		return nil, errors.New("glue: Config.Keys named no provider this build knows")
+	}
+	// Upstream overrides one provider's host, which is how the proxy tests
+	// point a real provider at an httptest server. Keyed by provider name so a
+	// test can redirect exactly one leg of a heterogeneous sweep.
+	for name, raw := range cfg.Upstream {
+		prov, ok := s.pr.Providers[name]
+		if !ok {
+			db.Close()
+			return nil, fmt.Errorf("glue: Upstream names unconfigured provider %q", name)
+		}
+		u, err := url.Parse(raw)
 		if err != nil {
 			db.Close()
-			return nil, fmt.Errorf("glue: Upstream: %w", err)
+			return nil, fmt.Errorf("glue: Upstream[%s]: %w", name, err)
 		}
-		s.pr.Upstream = u
+		prov.Upstream = u
+		s.pr.Providers[name] = prov
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/s/", s.pr)
@@ -252,28 +284,71 @@ func (s *Sweep) Budget() *Pool { return s.root }
 
 // Launch starts one agent container for one span and returns the container id.
 //
-// mounts are host:container[:ro] volume specs — a list of volume specs, not a
-// list of docker flags, because a caller that could pass arbitrary argv could
-// pass --network host and delete the boundary this package exists to enforce.
-// There is no argument here that can reach the ledger file or the docker
-// socket.
+// image is per call, not per sweep: a heterogeneous jury is three CLIs in three
+// images, and picking which one answers this span is a harness decision.
 //
-// The container gets the span's Env and nothing else. It has no default route,
-// so a hardcoded api.anthropic.com fails with ENETUNREACH before a packet is
-// built — at the routing layer, instantly, rather than as a firewall timeout
-// that would change how the agent behaves by hanging it. It cannot resolve any
-// name outside the sweep. It cannot reach its siblings. NET_ADMIN and NET_RAW
-// are dropped, so root inside it cannot add the route back.
-func (s *Sweep) Launch(span *Span, mounts []string, cmd ...string) (string, error) {
-	if s.cfg.Image == "" {
-		return "", errors.New("glue: Config.Image is empty; this sweep launches no containers")
+// env and mounts are the only other knobs, and both are deliberately typed as
+// what they are rather than as docker flags: a caller that could pass arbitrary
+// argv could pass --network host and delete the boundary this package exists to
+// enforce. There is no argument here that can reach the ledger file or the
+// docker socket.
+//
+// The span's own variable is appended LAST, so a caller that passes
+// ANTHROPIC_BASE_URL of its own does not win — docker takes last-wins on a
+// repeated -e. That is one ordering decision instead of a rejected-key branch,
+// and it is why metering cannot be opted out of by an env var.
+//
+// The container has no default route, so a hardcoded api.anthropic.com fails
+// with ENETUNREACH before a packet is built — at the routing layer, instantly,
+// rather than as a firewall timeout that would change how the agent behaves by
+// hanging it. It cannot resolve any name outside the sweep. It cannot reach its
+// siblings. NET_ADMIN and NET_RAW are dropped, so root inside it cannot add the
+// route back.
+func (s *Sweep) Launch(span *Span, image string, env, mounts []string, cmd ...string) (string, error) {
+	if !s.cfg.Isolate {
+		return "", errIsolate
 	}
-	id, err := s.net.Launch(span.id, s.cfg.Image, mounts, cmd...)
+	id, err := s.net.Launch(span.id, image, append(env, span.Env()...), mounts, cmd...)
 	if err != nil {
 		return "", err
 	}
 	span.Fact("container", []byte(id))
 	return id, nil
+}
+
+// Sandbox runs one throwaway container with NO network at all, blocks until it
+// exits, and returns its combined output and exit code. A non-zero exit is a
+// result, not an error.
+//
+// This is the container for code you do not trust and do not meter: a candidate
+// proof-of-concept, a generated test run against an untouched checkout, a
+// verifier. It gets no route to anything, so it has no proxy to reach, no
+// credential to find and nothing to spend — and it needs no span capability,
+// only a span to hang its label on.
+//
+// It is here rather than in the harness for one reason: glue publishes an
+// isolation spec, and a container the harness starts with its own exec.Command
+// carries no glue.sweep label, so the boot reap never collects it. The promise
+// "every container in this sweep is reaped" is only true if there is a
+// supported way to start the ones that are not agents. mounts are volume specs
+// for the same reason they are in Launch.
+func (s *Sweep) Sandbox(ctx context.Context, span *Span, image string, mounts []string, cmd ...string) (string, int, error) {
+	if !s.cfg.Isolate {
+		return "", 0, errIsolate
+	}
+	return s.net.Sandbox(ctx, span.id, image, mounts, cmd)
+}
+
+// Wait blocks until a container started by Launch exits and returns its exit
+// code. On cancellation it KILLS the container and returns ctx.Err().
+//
+// That ordering is the whole reason this is here rather than four lines of
+// exec.Command in every harness: the container is the lease on the span, so a
+// cancelled caller that returns while the container keeps running keeps
+// spending under a span nobody is watching. The version a harness writes by
+// hand returns early; this one does not.
+func (s *Sweep) Wait(ctx context.Context, id string) (int, error) {
+	return s.net.Wait(ctx, id)
 }
 
 // Kill stops one agent's container. It does not close the span: the harness
@@ -299,7 +374,7 @@ func (s *Sweep) InFlight(span *Span) int { return s.pr.InFlight(span.id) }
 func (s *Sweep) Close() error {
 	s.srv.Close()
 	var err error
-	if s.cfg.Image != "" {
+	if s.cfg.Isolate {
 		err = s.net.Reap()
 	}
 	if dberr := s.db.Close(); err == nil {
@@ -308,16 +383,63 @@ func (s *Sweep) Close() error {
 	return err
 }
 
-// Report renders the sweep's submission table: the human lines are returned,
-// and the machine-readable CSV is written to csv if it is non-nil. The numbers
-// are the same numbers, so the file a leaderboard reads is never a re-typing of
-// what a human read on screen.
+// ---------------------------------------------------------------- reading
+
+// Fact is one fact row as the harness wrote it.
+type Fact struct{ Key, Value string }
+
+// Outcome is one span as the ledger recorded it.
 //
-// This is a method rather than a function taking a *sql.DB because a harness
-// does not get a *sql.DB — see the package doc. The alternative was exporting
-// the handle "just for reporting", which is exactly the crack every
-// unfalsifiable promise gets through.
-func (s *Sweep) Report(csv io.Writer) ([]string, error) {
+// The numbers are subtree rollups: a parent's Spend includes every descendant,
+// which is what makes a stage's cost the cost of the stage rather than the cost
+// of its own bookkeeping calls.
+type Outcome struct {
+	Span, Parent, Run, Name string
+	Class                   Class
+	Detail                  string // the free text written on span_close
+	Opened, Closed          time.Time
+	Model                   string
+	Spend                   USD
+	Calls, Attempts         int64
+	In, Out                 int64
+	PriceKnown              bool
+
+	// Facts are every fact written against this span, in write order, with
+	// duplicate keys kept. A stage that emits N findings appears here as N
+	// rows, not as the last one.
+	Facts []Fact
+}
+
+// Outcomes is the sweep's one read, and it is deliberately the only one.
+//
+// It exists because deleting Sweep.Report left a hole that a harness would
+// otherwise fill by opening Path() with its own *sql.DB and writing SQL against
+// a schema under internal/ — which pins that schema forever and is the exact
+// crack the internal/ layout exists to prevent. So: one method, returning
+// glue's own vocabulary, no query language, no filter arguments.
+//
+// What it is enough for, in the three harnesses this design was checked
+// against:
+//
+//   - a submission table (nsfocus builds CyberGym's CSV out of Facts plus the
+//     span's class, spend and wall clock, and glue never learns what a
+//     "poc.sha256" is);
+//   - a coverage query — which (repo, attack-class) cells have no span that
+//     closed OK — which is Glasswing's Gapfill input;
+//   - skipping work already done, by the same read: a stage that finds its own
+//     name already closed OK does not run again.
+//
+// What it is NOT is resume. glue has no way to reopen a closed span or to
+// adopt one from a previous process, and it should not get one: a span id is a
+// live bearer capability that Close revokes, and a durable identity handed back
+// out is that revocation undone. Deciding that (repo, stage) closed OK last
+// Tuesday means "do not run it again" is a policy over these rows, and policy
+// is the harness's job — it is a for loop in main.go, exactly like every other
+// control-flow decision glue refuses.
+//
+// It reads the whole sweep. At the v0 target that is two scans of a few hundred
+// thousand rows; it is a report, not a hot path.
+func (s *Sweep) Outcomes() ([]Outcome, error) {
 	s.mu.RLock()
 	caps := make(map[string]USD, len(s.caps))
 	for k, v := range s.caps {
@@ -329,15 +451,23 @@ func (s *Sweep) Report(csv io.Writer) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tui.Table(s.db.SQL(), s.cfg.Sweep, nodes)
+	facts, err := tui.Facts(s.db.SQL(), s.cfg.Sweep)
 	if err != nil {
 		return nil, err
 	}
-	if csv != nil {
-		if err := tui.TableCSV(csv, rows); err != nil {
-			return nil, err
+	out := make([]Outcome, 0, len(nodes))
+	for _, n := range nodes {
+		o := Outcome{
+			Span: n.Span, Parent: n.Parent, Run: n.Run, Name: n.Name,
+			Class: n.Class, Detail: n.Outcome,
+			Opened: n.Opened, Closed: n.Closed, Model: n.Model,
+			Spend: n.Spend, Calls: n.Calls, Attempts: n.Attempts,
+			In: n.In, Out: n.Out, PriceKnown: n.PriceKnown,
 		}
+		for _, f := range facts[n.Span] {
+			o.Facts = append(o.Facts, Fact{Key: f.Key, Value: f.Value})
+		}
+		out = append(out, o)
 	}
-	return tui.TableLines(s.cfg.Sweep, rows), nil
+	return out, nil
 }
-

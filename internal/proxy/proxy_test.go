@@ -91,8 +91,10 @@ func newFixture(t *testing.T, cap store.USD, upstream http.HandlerFunc) *fixture
 	}))
 	t.Cleanup(f.up.Close)
 
-	f.p = New(db, "sk-ant-REAL-KEY", f.lookup)
-	f.p.Upstream, _ = url.Parse(f.up.URL)
+	f.p = New(db, map[string]string{"anthropic": "sk-ant-REAL-KEY"}, f.lookup)
+	prov := f.p.Providers["anthropic"]
+	prov.Upstream, _ = url.Parse(f.up.URL)
+	f.p.Providers["anthropic"] = prov
 	mux := http.NewServeMux()
 	mux.Handle("/s/", f.p)
 	f.fe = httptest.NewServer(mux)
@@ -107,7 +109,8 @@ func (f *fixture) mint(name, pool string) Target {
 	f.t.Helper()
 	var b [16]byte
 	rand.Read(b[:])
-	tg := Target{ID: hex.EncodeToString(b[:]), Run: name, Pool: pool}
+	tg := Target{ID: hex.EncodeToString(b[:]), Run: name, Pool: pool,
+		Providers: []string{"anthropic"}}
 	if err := f.db.Append(store.Row{TS: time.Now(), Span: tg.ID, Run: tg.Run,
 		Kind: "span_open", Outcome: name}); err != nil {
 		f.t.Fatal(err)
@@ -133,7 +136,7 @@ func (f *fixture) spent(pool string) store.USD {
 	return sp
 }
 
-func (f *fixture) base() string { return f.fe.URL + "/s/" + f.span.ID }
+func (f *fixture) base() string { return f.fe.URL + "/s/" + f.span.ID + "/anthropic" }
 
 // rows returns every call callRow on the span, oldest first.
 func (f *fixture) rows() []callRow {
@@ -321,7 +324,7 @@ func TestClientDisconnectMidStreamStillWritesRow(t *testing.T) {
 		t.Errorf("in_tok = %d, want 25 from message_start", r.In)
 	}
 	// The reservation stands as the charge, and it is not zero.
-	reserved := reservation(wireRequest{Model: "claude-opus-5", MaxTokens: 1024}, len(streamReq))
+	reserved := reservation(f.p.Providers["anthropic"], wireRequest{Model: "claude-opus-5", MaxTokens: 1024}, len(streamReq))
 	if r.USD < reserved {
 		t.Fatalf("usd = %v, want >= the reservation %v: a killed run must not read as free", r.USD, reserved)
 	}
@@ -426,7 +429,7 @@ func TestSubPoolChargesParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	span := f.mint("w1", "child")
-	res := post(t, f.fe.URL+"/s/"+span.ID, streamReq)
+	res := post(t, f.fe.URL+"/s/"+span.ID+"/anthropic", streamReq)
 	res.Body.Close()
 	if res.StatusCode != 429 {
 		t.Fatalf("status = %d, want 429: the root cap must bind", res.StatusCode)
@@ -455,10 +458,10 @@ func TestUnknownModelIsChargedAtTheCeiling(t *testing.T) {
 }
 
 func TestDatedModelIdResolves(t *testing.T) {
-	if r, ok := rateFor("claude-opus-4-5-20251101"); !ok || r.Out != 25 {
+	if r, ok := rateFor("anthropic", "claude-opus-4-5-20251101"); !ok || r.Out != 25 {
 		t.Fatalf("dated id resolved to %+v known=%v, want the claude-opus-4-5 rate", r, ok)
 	}
-	if r, ok := rateFor("claude-opus-4-1-20250805"); !ok || r.Out != 75 {
+	if r, ok := rateFor("anthropic", "claude-opus-4-1-20250805"); !ok || r.Out != 75 {
 		t.Fatalf("longest-prefix match failed: %+v %v", r, ok)
 	}
 }
@@ -466,7 +469,7 @@ func TestDatedModelIdResolves(t *testing.T) {
 // An id the supervisor never minted is not a capability.
 func TestUnknownSpanIsRefusedAndWritesNothing(t *testing.T) {
 	f := newFixture(t, 100, sseHandler(sseBody))
-	res := post(t, f.fe.URL+"/s/deadbeef", streamReq)
+	res := post(t, f.fe.URL+"/s/deadbeef/anthropic", streamReq)
 	res.Body.Close()
 	if res.StatusCode != 404 {
 		t.Fatalf("status = %d, want 404", res.StatusCode)
@@ -530,10 +533,10 @@ func TestDifferentBodyIsANewCall(t *testing.T) {
 func TestSSEReassemblyAcrossChunkBoundaries(t *testing.T) {
 	for split := 1; split < len(sseBody); split += 7 {
 		var u Usage
-		tp := &tap{sse: true}
+		tp := &tap{sse: true, parse: &anthropicParser{}}
 		tp.observe([]byte(sseBody[:split]))
 		tp.observe([]byte(sseBody[split:]))
-		u = tp.u
+		u = tp.parse.Usage()
 		if u.In != 25 || u.Out != 15 || u.CacheR != 1800 || u.CacheW != 248 || !u.Complete {
 			t.Fatalf("split at %d: %+v", split, u)
 		}
@@ -542,13 +545,13 @@ func TestSSEReassemblyAcrossChunkBoundaries(t *testing.T) {
 
 // message_delta repeats input and cache cumulatively. Summing double-counts.
 func TestCumulativeDeltaIsNotSummed(t *testing.T) {
-	tp := &tap{sse: true}
+	tp := &tap{sse: true, parse: &anthropicParser{}}
 	tp.observe([]byte(sseBody))
-	if tp.u.CacheR != 1800 {
-		t.Fatalf("cache_read = %d, want 1800 (3600 means message_delta was summed)", tp.u.CacheR)
+	if tp.parse.Usage().CacheR != 1800 {
+		t.Fatalf("cache_read = %d, want 1800 (3600 means message_delta was summed)", tp.parse.Usage().CacheR)
 	}
-	if tp.u.In != 25 {
-		t.Fatalf("input = %d, want 25 (50 means message_start and message_delta were summed)", tp.u.In)
+	if tp.parse.Usage().In != 25 {
+		t.Fatalf("input = %d, want 25 (50 means message_start and message_delta were summed)", tp.parse.Usage().In)
 	}
 }
 
