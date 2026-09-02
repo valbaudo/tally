@@ -7,53 +7,26 @@ on:
 permissions:
   contents: read
 
+# The repo is at v0-not-started: go.mod and docs, no packages. These steps are
+# vacuous today and that is deliberate — CI that asserts a guarantee no code
+# makes is how the old platform matrix ended up passing while both documented
+# guarantees silently did not hold on Windows.
+#
+# Restore, when v0 lands: the unsupported-platform refusal (the netns boundary
+# is Linux-native; Docker on macOS is a VM, so whether the boundary holds
+# identically on both is unsettled), and race coverage for the proxy's atomic
+# budget reserve, which is the one contended write in the design.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./...
+      - run: go build ./...
       - run: go test -race ./...
       - run: go vet ./...
-
-  # dawn supports macOS and Linux. Both are BUILT AND TESTED here rather than
-  # cross-compiled, because the two things the platform split used to hide — the
-  # run lock and process-group reaping — are runtime behaviour a compile cannot
-  # check. Everything else fails to build by design (see platform.go), so there is
-  # no matrix of targets to assert build tags against any more.
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: go test ./...
-      # The ordinary pass above owns the 50,000-case stack/resource proof.
-      # Re-running that subprocess suite under the race runtime exceeds the
-      # macOS runner's package timeout without adding race-specific coverage.
-      - run: go test -race ./... -skip '^TestStructuredControlFiniteExecutionSubprocess$'
-      - run: go vet ./...
-
-  unsupported-platforms-refuse:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: an unsupported platform must fail loudly, not build a degraded binary
-        run: |
-          set -eu
-          fail=0
-          for t in windows/amd64 freebsd/amd64 solaris/amd64 js/wasm; do
-            if GOOS="${t%/*}" GOARCH="${t#*/}" go build ./... 2>/dev/null; then
-              echo "FAIL $t: built, but dawn cannot honour its guarantees there"; fail=1
-            else
-              echo "ok   $t: refused"
-            fi
-          done
-          exit $fail
