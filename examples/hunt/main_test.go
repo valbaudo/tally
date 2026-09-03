@@ -491,3 +491,110 @@ func TestReport(t *testing.T) {
 		t.Error("the spend column did not read the ledger")
 	}
 }
+
+// ---------------------------------------------------------------- the prompts
+
+// A prompt is a string and dawn will never look at it, so the compiler will not
+// either: a verb that lost its argument ships as "%!s(MISSING)" inside a $200
+// sweep and nothing anywhere notices. That is the one way these three constants
+// break silently, and this is the check for it.
+func TestPromptsRenderEverySlot(t *testing.T) {
+	tax := taxon{
+		Class:    "authz-bypass",
+		Scope:    []string{"net/http/serve.go", "auth/token.go"},
+		Why:      "handler dispatch happens before the session lookup at net/http/serve.go:210",
+		Attacker: "an unauthenticated client holding a valid-looking cookie",
+		Sink:     "auth/token.go:88",
+	}
+	f := &Finding{Class: tax.Class, Title: "session is trusted before it is verified",
+		File: "auth/token.go", Lo: 80, Hi: 92,
+		Threat: "an unauthenticated client sets the cookie and reaches the admin route",
+		Detail: "net/http/serve.go:210 -> auth/token.go:88"}
+
+	for name, got := range map[string]string{
+		"recon":    fmt.Sprintf(reconPrompt, strings.Join(seed, ", ")),
+		"hunt":     huntPrompt(tax),
+		"disprove": disprovePrompt(f),
+	} {
+		if strings.Contains(got, "%!") {
+			t.Fatalf("%s prompt has an unfilled verb:\n%s", name, got)
+		}
+		if strings.Contains(got, "%s") || strings.Contains(got, "%d") {
+			t.Fatalf("%s prompt shipped a literal verb:\n%s", name, got)
+		}
+	}
+
+	// The five taxonomy fields ARE the domain payload; a hunt prompt that
+	// dropped one is a hunter re-deriving what recon already paid to learn.
+	hunt := huntPrompt(tax)
+	for _, want := range []string{tax.Class, tax.Why, tax.Attacker, tax.Sink,
+		"net/http/serve.go", "auth/token.go"} {
+		if !strings.Contains(hunt, want) {
+			t.Fatalf("hunt prompt lost %q:\n%s", want, hunt)
+		}
+	}
+	// A juror that cannot see the citation cannot run step 1, which is the
+	// cheapest and most decisive of the five.
+	if !strings.Contains(disprovePrompt(f), "auth/token.go:80-92") {
+		t.Fatalf("disprove prompt lost the citation:\n%s", disprovePrompt(f))
+	}
+
+	// The Fact is the version, so the same taxon must hash the same way or the
+	// join from a finding back to the prompt that produced it is noise.
+	if string(hash(huntPrompt(tax))) != string(hash(huntPrompt(tax))) {
+		t.Fatal("prompt rendering is not deterministic; prompt.sha256 means nothing")
+	}
+}
+
+// The recon prompt says every scope path must exist. This is where that stops
+// being a request: a hunter scoped to a hallucinated path burns a whole agent
+// run finding out.
+func TestGroundDropsWhatIsNotOnDisk(t *testing.T) {
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, "net"), 0o755)
+	os.WriteFile(filepath.Join(repo, "net/serve.go"), []byte("package net\n"), 0o644)
+
+	got := ground(repo, []taxon{
+		{Class: "injection", Scope: []string{"net/serve.go", "net/ghost.go"}},
+		{Class: "authz-bypass", Scope: []string{"nope/at/all.go"}},
+		{Class: "", Scope: []string{"net/serve.go"}},
+		{Class: "escape", Scope: []string{"../../etc/passwd"}},
+	})
+	if len(got) != 1 {
+		t.Fatalf("ground kept %d classes, want 1: %+v", len(got), got)
+	}
+	if got[0].Class != "injection" || !slices.Equal(got[0].Scope, []string{"net/serve.go"}) {
+		t.Fatalf("ground = %+v", got[0])
+	}
+}
+
+// TestMissingOutputIsFailedNotOK pins the coverage-loss bug: a hunter whose
+// agent exits 0 without writing findings.jsonl must close Failed, because
+// done() keys resumption on OK and an OK here retires the attack class for
+// every later run of the sweep.
+func TestMissingOutputIsFailedNotOK(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, _, err := readJSONL(filepath.Join(dir, "findings.jsonl")); err == nil {
+		t.Fatal("a missing file must be an error, not an empty result: " +
+			"silent zero and honest zero must stay distinguishable")
+	}
+
+	empty := filepath.Join(dir, "empty.jsonl")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, bad, err := readJSONL(empty)
+	if err != nil || len(got) != 0 || bad != 0 {
+		t.Fatalf("an agent that ran and found nothing is not an error: %v %d %v", got, bad, err)
+	}
+
+	mixed := filepath.Join(dir, "mixed.jsonl")
+	if err := os.WriteFile(mixed, []byte("{\"file\":\"a.go\"}\nnot json\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, bad, err = readJSONL(mixed)
+	if err != nil || len(got) != 1 || bad != 1 {
+		t.Fatalf("unparseable lines must be counted, not dropped: %d found, %d bad, %v", len(got), bad, err)
+	}
+}

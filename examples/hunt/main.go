@@ -127,6 +127,27 @@ var seed = []string{
 	"resource-exhaustion",
 }
 
+// taxon is one row of the taxonomy RECON writes and HUNT renders. It is the
+// artifact stage one actually produces: everything domain-specific in a
+// hunter's instructions arrives through these five fields, and huntPrompt is a
+// fmt.Sprintf over one of them.
+//
+// This is why the recon prompt below is long and the hunt prompt is a template.
+// A harness tunes the taxonomy, not the prose. Two taxonomy.json files diff
+// cleanly and a coverage query runs over them; two 400-word prompts do neither,
+// and MDASH's per-domain knowledge lives in plugins behind a stable interface
+// for exactly that reason. A one-line prompt looks like a missing string; it is
+// usually a missing data structure.
+//
+// TODO(you): the fields. dawn refuses payload schemas — see Finding.
+type taxon struct {
+	Class    string   `json:"class"`
+	Scope    []string `json:"scope"`    // repo-relative; the hunter reads these and no others
+	Why      string   `json:"why"`      // file:line in THIS code that makes the class live
+	Attacker string   `json:"attacker"` // who they are and what they control
+	Sink     string   `json:"sink"`     // file:line where exploitation lands
+}
+
 // Finding is the harness's payload schema. dawn refuses payload schemas: it
 // stores a key and verbatim bytes (glue.go:315) and has no opinion about the
 // shape, which is why this struct lives here and why the JSONL file below is
@@ -229,6 +250,13 @@ type harness struct {
 	// have to share a container image with the driver it is meant to be
 	// independent of.
 	imgDriver, imgCodex, imgDroid string
+
+	// architecture.md, as RECON wrote it. Every span gets its OWN /work
+	// (container(), below), so a hunter cannot see recon's scratch dir unless
+	// the harness carries the bytes across — and Cloudflare's validation
+	// rejection rate fell from 40% to 11% on "better recon context injection",
+	// which is this field and the four lines that write it.
+	arch []byte
 }
 
 func main() {
@@ -371,12 +399,12 @@ func main() {
 	// rightly — it is a for loop in main.go like every other control decision.
 	done := h.done()
 
-	classes, err := h.recon(ctx, root, pools.recon, done)
+	tax, err := h.recon(ctx, root, pools.recon, done)
 	if err != nil {
 		root.Close(glue.Failed, "recon: "+err.Error())
 		log.Fatal(err)
 	}
-	h.hunt(ctx, root, pools.hunt, classes, *workers, done)
+	h.hunt(ctx, root, pools.hunt, tax, *workers, done)
 	h.validate(ctx, root, pools.cheap, pools.heavy, *workers)
 	h.dedupe(ctx, root, pools.dedupe)
 	root.Close(glue.OK, fmt.Sprintf("%d findings", len(h.find.list())))
@@ -389,24 +417,144 @@ func main() {
 
 // ---------------------------------------------------------------- RECON
 
+// reconPrompt is the whole instruction to the recon agent: role, the physics of
+// the container it woke up in, and the two artifacts. It is an ordinary Go
+// string. dawn cannot see it, cannot template it and has no type for it —
+// Launch takes an image, env, mounts and argv (sweep.go:307) and that is the
+// entire interface. Edit the text, run the sweep, and `git log -S` on this
+// constant joins the version to the findings it produced through the
+// prompt.sha256 Fact.
+//
+// TODO(you): all of it. Every clause below is a policy decision, and the
+// annotation on each one is what it costs when it is missing.
+//
+//   - "You produce two artifacts and no opinions." The stage has a machine
+//     consumer, not a human one. PREVENTS: a well-written security essay in
+//     /work/out.txt and an empty taxonomy.json, which fails recon and costs the
+//     whole run.
+//   - The container physics — read-only /src, no default route, one invocation.
+//     None of it is guessable from inside and all of it is enforced (the bridge
+//     is created --internal; there is no route out except the proxy).
+//     PREVENTS: the agent spending a third of its turns on `pip install
+//     semgrep`, `git clone`, and retrying curl against a black hole.
+//   - "architecture.md before taxonomy.json." Cloudflare: findings "stream and
+//     are saved as they happen, so a crash costs you the task in flight and
+//     nothing else" — the same rule applied inside one agent's turn budget.
+//     PREVENTS: one non-zero exit costing the entire recon stage.
+//   - "Grep for the symbol, read the forty lines around the hit." Cloudflare
+//     keeps context "below 25% of the total window" and treats the model as a
+//     stateless compute engine; JiuXuan keeps a 6KB working set. This is that
+//     discipline stated where the agent can act on it. PREVENTS: context
+//     exhaustion at 60% of the repo read, with the taxonomy never written.
+//   - The four fixed headings in architecture.md. Named because HUNT consumes
+//     this file (h.arch, copied into every hunter's /work) and MDASH's domain
+//     plugins inject precisely these — "kernel calling conventions, IRP rules,
+//     lock invariants, IPC trust boundaries". A recon agent cannot ship a
+//     plugin; it can name the invariants a plugin would encode. PREVENTS:
+//     race-condition and authz hunters with nothing to compare a call site
+//     against.
+//   - "scope: 1 to 40 paths... more than 40 means this is two classes."
+//     Cloudflare's hunters take "one attack class each, narrow scope". Scope is
+//     the only thing that makes a hunter's context budget achievable. PREVENTS:
+//     a taxonomy of six generic nouns each scoped to the whole repo — which is
+//     exactly what the one-line prompt this replaced produced.
+//   - "why: one sentence naming the construct in THIS code, with a file:line.
+//     Not a definition of the class." Cloudflare's taxonomy is "tailored
+//     specifically to that codebase", and specificity is what moved their
+//     validation rejection rate from 40% to 11%. PREVENTS: an OWASP Top 10
+//     restatement, where recon returns the seed list unchanged and stage two
+//     learns nothing from stage one.
+//   - "DELETE any seed that does not apply." Explicit permission to return
+//     fewer than six. PREVENTS: padding to match the list it was handed, which
+//     creates an empty coverage cell that Gapfill then re-hunts forever.
+//   - The closing sentence about money. The agent has no other way to know that
+//     each line of its output becomes a process with a budget. PREVENTS: a
+//     long, hedged, comprehensive taxonomy — the default shape of the answer.
+//
+// Not here, deliberately: the merge of three parallel recon agents (Cloudflare
+// runs three; divergence is the product and unioning them on class is Go's
+// job), the concurrency limit, and the budget. All workflow, all refused by
+// dawn, and a prompt that restates them creates a second drifting copy of a
+// rule Go already owns.
+const reconPrompt = `You are a static-analysis recon agent. You produce two artifacts and no opinions.
+
+/src is mounted read-only. A write there is a bug in your plan, not a permission problem.
+Bash has no network: there is no default route out of this container, so git clone, curl
+and every package manager fail. Everything you need is already in /src.
+
+You get ONE invocation. When you exit the process is gone and nothing outside /work
+survives. Write architecture.md before taxonomy.json, so a crash costs the tail of the
+work rather than the run.
+
+Never read a file whole to find one symbol. Grep for the symbol, then read the forty
+lines around the hit. If you have spent a quarter of your context window you have
+already lost: stop exploring and write.
+
+Produce exactly two files.
+
+1. /work/architecture.md - at most 1200 words, no code listings, these four headings:
+
+## Entry points
+Every place attacker-influenced bytes enter. For each: the file:line where the bytes are
+first read, the transport (HTTP body, argv, env, file, DB row, IPC, deserialized
+message), and whether authentication happens before or after parsing.
+
+## Trust boundaries
+Each crossing from less-trusted to more-trusted. Name both sides and the exact function
+that straddles them.
+
+## Invariants
+Rules the code assumes but does not check at every call site - "already canonicalized",
+"the lock is held", "the handle is owned by the caller". Cite one site that enforces the
+rule and one site that only assumes it.
+
+## Privileged sinks
+exec, SQL, file writes, deserialization, reflection, memory copies with a computed
+length, anything that mutates authorization state.
+
+2. /work/taxonomy.json - a JSON array and nothing else, no prose around it:
+
+[{"class":"...","scope":["path", ...],"why":"...","attacker":"...","sink":"..."}]
+
+class     lowercase, hyphenated, unique. Seeded from: %s
+          DELETE any seed that does not apply to this codebase and say nothing about it.
+          ADD the classes this codebase earns.
+scope     the files a hunter for this class must read, and no others. 1 to 40
+          repo-relative paths, each of which exists in /src. More than 40 means this is
+          two classes: split it.
+why       one sentence naming the construct in THIS code that makes the class live, with
+          a file:line. Not a definition of the class.
+attacker  who they are and what they control, in this system's own nouns.
+sink      the file:line where exploitation lands.
+
+A class you cannot ground in a file:line is not a class. Drop it. Six vague classes are
+worse than two grounded ones, because every class you write becomes an agent that spends
+money looking for it.
+`
+
 // recon runs one driver agent over the whole repo and takes its taxonomy. The
 // repo is mounted read-only; the only writable path is the span's own scratch
 // dir, so a recon agent cannot edit the code it is describing.
-func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool, done map[string][]glue.Fact) ([]string, error) {
+func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool, done map[string][]glue.Fact) ([]taxon, error) {
 	// The resumable artifact is the Fact, not the span: a span id is a live
 	// capability that Close revoked, but "taxonomy" is bytes on disk that
 	// outlive the process that wrote them. Re-running recon on a repo whose
 	// architecture has not changed is the single most wasteful thing this
 	// pipeline can do.
 	if facts, ok := done["recon"]; ok {
+		var tax []taxon
 		for _, f := range facts {
-			if f.Key != "taxonomy" {
-				continue
+			switch f.Key {
+			case "architecture":
+				h.arch = []byte(f.Value)
+			case "taxonomy":
+				if json.Unmarshal([]byte(f.Value), &tax) != nil {
+					tax = nil
+				}
 			}
-			var classes []string
-			if json.Unmarshal([]byte(f.Value), &classes) == nil && len(classes) > 0 {
-				return classes, nil
-			}
+		}
+		if len(tax) > 0 && len(h.arch) > 0 {
+			return tax, nil
 		}
 	}
 	span := h.sw.Span(parent, "recon", pool).Only("anthropic")
@@ -415,16 +563,27 @@ func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool,
 		span.Close(glue.Failed, err.Error())
 		return nil, err
 	}
-	// TODO(you): the recon prompt. dawn never sees a prompt — Launch takes argv
-	// env and mounts (sweep.go:307) and there is nowhere in the API to put one.
-	// Which version ran is recorded as a Fact below and the text stays in git.
-	prompt := "Read /src. Write /work/architecture.md describing the trust boundaries.\n" +
-		"Then write /work/taxonomy.json: a JSON array of attack-class names for THIS\n" +
-		"codebase, seeded from " + strings.Join(seed, ", ") + ". Names only, lowercase, hyphenated."
+	prompt := fmt.Sprintf(reconPrompt, strings.Join(seed, ", "))
+	// dawn never sees this string. Launch takes argv, env and mounts
+	// (sweep.go:307) and there is nowhere in the API to put a prompt. What the
+	// ledger records is its hash, which is the whole point: a finding is
+	// attributable to the prompt VERSION that produced it, the text stays in
+	// git, and `git log -S` on the constant below joins the two.
 	span.Fact("prompt.sha256", hash(prompt))
 
 	if err := h.container(ctx, span, ws, driverAgent(h.imgDriver, h.driver, prompt)); err != nil {
 		span.Close(glue.Failed, err.Error())
+		return nil, err
+	}
+	// architecture.md is a required artifact, not a nice-to-have: the hunt
+	// prompt tells every hunter to read it first, so a recon that did not write
+	// one has not finished and the failure belongs here rather than fifty
+	// hunters later. This is also why the prompt says "architecture.md before
+	// taxonomy.json" — Cloudflare's "a crash costs you the task in flight and
+	// nothing else" applied inside a single agent's turn budget.
+	arch, err := os.ReadFile(filepath.Join(ws, "architecture.md"))
+	if err != nil {
+		span.Close(glue.Failed, "no architecture.md: "+err.Error())
 		return nil, err
 	}
 	raw, err := os.ReadFile(filepath.Join(ws, "taxonomy.json"))
@@ -432,57 +591,200 @@ func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool,
 		span.Close(glue.Failed, "no taxonomy: "+err.Error())
 		return nil, err
 	}
-	var classes []string
-	if err := json.Unmarshal(raw, &classes); err != nil || len(classes) == 0 {
+	var tax []taxon
+	if err := json.Unmarshal(raw, &tax); err != nil {
 		span.Close(glue.Failed, "taxonomy unparseable")
 		return nil, fmt.Errorf("taxonomy unparseable: %v", err)
 	}
+	// The prompt says every scope path must exist in /src. This is where that
+	// stops being a request. Same move as pass1(): a model can be argued out of
+	// a rule, os.Stat cannot — and a hunter scoped to a hallucinated path burns
+	// a whole agent run discovering it.
+	tax = ground(h.repo, tax)
+	if len(tax) == 0 {
+		span.Close(glue.Failed, "taxonomy has no class grounded in a real path")
+		return nil, fmt.Errorf("taxonomy has no class grounded in a real path")
+	}
+	span.Fact("architecture", arch)
 	span.Fact("taxonomy", raw)
-	span.Close(glue.OK, fmt.Sprintf("%d classes", len(classes)))
-	return classes, nil
+	h.arch = arch
+	span.Close(glue.OK, fmt.Sprintf("%d classes", len(tax)))
+	return tax, nil
+}
+
+// ground drops the parts of a taxonomy that do not correspond to files on disk:
+// a scope path that does not exist, and then any class left with no scope at
+// all. It keeps the RAW taxonomy bytes as the Fact, not the grounded slice, so
+// the ledger records what the model actually said and this function's opinion
+// stays out of the record.
+func ground(repo string, tax []taxon) []taxon {
+	var out []taxon
+	for _, t := range tax {
+		if strings.TrimSpace(t.Class) == "" {
+			continue
+		}
+		var keep []string
+		for _, p := range t.Scope {
+			if _, err := os.Stat(filepath.Join(repo, filepath.Clean("/"+p))); err == nil {
+				keep = append(keep, p)
+			}
+		}
+		if t.Scope = keep; len(t.Scope) > 0 {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- HUNT
 
+// huntPrompt renders one taxon. The template is the stable half — harness
+// physics, which do not change between a Rust kernel driver and a Django app —
+// and the five interpolated fields are the entire domain payload, which is why
+// RECON exists and why it is a compiler from a codebase to this struct rather
+// than a preamble.
+//
+// TODO(you): all of it.
+//
+//   - "You hunt exactly one attack class. Other agents cover everything else."
+//     Cloudflare runs ~50 concurrent hunters, one class each. PREVENTS: fifty
+//     agents each rediscovering the same SQL injection and fifty jury calls
+//     paid to refute forty-nine duplicates.
+//   - The five interpolated lines. This is the context injection Cloudflare
+//     credits for taking validation rejection from 40% to 11%. PREVENTS: a
+//     hunter that has to re-derive from scratch what recon already knows, on a
+//     smaller context budget than recon had.
+//   - "Read /work/architecture.md first." True only because hunter() copies it
+//     in; every span's /work is its own. PREVENTS: a threat model invented from
+//     the cited function's local shape, with no idea which boundary it sits
+//     behind.
+//   - "You MAY copy fragments into /work, compile them and run them."
+//     Cloudflare's hunters "build small versions and attack them in sandboxes".
+//     Without the sentence the agent reads "/src is read-only" as "look, do not
+//     touch". PREVENTS: the highest-value tool in the container going unused —
+//     a claim you executed beats a claim you argued.
+//   - "Append AS YOU CONFIRM EACH ONE. Do not batch to the end." PREVENTS: a
+//     turn-limit or budget kill on the last turn taking every finding with it.
+//   - "lo,hi must be the lines holding the defect - not the function, not the
+//     import block." pass1() is arithmetic: a function-scoped range passes it
+//     and then wastes a juror call on lines containing nothing. PREVENTS: a
+//     citation that is technically valid and evidentially empty.
+//   - "threat: three sentences — who, what they control, what they get." The Go
+//     gate in the loop below only tests for emptiness, so the definition has to
+//     live here; the gate is what makes it true. Cloudflare: "a Hunter has to
+//     state the threat model before it's allowed to file anything." PREVENTS:
+//     "an attacker could exploit this", which satisfies the checker and is not
+//     a threat model.
+//   - "detail as file:line hops." MDASH's debaters argue reachability and
+//     exploitability; hops are the only form in which reachability survives the
+//     model boundary into a juror that shares no context. PREVENTS: a plausible
+//     paragraph the juror must re-derive, which doubles cost and inflates
+//     disagreement — and disagreement is what buys the expensive model.
+//   - "State the assumption that would make this a false positive, then check
+//     it." PREVENTS: filing the sanitized-upstream false positive that three
+//     jurors are then paid to kill.
+//   - "A different model on a different vendor, whose only job is to destroy
+//     this finding, reads it next." Not a threat — a specification of the bar,
+//     and it is literally true (jury(), below). PREVENTS: detail written for a
+//     sympathetic reader.
+//   - "Zero is a correct outcome." PREVENTS: the fabrication that appears when
+//     an agent believes an empty result is a failed run.
+//
+// Not here: the class name is ASSIGNED by the harness after the file is read,
+// so nothing tells the hunter it could file into another cell. The sibling
+// hunters' scopes are not here either — a hunter that knows what its neighbours
+// cover starts reasoning about coverage instead of its own class.
+func huntPrompt(t taxon) string {
+	return fmt.Sprintf(huntTemplate, t.Class, t.Why, t.Attacker, t.Sink,
+		strings.Join(t.Scope, "\n  "))
+}
+
+const huntTemplate = `You hunt exactly one attack class. Other agents cover everything else, and work outside
+your scope is duplicated effort at best and noise at worst.
+
+Attack class:      %s
+Live here because: %s
+Attacker:          %s
+Sink:              %s
+Read only these files:
+  %s
+
+Read /work/architecture.md first. It is 1200 words, written by an agent that saw the
+whole repo, and it names the trust boundaries and invariants you are about to test.
+
+/src is read-only; /work is yours. Bash has no network - no installs, no clones, no
+fetches. You MAY copy fragments of /src into /work, write a small harness around them,
+compile it and run it. That is what the sandbox is for: a claim you executed beats a
+claim you argued.
+
+Grep, then read the hit and its neighbours. Do not read whole files. Do not read files
+outside your scope. Past a quarter of your context window, write what you have and keep
+hunting from the file.
+
+Append one JSON object per line to /work/findings.jsonl AS YOU CONFIRM EACH ONE. Do not
+batch to the end; a crash then costs you everything. Fields, all required:
+
+{"class","title","file","lo","hi","threat","detail"}
+
+title   one line. The bug, not the file.
+file    repo-relative, must exist in /src.
+lo,hi   1-based inclusive, must exist in that file, and must be the lines holding the
+        defect - not the enclosing function, not the import block. A range a checker
+        cannot resolve is discarded unread.
+threat  three sentences: who the attacker is, what they control that reaches the cited
+        code, and what they get. "An attacker could..." with no named entry point is not
+        a threat model, and it is dropped before a human sees it.
+detail  the path from the entry point named in threat to file:lo, as a list of file:line
+        hops. If you cannot write the hops you have a suspicion, not a finding. Do not
+        file suspicions.
+
+Before you file, once per finding: state the assumption that would make this a false
+positive, then go and check it. If a caller sanitizes, if a length is bounded upstream,
+if every path holds the lock - find that out yourself. A different model on a different
+vendor, whose only job is to destroy this finding, reads it next, and it will find the
+caller you did not check.
+
+If this class has no instances here, write nothing and say so. Zero is a correct
+outcome, and it is cheaper than one finding that gets refuted.
+`
+
 // hunt runs one agent per attack class, concurrently. Cloudflare runs 50-200 of
 // these; the semaphore is the entire scheduler and it is the harness's, because
 // dawn serializes nothing and correctly refuses to own a work queue.
-func (h *harness) hunt(ctx context.Context, parent *glue.Span, pool *glue.Pool, classes []string, workers int, done map[string][]glue.Fact) {
-	per := glue.USD(float64(pool.Cap()) / float64(len(classes)))
+func (h *harness) hunt(ctx context.Context, parent *glue.Span, pool *glue.Pool, tax []taxon, workers int, done map[string][]glue.Fact) {
+	per := glue.USD(float64(pool.Cap()) / float64(len(tax)))
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
-	for _, class := range classes {
-		if _, ok := done["hunt."+class]; ok {
+	for _, t := range tax {
+		if _, ok := done["hunt."+t.Class]; ok {
 			continue // already closed OK in an earlier run of this sweep id
 		}
 		wg.Add(1)
-		go func(class string) {
+		go func(t taxon) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			h.hunter(ctx, parent, pool.Sub("hunt."+class, per), class)
-		}(class)
+			h.hunter(ctx, parent, pool.Sub("hunt."+t.Class, per), t)
+		}(t)
 	}
 	wg.Wait()
 }
 
-func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool, class string) {
-	span := h.sw.Span(parent, "hunt."+class, pool).Only("anthropic")
-	span.Fact("attack.class", []byte(class))
+func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool, t taxon) {
+	span := h.sw.Span(parent, "hunt."+t.Class, pool).Only("anthropic")
+	span.Fact("attack.class", []byte(t.Class))
 	ws, err := h.workspace(span)
 	if err != nil {
 		span.Close(glue.Failed, err.Error())
 		return
 	}
-	// TODO(you): the hunter prompt, and specifically the per-class scope
-	// sentence. This is the domain knowledge Cloudflare says carries "the
-	// initial skill's attacker scenarios, bug classes, and anti-pattern
-	// detections nearly unchanged". dawn refuses it: prompts are workflow.
-	prompt := "You hunt ONE attack class in /src: " + class + ".\n" +
-		"Write /work/findings.jsonl, one JSON object per line, fields:\n" +
-		`{"class","title","file","lo","hi","threat","detail"}` + "\n" +
-		"threat is mandatory: state who the attacker is, what they control, and what they gain.\n" +
-		"file is repo-relative; lo and hi are 1-based inclusive line numbers that must exist."
+	// The recon context injection. It is a file copy because each span's /work
+	// is its own; nothing else connects stage one to stage two.
+	if err := os.WriteFile(filepath.Join(ws, "architecture.md"), h.arch, 0o644); err != nil {
+		span.Close(glue.Failed, err.Error())
+		return
+	}
+	prompt := huntPrompt(t)
 	span.Fact("prompt.sha256", hash(prompt))
 
 	if err := h.container(ctx, span, ws, driverAgent(h.imgDriver, h.driver, prompt)); err != nil {
@@ -490,8 +792,18 @@ func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool
 		return
 	}
 
+	found, bad, err := readJSONL(filepath.Join(ws, "findings.jsonl"))
+	if err != nil {
+		// No file. The agent exited 0 without honouring its output contract —
+		// muzzled by a permission mode, out of turns, or it ignored the format.
+		// Failed, not OK, so done() re-queues this cell instead of retiring it.
+		span.Fact("hunt.no_output", []byte(err.Error()))
+		span.Close(glue.Failed, "no findings.jsonl: "+err.Error())
+		return
+	}
+
 	filed, dropped := 0, 0
-	for _, f := range readJSONL(filepath.Join(ws, "findings.jsonl")) {
+	for _, f := range found {
 		// "A Hunter must state its threat model before it is allowed to file
 		// anything." Enforced here, in Go. A prompt that says "threat is
 		// mandatory" is a request; this is the gate.
@@ -501,7 +813,7 @@ func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool
 		}
 		// The class is ASSIGNED, not taken from the finding: a hunter scoped to
 		// one cell cannot file into another one and inflate its own coverage.
-		f.Class, f.ID = class, f.id()
+		f.Class, f.ID = t.Class, f.id()
 		h.find.add(f)
 		// One Fact per finding, N rows under one span, and Outcome.Facts hands
 		// all N back in write order. This is the join key between dawn's ledger
@@ -511,7 +823,8 @@ func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool
 		filed++
 	}
 	span.Fact("hunt.dropped_no_threat", []byte(fmt.Sprint(dropped)))
-	span.Close(glue.OK, fmt.Sprintf("%d filed, %d dropped", filed, dropped))
+	span.Fact("hunt.unparseable", []byte(fmt.Sprint(bad)))
+	span.Close(glue.OK, fmt.Sprintf("%d filed, %d dropped, %d unparseable", filed, dropped, bad))
 }
 
 // done reads the ledger and returns the facts of every span that closed OK,
@@ -603,6 +916,96 @@ func pass1(repo string, f *Finding) string {
 	return ""
 }
 
+// disprovePrompt is the single highest-leverage string in this file, and not
+// because it is well worded: it is the one place where what the harness wants
+// and what the transport can carry are the same artifact. It is ONE
+// self-contained user string because two of the three juror transports cannot
+// carry a system prompt at all — codex exec 0.145.0 has no system-prompt flag,
+// and the GLM juror is a raw Messages call with no system field (ask(), below).
+//
+// TODO(you): all of it.
+//
+//   - "You cannot file findings" as the first three sentences. Cloudflare's
+//     validator "cannot log findings of its own". Three mechanical facts
+//     already enforce it (jury's doc comment); this is the prompt telling the
+//     agent so it does not waste turns trying. PREVENTS: a juror helpfully
+//     filing an adjacent bug into a /work that is thrown away — pure spend.
+//   - "Your job is to destroy the claim. Assume it is wrong." MDASH: "an
+//     auditor does not reason like a debater, which does not reason like a
+//     prover", and each stage gets "its own role, prompt regime, tools, and
+//     stop criteria". PREVENTS: the agreeable-reviewer failure, where a model
+//     asked to "evaluate" a finding ratifies whatever it is shown — which
+//     collapses the jury to a rubber stamp and makes tally() meaningless.
+//   - "You have never seen this codebase and share no context." True by
+//     construction: different vendor, different weights, Only() (glue.go:298)
+//     narrowing the span so it cannot even reach the driver's model. PREVENTS:
+//     the juror assuming a convention the hunter saw and it did not.
+//   - Five numbered checks, cheapest first, stop at the first failure. Step 1
+//     is one file read; step 4 is a caller analysis. PREVENTS: paying output
+//     tokens for exploitability analysis of code that does not exist.
+//   - Step 5, "a crash is not code execution, a read is not a write."
+//     PREVENTS: the impact inflation that survives every other check because
+//     the vulnerability is real and only the consequence is wrong.
+//   - "First line: exactly one word." verdictOf() reads the first line and
+//     discards the rest. PREVENTS: an unparseable first line landing as
+//     "error", which closeJuror() classes Failed and which silently changes the
+//     vote.
+//   - "A STANDS with no attempted disproof is a failure to do your job."
+//     PREVENTS: the cheap STANDS, which is indistinguishable from a diligent
+//     one in tally() and costs the same.
+//   - "Do not hedge. Possibly exploitable is STANDS." PREVENTS: "needs further
+//     investigation", which is not a verdict and which no downstream code can
+//     act on.
+//
+// Not here: the tally rule, the routing between cheap and heavy jurors, and the
+// fact that a second juror is voting on the same claim. All ranking policy,
+// which dawn refuses and tally() owns. A juror that knew it was one of three
+// would start reasoning about the panel.
+func disprovePrompt(f *Finding) string {
+	return fmt.Sprintf(disproveTemplate,
+		f.Class, f.Title, f.File, f.Lo, f.Hi, f.Threat, f.Detail)
+}
+
+const disproveTemplate = `You are a referee. You cannot file findings. You cannot add findings. You cannot improve
+this one, restate it more convincingly, or suggest a variant that would work. Any output
+that is not a verdict on THIS claim is discarded unread.
+
+Your job is to destroy the claim below. Assume it is wrong and find out how.
+
+You have never seen this codebase and you share no context with whoever wrote the claim.
+Everything you need is here; there is no earlier conversation. /src is mounted
+read-only. Read it.
+
+CLAIM
+  class:        %s
+  title:        %s
+  location:     %s:%d-%d
+  threat model: %s
+  reachability: %s
+
+Check in this order. Stop at the first failure.
+
+1. Does the cited location contain what the claim says? Open it. A claim about code that
+   is not there is REFUTED whatever else is true.
+2. Is the entry point in the threat model reachable by that attacker, in this build,
+   without a credential they do not have?
+3. Does every hop in the reachability path exist, and does control actually flow along
+   it? Follow each hop in /src. One broken hop refutes the claim.
+4. Is there an upstream check - a bound, a canonicalization, a held lock, a type that
+   cannot represent the bad value - that makes the bad state unreachable? Look in the
+   callers, not only at the cited lines.
+5. Is the asserted consequence the one that actually follows? A crash is not code
+   execution. A read is not a write.
+
+First line: exactly one word, REFUTED or STANDS.
+Then the file:line evidence for that word. If REFUTED, name which numbered step failed
+and the code that refutes it. If STANDS, name the strongest disproof you attempted and
+why it failed - a STANDS with no attempted disproof is a failure to do your job.
+
+Do not hedge. "Possibly exploitable" is STANDS. "Needs more investigation" is not a
+verdict. Pick one.
+`
+
 // jury is pass 2. Two cheap jurors on two vendors argue against every finding;
 // a third, expensive, different-vendor juror is called ONLY where they
 // disagreed. That is MDASH's routing — a distilled debater absorbing ~90% of
@@ -621,13 +1024,7 @@ func (h *harness) jury(ctx context.Context, parent *glue.Span, cheap, heavy *glu
 	span.Fact("finding", []byte(f.ID))
 	f.Jury = map[string]string{}
 
-	// TODO(you): the disproof prompt. It is the single highest-leverage string
-	// in this file and dawn will never see it.
-	prompt := "You cannot file findings. Your only job is to DISPROVE this one.\n" +
-		"Answer with REFUTED or STANDS on the first line, then your reasoning.\n\n" +
-		"class: " + f.Class + "\ntitle: " + f.Title + "\n" +
-		fmt.Sprintf("cited: %s:%d-%d\n", f.File, f.Lo, f.Hi) +
-		"threat model: " + f.Threat + "\ndetail: " + f.Detail
+	prompt := disprovePrompt(f)
 	span.Fact("prompt.sha256", hash(prompt))
 
 	f.Jury["xai/"+h.cheapA] = h.jurorContainer(ctx, span, cheap, "xai", droidAgent(h.imgDroid, h.cheapA, prompt))
@@ -1097,22 +1494,40 @@ func (h *harness) workspace(span *glue.Span) (string, error) {
 	return d, os.MkdirAll(d, 0o755)
 }
 
-func readJSONL(path string) []*Finding {
+// readJSONL returns the findings, the number of unparseable lines, and an
+// error if the file is ABSENT.
+//
+// The three outcomes must stay distinguishable. An agent that ran and found
+// nothing writes an empty file; an agent that was muzzled, crashed, or never
+// understood its output contract writes no file at all. Collapsing those into
+// a nil slice — which the first version of this function did — makes a silent
+// zero look exactly like an honest zero, and hunter then closes OK on it. Since
+// done() keys resumption on OK, that permanently retires the attack class: the
+// cell reads covered on every later run of this sweep and is never hunted
+// again. A coverage harness that quietly stops covering things is worse than
+// one that crashes.
+func readJSONL(path string) ([]*Finding, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, 0, err
 	}
 	defer f.Close()
 	var out []*Finding
+	bad := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
 	for sc.Scan() {
-		var v Finding
-		if json.Unmarshal(sc.Bytes(), &v) == nil {
-			out = append(out, &v)
+		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+			continue
 		}
+		var v Finding
+		if json.Unmarshal(sc.Bytes(), &v) != nil {
+			bad++
+			continue
+		}
+		out = append(out, &v)
 	}
-	return out
+	return out, bad, sc.Err()
 }
 
 func hash(s string) []byte {
