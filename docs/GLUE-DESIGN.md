@@ -115,6 +115,19 @@ Identities, resolved without a taxonomy: `kind` is a free string, and the ids ar
 
 Refused, unchanged: merge policy, projection and ranking, retry policy, memory semantics, workflow definition, payload schemas, replay/resume. Rule: if the 19 harnesses disagree about it, it is your code. Nineteen teams disagreed about all seven; one used a declared schema; none used a DSL.
 
+**The work queue stays refused, and the reason is now a measurement rather than a taste.** Of the six disclosed sequencers, five need no queue at all — MDASH is a forward pipeline, Gcsa a single-worker state machine, VARAS nine stages and one artifact each, RedbudAI one bounded loop, and `examples/hunt`'s recon/validate/dedupe three calls in `main`. All five are served by `Sweep.Outcomes()`: ask what closed OK, re-run the complement, keep no mutable row anywhere. Only Cloudflare's Glasswing needs more, and not for resume and not for parallelism — three of its eight stages *author work during the run*, and an unclaimed task is a span that has not been opened. One in six is the membership test's textbook case, so the queue is the harness's, and `examples/hunt/queue.go` is the whole of it: four columns, five statements, one file.
+
+The objection worth answering is that a separate queue file severs fact one from fact two — dawn knows the money, the harness knows the work, and neither can join them. It does not, because the work key can simply *be* the span name. In Go that join is a `GROUP BY` over `Outcomes()` and it is eight lines in `hunt`'s report, summing every attempt including the ones a crash abandoned. In SQL it is two keywords, because `Sweep.Path()` hands out the ledger as a path and WAL means a reader never blocks the writer:
+
+```sql
+ATTACH DATABASE 'file:hunt.db?mode=ro' AS led;
+SELECT t.key, t.state, round(sum(e.usd), 2) FROM task t
+  JOIN led.events o ON o.kind = 'span_open' AND o.outcome = t.key
+  JOIN led.events e ON e.span = o.span GROUP BY t.key;
+```
+
+That is the feature, shipped, at the size a file path costs. What the harness gives up in exchange is real and small: `glue top` cannot show queue depth, and a crash between `Close` and the claim's retirement re-runs one cell.
+
 Codex's charge is correct and generalizes: any claim of the form "harness X is buildable on this" is vacuous when Turing-completeness is the escape hatch. "SQLite plus os/exec is already universal" is the proof, not a jab.
 
 Its conclusion is wrong. An abstraction is real exactly when it makes a previously-legal program **illegal**. "A substrate for any harness" forbids nothing, which is why it cannot fail and says nothing. The trust boundary forbids something, and it generates a predicate you can evaluate against a running container with `ls`: *no path inside resolves to the ledger, its WAL, its shm, or the blob store; the netns has exactly one route.* The current design fails that predicate visibly, in its own walkthrough. A frame that falsifies a line of the document it is describing is doing work.

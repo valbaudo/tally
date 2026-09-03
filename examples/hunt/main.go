@@ -9,9 +9,15 @@
 //	RECON     one driver agent reads the repo and writes a per-codebase attack
 //	          taxonomy. Cloudflare: "a custom taxonomy tailored specifically to
 //	          that codebase, which is used to more tightly scope the Hunters."
-//	HUNT      one concurrent agent per attack class, narrow scope. A hunter that
-//	          does not state a threat model files nothing — enforced here, in Go,
-//	          not asked for in a prompt.
+//	HUNT      one concurrent agent per attack class, narrow scope, drawn from a
+//	          work queue rather than from a slice. A hunter that does not state
+//	          a threat model files nothing — enforced here, in Go, not asked for
+//	          in a prompt.
+//	GAPFILL   the harness authors its own work: every (attack class x scope
+//	          path) cell that no finding cites is enqueued again, narrowed to
+//	          that one path. This is the only stage that needs a mutable queue,
+//	          it is why the queue is in queue.go and not in dawn, and it is one
+//	          statement away from Cloudflare's Feedback.
 //	VALIDATE  pass 1 is plain Go: the cited file must exist and the cited line
 //	          range must be inside it. No model is involved and none can be
 //	          talked around. Pass 2 is a jury on DIFFERENT vendors whose only
@@ -23,6 +29,19 @@
 //	          for what each stage cost. There is no PROVE stage here; if there
 //	          were, it would be Sweep.Sandbox — a container with no network at
 //	          all, which is what you run attacker-controlled code in.
+//
+// # The registry, and the sequencer
+//
+// Two questions this file answers with code. What tells an agent "now do this,
+// now do that"? Source order in main() for the pipeline half — five calls — and
+// a claimed queue for the half whose work set is open. What gives each agent
+// its instructions and its capabilities? `role`, a struct literal with seven
+// columns, each of which has a mechanism: Provider is Span.Only, ReadOnly is a
+// per-CLI flag, Share is a Pool, Writes is checked after the container exits,
+// and the instruction is split between a const in this file and five typed
+// fields in a queue row. What is NOT in it — Tools, MaxTurns, SystemPrompt — is
+// documented at `role`, and the reason is always the same: three vendors' CLIs
+// cannot express it.
 //
 // # Heterogeneity, which is the point
 //
@@ -94,8 +113,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -146,6 +167,117 @@ type taxon struct {
 	Why      string   `json:"why"`      // file:line in THIS code that makes the class live
 	Attacker string   `json:"attacker"` // who they are and what they control
 	Sink     string   `json:"sink"`     // file:line where exploitation lands
+}
+
+// ---------------------------------------------------------------- the roles
+
+// role is what MDASH calls a stage's "own role, prompt regime, tools, and stop
+// criteria" and what Gcsa publishes as Input / Duty / Output / Must-not. Here
+// it is a Go struct literal rather than a config file, and that is not a dodge:
+// every field below is read once at boot and never written, and for a value
+// like that the compiler is strictly better than YAML — it checks that Provider
+// names a key the sweep actually holds.
+//
+// Seven fields, and every one of them has a mechanism. The interesting part is
+// the five that are NOT here, each of which was a candidate and each of which
+// would have been a field with no writer:
+//
+//   - Tools. There is no portable spelling, and the differences are not
+//     cosmetic. Verified 2026-09-03 on this machine: claude 2.1.247 takes a
+//     name allowlist (--allowedTools, --disallowedTools, --tools); codex
+//     0.145.0 has no tool allowlist at all and its capability knob is
+//     --sandbox {read-only, workspace-write, danger-full-access}, an OS
+//     filesystem policy; droid 0.138.0 reports a DIFFERENT tool vocabulary per
+//     model — `droid exec --list-tools` prints Create/Edit for Claude Opus 4.8
+//     and a different set for GPT-5.4, and rejects an id it does not know with
+//     "Unknown tool identifier(s)". Tools: []string would mean three
+//     incompatible things. What all three CAN express is one bit — may this
+//     role modify anything — so that is ReadOnly, and agentLaunch spells it
+//     three ways.
+//   - MaxTurns. No transport exposes one. The only stop criterion any of the
+//     three has is money, and money is Share.
+//   - SystemPrompt, distinct from the instruction. codex exec has no
+//     system-prompt flag; droid has --append-system-prompt and no replace. A
+//     field one of three transports honours is a portability lie, which is why
+//     every prompt in this file is one self-contained user string.
+//   - Instruction. Deliberately split, and the split is the finding. The stable
+//     half — harness physics, identical for a Rust kernel driver and a Django
+//     app — is a const in this file. The mutable half is the queue's payload
+//     column: five typed fields per pending hunter, which Gapfill appends and
+//     Feedback rewrites. A rewrite is then a typed diff on a taxon, not a new
+//     copy of a 400-word prompt that no longer diffs against its siblings.
+//   - Must-not, as a published list. Every must-not that has a mechanism became
+//     one of the fields below: Provider is Span.Only, ReadOnly is a CLI flag,
+//     and "cannot file a finding" is verdictOf reading line one and discarding
+//     the rest unread. Every must-not that does not have one ("assume it is
+//     wrong and find out how") is a sentence in the prompt. Publishing both in
+//     one table reads as if both were enforced, and the reason to keep the
+//     habit is the bug it finds: writing the reach rows down is how you notice
+//     that "work outside your scope is another agent's" has no mechanism here.
+//     It is still prose. Closing it means mounting only taxon.Scope instead of
+//     the whole repo, which would also stop a hunter compiling a fragment
+//     against a header two directories up. Named, declined, not enforced.
+//
+// Reads is absent for the same reason: today every containerised role mounts
+// exactly the repo read-only plus its own throwaway /work, so the column would
+// have one value in every row. The day it does not is the day the scope gap
+// above gets closed.
+type role struct {
+	Name     string   // span name and pool name; this role's key in the ledger
+	Provider string   // the ONLY upstream it may reach — Span.Only, enforced by the proxy
+	Model    string   //
+	CLI      string   // "claude" | "codex" | "droid"; empty means the supervisor calls it directly
+	ReadOnly bool     // it may not modify anything — three CLIs, three spellings
+	Share    float64  // fraction of the sweep cap; becomes this role's Pool
+	Writes   []string // the artifacts the harness will read. Anything else is discarded unread.
+}
+
+// roles is the registry. It is a struct and not a map so that a typo is a
+// compile error and the set is closed, which is the same argument Class makes
+// against a string enum.
+//
+// The jury is three roles on three vendors with three pools, and that is the
+// entire MDASH thesis expressed as data: a distilled model takes the volume, a
+// SOTA model is reserved for the hardest fraction, and DISAGREEMENT between
+// them is what buys the expensive call. Separate pools rather than one shared
+// jury pool, because a pool is how a role's budget is enforced and two roles
+// sharing one cannot be told apart by it.
+var roles = struct{ recon, hunt, cheapA, cheapB, heavy, dedupe role }{
+	// TODO(you): every value below. dawn refuses routing policy; which model a
+	// role gets, and what fraction of the money, is the harness's call.
+	recon: role{
+		Name: "recon", Provider: "anthropic", Model: "claude-sonnet-5", CLI: "claude",
+		Share: 0.10, Writes: []string{"architecture.md", "taxonomy.json"},
+	},
+	hunt: role{
+		Name: "hunt", Provider: "anthropic", Model: "claude-sonnet-5", CLI: "claude",
+		Share: 0.60, Writes: []string{"findings.jsonl"},
+	},
+	cheapA: role{
+		Name: "juror.xai", Provider: "xai", Model: "grok-4-fast", CLI: "droid",
+		ReadOnly: true, Share: 0.10, Writes: []string{"out.txt"},
+	},
+	// No CLI, no image, no container: Z.AI serves GLM on the Anthropic Messages
+	// wire, so the fourth vendor costs one URL and one call from the
+	// supervisor. ReadOnly needs no flag here — ask() sends no tools field, so
+	// there is no tool to disable.
+	cheapB: role{
+		Name: "juror.glm", Provider: "glm", Model: "glm-4.6",
+		ReadOnly: true, Share: 0.10,
+	},
+	heavy: role{
+		Name: "juror.openai-responses", Provider: "openai-responses", Model: "gpt-5.6-sol",
+		CLI: "codex", ReadOnly: true, Share: 0.05, Writes: []string{"out.txt"},
+	},
+	dedupe: role{
+		Name: "dedupe", Provider: "glm", Model: "glm-4.6", Share: 0.05,
+	},
+}
+
+// allRoles is the registry as a slice, for the two things that iterate it:
+// building one pool per role, and asserting the invariants in the test.
+func allRoles() []role {
+	return []role{roles.recon, roles.hunt, roles.cheapA, roles.cheapB, roles.heavy, roles.dedupe}
 }
 
 // Finding is the harness's payload schema. dawn refuses payload schemas: it
@@ -241,15 +373,18 @@ type harness struct {
 	repo string // host path to the target checkout
 	work string // host scratch root, one subdir per span
 	find *store
+	q    *queue // the work queue; the harness's own file, see queue.go
 
-	// Model ids per role. Four vendors is a config fact, which is exactly the
-	// shape Config.Keys has (sweep.go:40).
-	driver, cheapA, cheapB, heavy string
+	// One image per CLI, from the flags. Launch takes the image per call, so
+	// the jury does not have to share a container image with the driver it is
+	// meant to be independent of. This is the half of the registry that is
+	// genuinely data — it changes per invocation and it is a string — and it
+	// is keyed by role.CLI rather than by role, because two roles on the same
+	// CLI are the same image.
+	image map[string]string
 
-	// One image per CLI. Launch takes the image per call, so the jury does not
-	// have to share a container image with the driver it is meant to be
-	// independent of.
-	imgDriver, imgCodex, imgDroid string
+	// One pool per role, keyed by role.Name, sized by role.Share at boot.
+	pool map[string]*glue.Pool
 
 	// architecture.md, as RECON wrote it. Every span gets its OWN /work
 	// (container(), below), so a hunter cannot see recon's scratch dir unless
@@ -348,15 +483,24 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// The work queue, in the harness's own SQLite file, next to the findings.
+	// dawn does not know it exists and does not need to: see queue.go for why
+	// this is the right side of the line, and report() for the join that
+	// survives the separation.
+	//
+	// It lives under -work, so resuming a sweep means passing the SAME -work as
+	// the run being resumed. A fresh temp dir is a fresh queue, and the second
+	// run re-hunts everything — visibly, in the report's work table, rather
+	// than silently. The ledger is keyed by -sweep and the queue by -work, and
+	// keeping the two flags in step is the harness's job.
+	q, err := openQueue(filepath.Join(*work, "tasks.db"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer q.close()
 	h := &harness{
-		sw: sw, repo: abs, work: *work, find: fs,
-		imgDriver: *imgD, imgCodex: *imgC, imgDroid: *imgX,
-		// TODO(you): model ids. dawn refuses routing policy; which model a role
-		// gets is the harness's call and it is the whole MDASH thesis.
-		driver: "claude-sonnet-5",
-		cheapA: "grok-4-fast",
-		cheapB: "glm-4.6",
-		heavy:  "gpt-5.6-sol",
+		sw: sw, repo: abs, work: *work, find: fs, q: q,
+		image: map[string]string{"claude": *imgD, "codex": *imgC, "droid": *imgX},
 	}
 
 	// The run id. Cloudflare keys everything on (run_id, repo, stage); the
@@ -369,44 +513,45 @@ func main() {
 	// be pulled into a later run without redoing work" is not expressible.
 	root := sw.Span(nil, filepath.Base(abs), sw.Budget())
 
-	// Where the budget goes. Sub does NOT reserve from the parent
-	// (glue.go:410), so these five deliberately over-subscribe: the sweep cap
-	// binds in the same statement as every leaf charge, so over-subscription is
+	// Where the budget goes: one pool per role, sized by role.Share, straight
+	// out of the registry. Sub does NOT reserve from the parent (glue.go:410),
+	// so these deliberately over-subscribe — the sweep cap binds in the same
+	// statement as every leaf charge, which is what makes over-subscription
 	// safe and is the designed shape.
-	//
-	// The cheap/heavy split is MDASH's volume routing, expressed as two pools
-	// rather than as a rule. jury.cheap pays for two jurors on every surviving
-	// finding; jury.heavy pays for one SOTA call only where the cheap jurors
-	// disagreed. A pool cannot tell two models apart inside one span, so the
-	// routing is a span per juror per finding — a span is two rows and costs
-	// nothing.
 	b := sw.Budget()
-	pools := struct{ recon, hunt, cheap, heavy, dedupe *glue.Pool }{
-		recon:  b.Sub("recon", glue.USD(*budget*0.10)),
-		hunt:   b.Sub("hunt", glue.USD(*budget*0.60)),
-		cheap:  b.Sub("jury.cheap", glue.USD(*budget*0.20)),
-		heavy:  b.Sub("jury.heavy", glue.USD(*budget*0.05)),
-		dedupe: b.Sub("dedupe", glue.USD(*budget*0.05)),
+	h.pool = map[string]*glue.Pool{}
+	for _, r := range allRoles() {
+		h.pool[r.Name] = b.Sub(r.Name, glue.USD(*budget*r.Share))
 	}
 
-	// What a previous run of this sweep id already finished. Cloudflare: "any
-	// stage can resume, retry, or be pulled into a later run without redoing
-	// work."
-	//
-	// TODO(you): this policy. Sweep.Outcomes hands back closed spans and stops
-	// there; deciding that "hunt.injection closed OK last Tuesday" means do not
-	// run it again is a judgement about staleness that dawn refuses, and
-	// rightly — it is a for loop in main.go like every other control decision.
+	// What a previous run of this sweep id already finished. This is the ONE
+	// place the ledger fold is still the resume mechanism, and it is the right
+	// one for recon: the artifact is a taxonomy that either exists or does not,
+	// there is no partial state, and re-running recon on an unchanged
+	// architecture is the single most wasteful thing this pipeline can do.
+	// HUNT resumes off the queue instead, because HUNT is the stage whose work
+	// set is open.
 	done := h.done()
 
-	tax, err := h.recon(ctx, root, pools.recon, done)
+	tax, err := h.recon(ctx, root, done)
 	if err != nil {
 		root.Close(glue.Failed, "recon: "+err.Error())
 		log.Fatal(err)
 	}
-	h.hunt(ctx, root, pools.hunt, tax, *workers, done)
-	h.validate(ctx, root, pools.cheap, pools.heavy, *workers)
-	h.dedupe(ctx, root, pools.dedupe)
+
+	// The sequencer, in full: recon above and these six, in source order.
+	// That is mechanism one — an ordered call sequence, needing zero durable
+	// sequencing state — and it is what MDASH, Gcsa, VARAS and RedbudAI all
+	// are, which is why dawn is right to refuse workflow definition. What is
+	// NOT source order is what happens inside the two drains: the work set
+	// there is open, and gapfill is the stage that opens it.
+	h.enqueue(tax)
+	h.drain(ctx, root, *workers)
+	n := h.gapfill(tax)
+	log.Printf("gapfill: %d thin cell%s enqueued", n, plural(n))
+	h.drain(ctx, root, *workers)
+	h.validate(ctx, root, *workers)
+	h.dedupe(ctx, root)
 	root.Close(glue.OK, fmt.Sprintf("%d findings", len(h.find.list())))
 
 	h.report(os.Stdout, root)
@@ -535,7 +680,23 @@ money looking for it.
 // recon runs one driver agent over the whole repo and takes its taxonomy. The
 // repo is mounted read-only; the only writable path is the span's own scratch
 // dir, so a recon agent cannot edit the code it is describing.
-func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool, done map[string][]glue.Fact) ([]taxon, error) {
+// open mints one role's span: named after the role, narrowed to the role's
+// provider, charged to the role's pool, with its own scratch dir.
+//
+// This is the only place three of the registry's four enforced columns take
+// effect, which is why it is four lines and not inlined at eight call sites.
+// pool may be nil for the role's own pool; the hunter passes a per-cell child
+// so a runaway cell cannot eat the stage.
+func (h *harness) open(parent *glue.Span, r role, name string, pool *glue.Pool) (*glue.Span, string, error) {
+	if pool == nil {
+		pool = h.pool[r.Name]
+	}
+	span := h.sw.Span(parent, name, pool).Only(r.Provider)
+	ws, err := h.workspace(span)
+	return span, ws, err
+}
+
+func (h *harness) recon(ctx context.Context, parent *glue.Span, done map[string][]glue.Fact) ([]taxon, error) {
 	// The resumable artifact is the Fact, not the span: a span id is a live
 	// capability that Close revoked, but "taxonomy" is bytes on disk that
 	// outlive the process that wrote them. Re-running recon on a repo whose
@@ -557,8 +718,8 @@ func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool,
 			return tax, nil
 		}
 	}
-	span := h.sw.Span(parent, "recon", pool).Only("anthropic")
-	ws, err := h.workspace(span)
+	r := roles.recon
+	span, ws, err := h.open(parent, r, r.Name, nil)
 	if err != nil {
 		span.Close(glue.Failed, err.Error())
 		return nil, err
@@ -571,24 +732,23 @@ func (h *harness) recon(ctx context.Context, parent *glue.Span, pool *glue.Pool,
 	// git, and `git log -S` on the constant below joins the two.
 	span.Fact("prompt.sha256", hash(prompt))
 
-	if err := h.container(ctx, span, ws, driverAgent(h.imgDriver, h.driver, prompt)); err != nil {
+	// role.Writes is checked inside container(), so both artifacts exist by the
+	// time this returns nil. That is the registry's Output row with a mechanism
+	// behind it: architecture.md is not a nice-to-have — the hunt prompt tells
+	// every hunter to read it first — so a recon that did not write one has not
+	// finished, and the failure belongs here rather than fifty hunters later.
+	if err := h.container(ctx, span, ws, r, prompt); err != nil {
 		span.Close(glue.Failed, err.Error())
 		return nil, err
 	}
-	// architecture.md is a required artifact, not a nice-to-have: the hunt
-	// prompt tells every hunter to read it first, so a recon that did not write
-	// one has not finished and the failure belongs here rather than fifty
-	// hunters later. This is also why the prompt says "architecture.md before
-	// taxonomy.json" — Cloudflare's "a crash costs you the task in flight and
-	// nothing else" applied inside a single agent's turn budget.
 	arch, err := os.ReadFile(filepath.Join(ws, "architecture.md"))
 	if err != nil {
-		span.Close(glue.Failed, "no architecture.md: "+err.Error())
+		span.Close(glue.Failed, err.Error())
 		return nil, err
 	}
 	raw, err := os.ReadFile(filepath.Join(ws, "taxonomy.json"))
 	if err != nil {
-		span.Close(glue.Failed, "no taxonomy: "+err.Error())
+		span.Close(glue.Failed, err.Error())
 		return nil, err
 	}
 	var tax []taxon
@@ -751,55 +911,119 @@ outcome, and it is cheaper than one finding that gets refuted.
 // hunt runs one agent per attack class, concurrently. Cloudflare runs 50-200 of
 // these; the semaphore is the entire scheduler and it is the harness's, because
 // dawn serializes nothing and correctly refuses to own a work queue.
-func (h *harness) hunt(ctx context.Context, parent *glue.Span, pool *glue.Pool, tax []taxon, workers int, done map[string][]glue.Fact) {
-	per := glue.USD(float64(pool.Cap()) / float64(len(tax)))
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
+// enqueue turns the taxonomy into work. One row per class, keyed by the span
+// name it will run under, so the ledger and the queue share a key without
+// either one holding the other's identifier — and in particular without a span
+// id, which is a live bearer capability, ever reaching a durable file.
+//
+// A cell already retired by an earlier run of this sweep is not re-offered:
+// push's ON CONFLICT ... WHERE state = 'queued' leaves a finished row alone.
+// That is resume, and it took no code.
+func (h *harness) enqueue(tax []taxon) {
 	for _, t := range tax {
-		if _, ok := done["hunt."+t.Class]; ok {
-			continue // already closed OK in an earlier run of this sweep id
+		b, err := json.Marshal(t)
+		if err != nil {
+			log.Printf("enqueue %s: %v", t.Class, err)
+			continue
 		}
+		if err := h.q.push("hunt."+t.Class, b); err != nil {
+			log.Printf("enqueue %s: %v", t.Class, err)
+		}
+	}
+}
+
+// drain runs hunters until the queue is empty.
+//
+// The two-phase gap, stated plainly: the span closes and THEN the claim is
+// retired, so a crash in between costs one cell that gets hunted twice. The
+// other order would cost a cell that reads as finished with no span at all —
+// no cost row, no outcome, no evidence it ever ran. Paying twice is the cheaper
+// mistake, because the ledger is the record of what happened and the queue is
+// only the record of what to do.
+//
+// ponytail: workers exit the first time take() finds nothing. That is correct
+// here because nothing enqueues from inside a hunter — gapfill runs between
+// drains, in main, single-threaded. A stage that enqueued from a worker would
+// need a quiescence check instead, and would deserve one.
+func (h *harness) drain(ctx context.Context, parent *glue.Span, workers int) {
+	pool := h.pool[roles.hunt.Name]
+	n, err := h.q.queued()
+	if err != nil {
+		log.Printf("drain: %v", err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	// Every cell gets an equal share of what the stage holds. A requeued cell
+	// keeps its original cap, because Sub on a repeated name is a no-op
+	// (glue.go:405) — a retry does not stack budget.
+	per := glue.USD(float64(pool.Cap()) / float64(n))
+
+	var wg sync.WaitGroup
+	for range workers {
 		wg.Add(1)
-		go func(t taxon) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			h.hunter(ctx, parent, pool.Sub("hunt."+t.Class, per), t)
-		}(t)
+			for {
+				key, payload, tries, err := h.q.take()
+				if errors.Is(err, sql.ErrNoRows) {
+					return
+				}
+				if err != nil {
+					log.Printf("take: %v", err)
+					return
+				}
+				var t taxon
+				if err := json.Unmarshal(payload, &t); err != nil {
+					h.q.done(key, "failed")
+					continue
+				}
+				state := h.hunter(ctx, parent, pool.Sub(key, per), key, t, tries)
+				if err := h.q.done(key, state); err != nil {
+					log.Printf("done %s: %v", key, err)
+				}
+			}
+		}()
 	}
 	wg.Wait()
 }
 
-func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool, t taxon) {
-	span := h.sw.Span(parent, "hunt."+t.Class, pool).Only("anthropic")
+// hunter runs one cell and reports the state to write back to the queue.
+func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool, key string, t taxon, tries int) string {
+	r := roles.hunt
+	span, ws, err := h.open(parent, r, key, pool)
 	span.Fact("attack.class", []byte(t.Class))
-	ws, err := h.workspace(span)
+	span.Fact("task.tries", []byte(fmt.Sprint(tries)))
 	if err != nil {
 		span.Close(glue.Failed, err.Error())
-		return
+		return "failed"
 	}
 	// The recon context injection. It is a file copy because each span's /work
 	// is its own; nothing else connects stage one to stage two.
 	if err := os.WriteFile(filepath.Join(ws, "architecture.md"), h.arch, 0o644); err != nil {
 		span.Close(glue.Failed, err.Error())
-		return
+		return "failed"
 	}
 	prompt := huntPrompt(t)
 	span.Fact("prompt.sha256", hash(prompt))
 
-	if err := h.container(ctx, span, ws, driverAgent(h.imgDriver, h.driver, prompt)); err != nil {
+	// A missing findings.jsonl is caught by role.Writes inside container(): the
+	// agent exited 0 without honouring its output contract — muzzled by a
+	// permission mode, out of turns, or it ignored the format. That is Failed,
+	// never OK, and the state written back to the queue is "failed" so the cell
+	// is not retired. A coverage harness that quietly stops covering things is
+	// worse than one that crashes.
+	if err := h.container(ctx, span, ws, r, prompt); err != nil {
+		span.Fact("hunt.no_output", []byte(err.Error()))
 		span.Close(glue.Failed, err.Error())
-		return
+		return "failed"
 	}
 
 	found, bad, err := readJSONL(filepath.Join(ws, "findings.jsonl"))
 	if err != nil {
-		// No file. The agent exited 0 without honouring its output contract —
-		// muzzled by a permission mode, out of turns, or it ignored the format.
-		// Failed, not OK, so done() re-queues this cell instead of retiring it.
-		span.Fact("hunt.no_output", []byte(err.Error()))
-		span.Close(glue.Failed, "no findings.jsonl: "+err.Error())
-		return
+		span.Close(glue.Failed, err.Error())
+		return "failed"
 	}
 
 	filed, dropped := 0, 0
@@ -825,13 +1049,20 @@ func (h *harness) hunter(ctx context.Context, parent *glue.Span, pool *glue.Pool
 	span.Fact("hunt.dropped_no_threat", []byte(fmt.Sprint(dropped)))
 	span.Fact("hunt.unparseable", []byte(fmt.Sprint(bad)))
 	span.Close(glue.OK, fmt.Sprintf("%d filed, %d dropped, %d unparseable", filed, dropped, bad))
+	return "done"
 }
 
 // done reads the ledger and returns the facts of every span that closed OK,
-// keyed by span name. This is Sweep.Outcomes (sweep.go:442), dawn's one read, and it
-// is exactly enough for the two things Glasswing needs it for: skipping
-// finished work, and the coverage query — which (repo, attack-class) cells have
-// no span that closed OK — that Gapfill would consume.
+// keyed by span name. This is Sweep.Outcomes (sweep.go:442), dawn's one read.
+//
+// It is mechanism two — idempotent re-derivation — and it is the cheapest
+// resume there is: ask what already succeeded, re-run the complement, keep no
+// mutable state at all. Five of Cloudflare's eight stages need nothing more
+// than this, and neither do MDASH, Gcsa, VARAS or RedbudAI. Here it carries
+// RECON, whose artifact either exists or does not.
+//
+// What it cannot carry is a cell nobody has started, because an unopened span
+// has no row. That is the queue's job and the whole of the queue's job.
 func (h *harness) done() map[string][]glue.Fact {
 	m := map[string][]glue.Fact{}
 	outs, err := h.sw.Outcomes()
@@ -846,11 +1077,90 @@ func (h *harness) done() map[string][]glue.Fact {
 	return m
 }
 
+// ---------------------------------------------------------------- GAPFILL
+
+// gapCap is Cloudflare's "strict cap on tasks per repository", as one integer.
+// Gapfill is the stage that can author unbounded work, so it is the stage that
+// needs a bound; without one, a taxonomy of six classes over forty paths each
+// enqueues 240 agent runs off a single empty first pass.
+const gapCap = 32
+
+// gapfill is the stage that makes the work set open, and it is the reason this
+// harness owns a queue at all.
+//
+// Cloudflare: Gapfill "generates new hunt tasks for empty coverage cells". The
+// coverage cross-product here is (attack class x scope path) — the taxonomy is
+// literally the cell list, which is why RECON writes a struct and not a
+// paragraph. A cell is thin when no hunter of that class filed anything citing
+// a file under that path, which covers two cases with one rule: the hunter ran
+// and found nothing there, or the hunter never ran because its whole class
+// failed. Both get re-hunted, narrowed to that one path — and scope is the only
+// thing that makes a hunter's context budget achievable, so the narrowing is
+// the sharpening.
+//
+// This is also Feedback, in the same statement. push() upserts a QUEUED row's
+// payload, so a second nomination of the same cell replaces its taxon with a
+// tighter one and a cell already being hunted is left alone. What gets
+// rewritten is five typed fields, not 400 words of prose — which is why "did
+// the rewrite help" is answerable later instead of being a diff nobody can read.
+//
+// TODO(you): the thinness predicate. "No finding cites this path" is the
+// laziest signal that is not wrong, and it is wrong in the obvious direction —
+// a path with a genuine zero looks identical to a path nobody looked at. The
+// upgrade is a per-path coverage claim from the hunter itself, which needs the
+// hunter to report what it read, which is another output contract to enforce.
+func (h *harness) gapfill(tax []taxon) int {
+	hit := map[string]bool{}
+	for _, f := range h.find.list() {
+		for _, t := range tax {
+			if t.Class != f.Class {
+				continue
+			}
+			for _, p := range t.Scope {
+				if under(f.File, p) {
+					hit[t.Class+"\x00"+p] = true
+				}
+			}
+		}
+	}
+	n := 0
+	for _, t := range tax {
+		for _, p := range t.Scope {
+			if n >= gapCap || hit[t.Class+"\x00"+p] {
+				continue
+			}
+			cell := t
+			cell.Scope = []string{p}
+			b, err := json.Marshal(cell)
+			if err != nil {
+				continue
+			}
+			// A distinct key prefix, so a gap cell is its own span, its own
+			// pool and its own row, and so gapfill's output can never collide
+			// with the seed cell it came from.
+			if err := h.q.push("gap."+t.Class+":"+p, b); err != nil {
+				log.Printf("gapfill %s: %v", t.Class, err)
+				continue
+			}
+			n++
+		}
+	}
+	return n
+}
+
+// under reports whether a repo-relative file lies inside a scope path. Both
+// sides are cleaned, so "src/x" and "./src/x/" are the same place and "src/xy"
+// is not inside "src/x".
+func under(file, scope string) bool {
+	f, s := filepath.Clean("/"+file), filepath.Clean("/"+scope)
+	return f == s || strings.HasPrefix(f, s+"/")
+}
+
 // ---------------------------------------------------------------- VALIDATE
 
 // validate is two passes and they are not the same kind of thing. Pass 1 is
 // arithmetic. Pass 2 is a jury that can only say no.
-func (h *harness) validate(ctx context.Context, parent *glue.Span, cheap, heavy *glue.Pool, workers int) {
+func (h *harness) validate(ctx context.Context, parent *glue.Span, workers int) {
 	all := h.find.list()
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
@@ -870,7 +1180,7 @@ func (h *harness) validate(ctx context.Context, parent *glue.Span, cheap, heavy 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			h.jury(ctx, parent, cheap, heavy, f)
+			h.jury(ctx, parent, f)
 		}(f)
 	}
 	wg.Wait()
@@ -1019,25 +1329,27 @@ verdict. Pick one.
 //   - the harness reads one token from its output and discards the rest;
 //   - Only() (glue.go:298) narrows its span to one provider, so it cannot even
 //     reach the driver's model to launder an opinion through it.
-func (h *harness) jury(ctx context.Context, parent *glue.Span, cheap, heavy *glue.Pool, f *Finding) {
-	span := h.sw.Span(parent, "validate."+f.ID, cheap)
+func (h *harness) jury(ctx context.Context, parent *glue.Span, f *Finding) {
+	// The jury span itself is charged to the cheap juror's pool and narrowed to
+	// nothing it will call, because it makes no call of its own — it is the
+	// parent that the three juror spans hang under.
+	span := h.sw.Span(parent, "validate."+f.ID, h.pool[roles.cheapA.Name])
 	span.Fact("finding", []byte(f.ID))
 	f.Jury = map[string]string{}
 
 	prompt := disprovePrompt(f)
 	span.Fact("prompt.sha256", hash(prompt))
 
-	f.Jury["xai/"+h.cheapA] = h.jurorContainer(ctx, span, cheap, "xai", droidAgent(h.imgDroid, h.cheapA, prompt))
-	f.Jury["glm/"+h.cheapB] = h.jurorAsk(ctx, span, cheap, "glm", h.cheapB, prompt)
+	f.Jury[roles.cheapA.vote()] = h.jurorContainer(ctx, span, roles.cheapA, prompt)
+	f.Jury[roles.cheapB.vote()] = h.jurorAsk(ctx, span, roles.cheapB, prompt)
 
-	a, b := f.Jury["xai/"+h.cheapA], f.Jury["glm/"+h.cheapB]
+	a, b := f.Jury[roles.cheapA.vote()], f.Jury[roles.cheapB.vote()]
 	f.Split = a != b
 	if f.Split {
 		// Disagreement is EVIDENCE, not noise to average away. It is recorded on
 		// the span and on the finding, and it is what buys the expensive call.
 		span.Fact("jury.disagreed", []byte(a+"|"+b))
-		f.Jury[heavyProvider+"/"+h.heavy] = h.jurorContainer(
-			ctx, span, heavy, heavyProvider, codexAgent(h.imgCodex, h.heavy, prompt))
+		f.Jury[roles.heavy.vote()] = h.jurorContainer(ctx, span, roles.heavy, prompt)
 	}
 
 	f.Verdict = tally(f.Jury)
@@ -1062,7 +1374,7 @@ func (h *harness) jury(ctx context.Context, parent *glue.Span, cheap, heavy *glu
 // exactly this function and nothing else.
 func tally(votes map[string]string) string {
 	for k, v := range votes {
-		if strings.HasPrefix(k, heavyProvider+"/") {
+		if strings.HasPrefix(k, roles.heavy.Provider+"/") {
 			return v
 		}
 	}
@@ -1074,21 +1386,20 @@ func tally(votes map[string]string) string {
 	return "stands"
 }
 
-// heavyProvider is the tiebreaker's vendor. It is a constant because it appears
-// in three places that must agree: the pool the call is charged to, the Only()
-// that keeps the tiebreaker off every other vendor, and tally above.
-const heavyProvider = "openai-responses"
+// vote is how a juror is named in Finding.Jury: the vendor and the model that
+// answered, never the role's own name. Which weights said what is the record;
+// which slot in this harness they occupied is not.
+func (r role) vote() string { return r.Provider + "/" + r.Model }
 
 // jurorContainer runs one juror CLI in a container on its own span, so the
 // juror's spend is attributed to it and to nothing else.
-func (h *harness) jurorContainer(ctx context.Context, parent *glue.Span, pool *glue.Pool, prov string, a agent) string {
-	span := h.sw.Span(parent, "juror."+prov, pool).Only(prov)
-	ws, err := h.workspace(span)
+func (h *harness) jurorContainer(ctx context.Context, parent *glue.Span, r role, prompt string) string {
+	span, ws, err := h.open(parent, r, r.Name, nil)
 	if err != nil {
 		span.Close(glue.Failed, err.Error())
 		return "error"
 	}
-	if err := h.container(ctx, span, ws, a); err != nil {
+	if err := h.container(ctx, span, ws, r, prompt); err != nil {
 		span.Close(glue.Failed, err.Error())
 		return "error"
 	}
@@ -1114,9 +1425,9 @@ func closeJuror(span *glue.Span, v string) string {
 // privileged about it — it is reserved before it leaves, trued up when it
 // lands, priced on write, and refused with a 429 if the pool is out. No CLI, no
 // container, no image; the whole integration is a base URL.
-func (h *harness) jurorAsk(ctx context.Context, parent *glue.Span, pool *glue.Pool, prov, model, prompt string) string {
-	span := h.sw.Span(parent, "juror."+prov, pool).Only(prov)
-	out, err := ask(ctx, span, prov, model, prompt)
+func (h *harness) jurorAsk(ctx context.Context, parent *glue.Span, r role, prompt string) string {
+	span := h.sw.Span(parent, r.Name, h.pool[r.Name]).Only(r.Provider)
+	out, err := ask(ctx, span, r.Provider, r.Model, prompt)
 	if err != nil {
 		span.Close(glue.Failed, err.Error())
 		return "error"
@@ -1142,8 +1453,9 @@ func verdictOf(s string) string {
 
 // dedupe clusters surviving findings by root cause, in Cloudflare's two halves:
 // deterministic code first, then an agent over the short list.
-func (h *harness) dedupe(ctx context.Context, parent *glue.Span, pool *glue.Pool) {
-	span := h.sw.Span(parent, "dedupe", pool).Only("glm")
+func (h *harness) dedupe(ctx context.Context, parent *glue.Span) {
+	r := roles.dedupe
+	span := h.sw.Span(parent, r.Name, h.pool[r.Name]).Only(r.Provider)
 	groups := map[string][]*Finding{}
 	for _, f := range h.find.list() {
 		if f.Verdict != "stands" {
@@ -1165,7 +1477,7 @@ func (h *harness) dedupe(ctx context.Context, parent *glue.Span, pool *glue.Pool
 		for _, f := range g {
 			fmt.Fprintf(&b, "- %s (%s:%d-%d) %s\n", f.Title, f.File, f.Lo, f.Hi, f.Detail)
 		}
-		note, err := ask(ctx, span, "glm", h.cheapB, b.String())
+		note, err := ask(ctx, span, r.Provider, r.Model, b.String())
 		if err != nil {
 			note = "error: " + err.Error()
 		}
@@ -1252,9 +1564,13 @@ func (h *harness) report(w io.Writer, root *glue.Span) {
 		return
 	}
 	stage := map[string]glue.USD{}
+	byName := map[string]glue.USD{}
+	attempts := map[string]int{}
 	var total glue.USD
 	unpriced := 0
 	for _, o := range outs {
+		byName[o.Name] += o.Spend
+		attempts[o.Name]++
 		if o.Parent != root.ID() {
 			continue
 		}
@@ -1265,8 +1581,32 @@ func (h *harness) report(w io.Writer, root *glue.Span) {
 			unpriced++
 		}
 	}
+
+	// The join the separate queue file is accused of making impossible.
+	//
+	// dawn's pitch is what it spent and whether it succeeded, and the objection
+	// to a harness-owned queue is that those two facts can no longer meet: the
+	// ledger knows the money, the queue knows the work, and never the twain.
+	// They meet here, in eight lines, because the task key IS the span name.
+	// byName sums EVERY span that ever ran under a key — including the ones a
+	// crash abandoned and the requeue re-ran — so "what did this cell cost
+	// across every attempt" is answered, which is the question the objection
+	// says is unanswerable. In SQL it is an ATTACH and a JOIN; see queue.go.
+	if tasks, err := h.q.list(); err == nil && len(tasks) > 0 {
+		fmt.Fprintln(w, "work")
+		for _, t := range tasks {
+			extra := ""
+			if n := attempts[t.Key]; n > 1 {
+				extra = fmt.Sprintf("  (%d attempts)", n)
+			}
+			fmt.Fprintf(w, "  %-40s %-8s tries=%d  $%.4f%s\n",
+				t.Key, t.State, t.Tries, float64(byName[t.Key]), extra)
+		}
+		fmt.Fprintln(w)
+	}
+
 	fmt.Fprintln(w, "spend")
-	for _, k := range []string{"recon", "hunt", "validate", "dedupe"} {
+	for _, k := range []string{"recon", "hunt", "gap", "validate", "dedupe"} {
 		fmt.Fprintf(w, "  %-10s $%.4f\n", k, float64(stage[k]))
 	}
 	fmt.Fprintf(w, "  %-10s $%.4f\n", "TOTAL", float64(total))
@@ -1291,32 +1631,52 @@ type launch struct {
 	Argv  []string
 }
 
-// agent produces that, after writing whatever config file the CLI reads into
-// the span's own scratch dir. The three CLIs differ only in that file and in
-// two environment variables; dawn mints the one string all three need,
-// Span.BaseURL(provider) (glue.go:288). Building the file is the harness's job
-// — dawn does not know what agent is in the image, and should not.
+// agentLaunch renders one role into a container launch: which image, which
+// config file, what argv, and how this CLI spells "you may not write".
+//
+// It is a switch and not three closures behind an interface because the three
+// arms have nothing in common to abstract over. dawn mints the one string all
+// three need — Span.BaseURL(provider) (glue.go:288) — and everything past that
+// is vendor-specific: claude reads an environment variable, codex reads a TOML
+// file under CODEX_HOME, droid reads a JSON file named on the command line.
+//
+// The read-only arm is the registry's ReadOnly bit, spelled three ways because
+// there is no fourth option. Verified 2026-09-03 on this machine:
+//
+//	claude 2.1.247   --tools ""                          help: `Use "" to disable all tools`
+//	codex  0.145.0   --sandbox read-only                 an OS filesystem policy, not a tool list
+//	droid  0.138.0   --disabled-tools Create,Edit,ApplyPatch
+//
+// The droid list is the union of two model vocabularies on purpose:
+// `droid exec --list-tools` prints Create/Edit for Claude Opus 4.8 and a
+// different set for GPT-5.4, and the union is accepted by both while an id the
+// binary does not know at all is refused with "Unknown tool identifier(s)" —
+// which is exactly the instability that killed a portable Tools field.
 //
 // The shell is here for redirection and nothing else. Every variable these CLIs
 // need is passed through Launch's own env argument, where docker appends the
 // span's ANTHROPIC_BASE_URL last so a caller cannot shadow it.
-type agent func(span *glue.Span, ws string) (launch, error)
-
-// driverArgv is Claude Code. Sweep.Launch already injects ANTHROPIC_BASE_URL
-// with the span and the provider in the path (internal/oci/net.go:99), so the
-// driver needs no config file at all.
-//
-// ANTHROPIC_AUTH_TOKEN has to be set or the CLI looks for a login store that
-// does not exist in a container; its value is irrelevant because the proxy
-// discards whatever the container sent. Verified 2026-09-03: Claude Code 2.1.247 sent
-// an Authorization: Bearer of its own from the host login store even with
-// ANTHROPIC_AUTH_TOKEN set, which is why the proxy's unconditional
-// Header.Del("Authorization") (internal/proxy/proxy.go:524) is load-bearing and
-// not defensive.
-func driverAgent(image, model, prompt string) agent {
-	return func(*glue.Span, string) (launch, error) {
+func (h *harness) agentLaunch(r role, span *glue.Span, ws, prompt string) (launch, error) {
+	img := h.image[r.CLI]
+	switch r.CLI {
+	// Claude Code. Sweep.Launch already injects ANTHROPIC_BASE_URL with the
+	// span and the provider in the path (internal/oci/net.go:99), so the driver
+	// needs no config file at all.
+	//
+	// ANTHROPIC_AUTH_TOKEN has to be set or the CLI looks for a login store
+	// that does not exist in a container; its value is irrelevant because the
+	// proxy discards whatever the container sent. Verified 2026-09-03: Claude
+	// Code 2.1.247 sent an Authorization: Bearer of its own from the host login
+	// store even with ANTHROPIC_AUTH_TOKEN set, which is why the proxy's
+	// unconditional Header.Del("Authorization") (internal/proxy/proxy.go:524)
+	// is load-bearing and not defensive.
+	case "claude":
+		tools := ""
+		if r.ReadOnly {
+			tools = ` --tools ""`
+		}
 		return launch{
-			Image: image,
+			Image: img,
 			// ANTHROPIC_BASE_URL is NOT here: Launch appends the span's own
 			// last, and docker takes last-wins on a repeated -e, so metering
 			// cannot be shadowed by anything the harness passes.
@@ -1325,19 +1685,14 @@ func driverAgent(image, model, prompt string) agent {
 			// driver silently runs the image's default model, which the ledger
 			// still records truthfully in Outcome.Model — so the cost of being
 			// wrong is a surprise in the report, not a silent overspend.
-			Env:  []string{"ANTHROPIC_AUTH_TOKEN=glue", "ANTHROPIC_MODEL=" + model},
-			Argv: []string{"sh", "-c", `exec claude -p "$0" >/work/out.txt 2>/work/err.txt`, prompt},
+			Env:  []string{"ANTHROPIC_AUTH_TOKEN=glue", "ANTHROPIC_MODEL=" + r.Model},
+			Argv: []string{"sh", "-c", `exec claude -p` + tools + ` "$0" >/work/out.txt 2>/work/err.txt`, prompt},
 		}, nil
-	}
-}
 
-// codexArgv is Codex. Verified 2026-09-03 against codex 0.145.0: wire_api
-// "chat" is refused by the binary ("no longer supported"), so Responses is the
-// only wire and internal/proxy/provider.go's responsesParser is not optional.
-// CODEX_HOME points at a config the harness writes into the span's own scratch
-// dir, so two jurors in one sweep cannot share state through ~/.codex.
-func codexAgent(image, model, prompt string) agent {
-	return func(span *glue.Span, ws string) (launch, error) {
+	// Codex. Verified 2026-09-03 against codex 0.145.0: wire_api "chat" is
+	// refused by the binary ("no longer supported"), so Responses is the only
+	// wire and internal/proxy/provider.go's responsesParser is not optional.
+	case "codex":
 		dir := filepath.Join(ws, "codex")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return launch{}, err
@@ -1351,40 +1706,41 @@ base_url = %q
 wire_api = "responses"
 env_key = "GLUE_KEY"
 requires_openai_auth = false
-`, model, span.BaseURL("openai-responses"))
+`, r.Model, span.BaseURL(r.Provider))
 		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(cfg), 0o644); err != nil {
 			return launch{}, err
 		}
+		sandbox := ""
+		if r.ReadOnly {
+			sandbox = " --sandbox read-only"
+		}
 		return launch{
-			Image: image,
+			Image: img,
 			// CODEX_HOME points into the span's own scratch dir, so two jurors
 			// in one sweep cannot share state through ~/.codex. GLUE_KEY is the
 			// placeholder env_key above names; the proxy discards it unread and
 			// attaches the real credential on the outbound leg.
 			Env: []string{"CODEX_HOME=/work/codex", "GLUE_KEY=glue"},
 			Argv: []string{"sh", "-c",
-				`exec codex exec --skip-git-repo-check "$0" >/work/out.txt 2>/work/err.txt`, prompt},
+				`exec codex exec --skip-git-repo-check` + sandbox + ` "$0" >/work/out.txt 2>/work/err.txt`, prompt},
 		}, nil
-	}
-}
 
-// droidArgv is Factory droid. Verified 2026-09-03 against droid 0.138.0: it
-// POSTs baseUrl + "/chat/completions" and already sets
-// stream_options.include_usage itself, which is why the proxy's injection of
-// the same field (internal/proxy/provider.go:256) is idempotent rather than a
-// conflict. GLUE_KEY equivalent is the literal apiKey below; it is a
-// placeholder the proxy strips before the request leaves the process.
-func droidAgent(image, model, prompt string) agent {
-	return func(span *glue.Span, ws string) (launch, error) {
+	// Factory droid. Verified 2026-09-03 against droid 0.138.0: it POSTs
+	// baseUrl + "/chat/completions" and already sets
+	// stream_options.include_usage itself, which is why the proxy's injection
+	// of the same field (internal/proxy/provider.go:256) is idempotent rather
+	// than a conflict. The apiKey below is a placeholder the proxy strips
+	// before the request leaves the process.
+	case "droid":
 		dir := filepath.Join(ws, "droid")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return launch{}, err
 		}
 		cfg, err := json.Marshal(map[string]any{"customModels": []map[string]any{{
-			"model":           model,
+			"model":           r.Model,
 			"displayName":     "glue",
 			"provider":        "generic-chat-completion-api",
-			"baseUrl":         span.BaseURL("xai"),
+			"baseUrl":         span.BaseURL(r.Provider),
 			"apiKey":          "glue",
 			"maxOutputTokens": 8192,
 		}}})
@@ -1394,13 +1750,19 @@ func droidAgent(image, model, prompt string) agent {
 		if err := os.WriteFile(filepath.Join(dir, "settings.json"), cfg, 0o644); err != nil {
 			return launch{}, err
 		}
+		deny := ""
+		if r.ReadOnly {
+			deny = " --disabled-tools Create,Edit,ApplyPatch"
+		}
 		return launch{
-			Image: image,
+			Image: img,
 			Argv: []string{"sh", "-c",
-				`exec droid exec --settings /work/droid/settings.json -m "$0" "$1" >/work/out.txt 2>/work/err.txt`,
-				model, prompt},
+				`exec droid exec --settings /work/droid/settings.json` + deny +
+					` -m "$0" "$1" >/work/out.txt 2>/work/err.txt`,
+				r.Model, prompt},
 		}, nil
 	}
+	return launch{}, fmt.Errorf("role %s names no CLI", r.Name)
 }
 
 // container writes the agent's config, launches it, and waits. /src is
@@ -1412,11 +1774,15 @@ func droidAgent(image, model, prompt string) agent {
 // before returning, because the container is the lease on the span. A harness
 // that shells out to `docker wait` gets the happy path right and that part
 // wrong, and the symptom is a cancelled sweep that keeps spending.
-func (h *harness) container(ctx context.Context, span *glue.Span, ws string, a agent) error {
-	l, err := a(span, ws)
+func (h *harness) container(ctx context.Context, span *glue.Span, ws string, r role, prompt string) error {
+	l, err := h.agentLaunch(r, span, ws, prompt)
 	if err != nil {
 		return err
 	}
+	// TODO(you): the mounts. Every containerised role gets the same two, which
+	// is why the registry has no Reads column — the day a hunter is mounted on
+	// its own taxon.Scope instead of the whole repo, "work outside your scope
+	// is another agent's" stops being prose and this becomes a per-role list.
 	id, err := h.sw.Launch(span, l.Image, l.Env,
 		[]string{h.repo + ":/src:ro", ws + ":/work"}, l.Argv...)
 	if err != nil {
@@ -1430,6 +1796,18 @@ func (h *harness) container(ctx context.Context, span *glue.Span, ws string, a a
 	if code != 0 {
 		e, _ := os.ReadFile(filepath.Join(ws, "err.txt"))
 		return fmt.Errorf("agent exit %d: %s", code, tail(string(e), 300))
+	}
+	// role.Writes, enforced. Gcsa publishes an Output row per role; this is
+	// what makes it true rather than documentation. Note where the enforcement
+	// lives: not on the agent, which can write whatever it likes into its own
+	// throwaway /work, but at the reader, which refuses to go on without the
+	// one artifact it named. An agent that exits 0 having produced nothing is
+	// the most expensive silent failure in the pipeline, because it looks
+	// exactly like a run that honestly found nothing.
+	for _, w := range r.Writes {
+		if _, err := os.Stat(filepath.Join(ws, w)); err != nil {
+			return fmt.Errorf("role %s wrote no %s", r.Name, w)
+		}
 	}
 	return nil
 }

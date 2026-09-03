@@ -70,7 +70,7 @@ func TestPass1RejectsPlausibleFabrication(t *testing.T) {
 // ---------------------------------------------------------------- the jury
 
 func TestTally(t *testing.T) {
-	const heavy = heavyProvider + "/gpt-5.6-sol"
+	const heavy = "openai-responses/gpt-5.6-sol"
 	cases := []struct {
 		name  string
 		votes map[string]string
@@ -165,9 +165,11 @@ func TestAgentConfigsCarryTheCapabilityAndNoKey(t *testing.T) {
 	sw := sweepFor(t, "http://127.0.0.1:1")
 	span := sw.Span(nil, "t", sw.Budget())
 	ws := t.TempDir()
+	h := &harness{sw: sw, image: map[string]string{
+		"claude": "glue/claude:latest", "codex": "glue/codex:latest", "droid": "glue/droid:latest"}}
 
 	t.Run("codex", func(t *testing.T) {
-		l, err := codexAgent("glue/codex:latest", "gpt-5.6-sol", "disprove this")(span, ws)
+		l, err := h.agentLaunch(roles.heavy, span, ws, "disprove this")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,7 +200,7 @@ func TestAgentConfigsCarryTheCapabilityAndNoKey(t *testing.T) {
 	})
 
 	t.Run("droid", func(t *testing.T) {
-		l, err := droidAgent("glue/droid:latest", "grok-4-fast", "disprove this")(span, ws)
+		l, err := h.agentLaunch(roles.cheapA, span, ws, "disprove this")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +232,7 @@ func TestAgentConfigsCarryTheCapabilityAndNoKey(t *testing.T) {
 	})
 
 	t.Run("driver needs no file", func(t *testing.T) {
-		l, err := driverAgent("glue/claude:latest", "claude-sonnet-5", "hunt")(span, ws)
+		l, err := h.agentLaunch(roles.hunt, span, ws, "hunt")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +248,7 @@ func TestAgentConfigsCarryTheCapabilityAndNoKey(t *testing.T) {
 		if hasKey(l) {
 			t.Fatalf("a real credential reached the container: %+v", l)
 		}
-		if !slices.Contains(l.Env, "ANTHROPIC_MODEL=claude-sonnet-5") {
+		if !slices.Contains(l.Env, "ANTHROPIC_MODEL="+roles.hunt.Model) {
 			t.Fatalf("driver model not pinned: %v", l.Env)
 		}
 	})
@@ -445,8 +447,12 @@ func TestReport(t *testing.T) {
 	sw := sweepFor(t, fakeUpstream(t, &seen).URL)
 	root := sw.Span(nil, "target", sw.Budget())
 
-	h := &harness{sw: sw, cheapB: "glm-4.6"}
+	h := &harness{sw: sw, pool: map[string]*glue.Pool{}}
 	var err error
+	if h.q, err = openQueue(filepath.Join(t.TempDir(), "tasks.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.q.close() })
 	if h.find, err = newStore(filepath.Join(t.TempDir(), "f.jsonl")); err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +467,7 @@ func TestReport(t *testing.T) {
 		Lo: 8, Hi: 12, Verdict: "stands", Cluster: "injection:net", Split: true,
 		Note: "YES - both reach the same unescaped join",
 		Jury: map[string]string{"xai/grok-4-fast": "refuted", "glm/glm-4.6": "stands",
-			heavyProvider + "/gpt-5.6-sol": "stands"}})
+			"openai-responses/gpt-5.6-sol": "stands"}})
 	add(&Finding{Class: "authz-bypass", Title: "hallucinated", File: "nope.go",
 		Lo: 1, Hi: 2, Verdict: "rejected", Pass1: "no such file"})
 
