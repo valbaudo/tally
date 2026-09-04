@@ -16,7 +16,14 @@ import (
 //
 // Drive it with:
 //
-//	Main("mdash", Lease{Attempts: 2000, WallClock: 24 * time.Hour}, MDASH)
+//	Main("mdash", Lease{Attempts: 560, WallClock: 24 * time.Hour}, MDASH)
+//
+// Root: exactly what the nested scopes can draw — four route scopes and up to
+// three audit scopes, 80 apiece. Nested scopes draw FROM the root, so anything
+// larger funds slots no scope can dispatch; the headroom that pays for flakes
+// sits inside those 80s, beside the fan it covers. The root dispatches nothing
+// itself, so it declares no AttemptWallClock: every scope that dispatches
+// below sets its own.
 //
 // Two baked gates. mdashClaimGate validates the router's claim file and emits
 // the claim as a metric; it can establish nothing about the world, so it is
@@ -56,12 +63,22 @@ note verbatim into your declared output as {"secret": "..."}.`
 // restart audits the same instances without a seed.
 const mdashAudit = 3
 
+// mdashProveClock is the oracle's per-attempt clock wherever the oracle runs.
+// The 24-wide prove fan used to inherit whatever clock its phase's scope
+// carried — 10m in the route phase, a bound sized for the cheap 2-wide brief
+// fan it shares that scope with, and 20m in the audit phase — so the PHASE,
+// not the evidence, decided whether a prove fan reached a verdict or ran out
+// of clock. One constant, read at both sites.
+const mdashProveClock = 20 * time.Minute
+
 // MDASH returns Unverified — the run's product is a rate in the run record and
 // whatever findings the prove fan actuated, never a verdict of its own — but
 // only when at least one gate anywhere ran and wrote something dawn could
 // read. Unverified is this protocol's SUCCESS state, so returning it after a
 // run in which every stage was infra_error would make catastrophe and
-// measurement identical. A cancel from outside is propagated as itself.
+// measurement identical — that run is InfraError. A root lease spent before
+// the first instance is neither: no dispatch was ever made, which cybergym and
+// vdh both call Exhausted. A cancel from outside is propagated as itself.
 func MDASH(run *Scope) State {
 	type agreement struct {
 		env   Image
@@ -80,10 +97,13 @@ func MDASH(run *Scope) State {
 			run.Record("routing-stopped-early", fmt.Sprintf("root lease spent after %d of %d instances", routed, len(mdashInstances)))
 			break
 		}
+		// The prove fan runs in this scope too, so the scope carries the
+		// oracle's clock; the 2-wide brief fan below is far cheaper than that
+		// and merely finishes well inside it.
 		scope := run.Scope(string(env), Lease{
 			Attempts:         80,
 			WallClock:        3 * time.Hour,
-			AttemptWallClock: 10 * time.Minute,
+			AttemptWallClock: mdashProveClock,
 		})
 		branches := scope.Fan(2, func(i int) Stage {
 			return Stage{
@@ -158,7 +178,7 @@ func MDASH(run *Scope) State {
 		scope := run.Scope("audit-"+string(g.env), Lease{
 			Attempts:         80,
 			WallClock:        3 * time.Hour,
-			AttemptWallClock: 20 * time.Minute,
+			AttemptWallClock: mdashProveClock,
 		})
 		v := mdashProve(run, scope, g.env, "audit")
 		if v == Cancelled {
@@ -169,8 +189,10 @@ func MDASH(run *Scope) State {
 		// An agreement the oracle never tested is not an agreement the oracle
 		// failed to contradict. Counting it would publish the strongest
 		// possible claim about the router out of a fan that never voted, so
-		// the denominator is audits PERFORMED, not audits dispatched.
-		if v == InfraError {
+		// the denominator is audits PERFORMED, not audits dispatched. Passed
+		// and Rejected are the only two states in which the oracle voted: a
+		// fan dawn's clock ended did not vote either, it just ran out of time.
+		if v != Passed && v != Rejected {
 			continue
 		}
 		audited++
@@ -191,7 +213,15 @@ func MDASH(run *Scope) State {
 		run.Record("false_agreement_rate", float64(wrong)/float64(audited))
 	}
 
-	if !observed {
+	// A root lease spent before the first instance is a run in which dawn was
+	// never asked, not one in which dawn failed to answer — the loop never
+	// entered. cybergym and vdh both call that Exhausted; so does this. As
+	// InfraError it paged for a run that had not started, and it made a
+	// lease-exhausted run and a run whose every prove attempt failed one value.
+	switch {
+	case routed == 0:
+		return Exhausted
+	case !observed:
 		return InfraError
 	}
 	return Unverified
@@ -203,13 +233,17 @@ func MDASH(run *Scope) State {
 // output is ever published.
 //
 // It returns the ORACLE's state, from the same six: Passed (a branch proved
-// it), Rejected (the oracle voted and found nothing), Cancelled (the run was
+// it), Rejected (the oracle voted and found nothing), Exhausted (dawn's clock
+// ended the fan before any branch reached a verdict), Cancelled (the run was
 // cancelled underneath it), InfraError (no branch ever voted). A bool pair
-// could not say the fourth without the caller discarding half of it, and the
-// caller always did.
+// could not say the last three without the caller discarding most of it, and
+// the caller always did.
 //
-// Exhausted is not a vote: dawn's clock ended that attempt before a verdict
-// was recorded, which is the same evidence as no attempt at all.
+// Exhausted is still not a VOTE — dawn's clock ended those attempts before a
+// verdict was recorded — which is why the audit denominator counts only
+// Passed and Rejected. It is reported as itself all the same: a timed-out fan
+// filed as InfraError reads as "the oracle never voted", when what happened is
+// that it was not given long enough.
 //
 // Both phase AND env qualify the stage ids. attempt_id hashes no scope path,
 // so "prove-7" is one stage to recovery everywhere it appears — across the two
@@ -226,27 +260,38 @@ func mdashProve(run *Scope, scope *Scope, env Image, phase string) State {
 		}
 	})
 	run.Record("prove-states-"+phase+"-"+string(env), mdashStates(branches))
-	verdict := InfraError
+	// The whole fan is read before anything is decided. Returning on the first
+	// Passed branch left a Cancelled sibling further along unseen, so the
+	// caller kept dispatching 24-wide fans into a cancelled run — and the
+	// actuator fired inside one. A cancel outranks a proof; a vote outranks a
+	// clock; the proof itself is carried as an index, not actuated mid-scan.
+	verdict, proof := InfraError, -1
 	for i, r := range branches {
 		switch r.State {
-		case Passed:
-			if err := r.Actuate(mdashFileFinding); err != nil {
-				// Qualified by everything that varies: this runs up to seven
-				// times a run, and one name would leave every failure but the
-				// last unrecorded — the one thing that cannot be re-derived
-				// from the states above.
-				run.Record(fmt.Sprintf("actuation-failed-%s-%s-%d", phase, env, i), err.Error())
-			}
-			return Passed
 		case Cancelled:
-			verdict = Cancelled
+			return Cancelled
+		case Passed:
+			if proof < 0 {
+				proof = i
+			}
 		case Rejected:
+			verdict = Rejected
+		case Exhausted:
 			if verdict == InfraError {
-				verdict = Rejected
+				verdict = Exhausted
 			}
 		}
 	}
-	return verdict
+	if proof < 0 {
+		return verdict
+	}
+	// Qualified by everything that varies: this runs up to seven times a run,
+	// and one name would leave every failure but the last unrecorded — the one
+	// thing that cannot be re-derived from the states above.
+	if err := branches[proof].Actuate(mdashFileFinding); err != nil {
+		run.Record(fmt.Sprintf("actuation-failed-%s-%s-%d", phase, env, proof), err.Error())
+	}
+	return Passed
 }
 
 // mdashCancelled reports whether a drained fan contains a cancelled child, so

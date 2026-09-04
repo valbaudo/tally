@@ -30,6 +30,12 @@ var vdhClasses = [4]string{"concat", "percent", "fstring", "dotformat"}
 const (
 	// vdhDryStop: rounds that change nothing before the loop gives up.
 	vdhDryStop = 2
+	// vdhNoCorpus is the round-zero corpus: a value vdhCorpus cannot return,
+	// since every corpus it builds is either empty or ends in a newline.
+	// Seeding prev with "" compared round one against a round that never ran,
+	// so a first round whose four survivors declared nothing counted as dry
+	// before anything had been hunted twice.
+	vdhNoCorpus = "no round has completed"
 	// vdhRoundCost: a round is two fans, one per class each.
 	vdhRoundCost = 2 * len(vdhClasses)
 	// vdhRoundAttempts leases a round at its width PLUS two, because an
@@ -38,12 +44,13 @@ const (
 	// fan dispatch on a spent scope, which unwinds the whole run.
 	vdhRoundAttempts = vdhRoundCost + 2
 	// vdhRounds bounds the loop in ROUNDS, because a round is what the lease
-	// has to be able to pay for in one piece. Four rounds is the FLOOR for
-	// dry == vdhDryStop: round one finds something, round two is told not to
-	// re-report it and finds something new, and only rounds three and four can
-	// be dry. Every incomplete round advances nothing while still costing a
-	// round, so four rounds means one flake anywhere puts the stopping
-	// condition out of reach. Six is that floor plus slack for two.
+	// has to be able to pay for in one piece. THREE rounds is the floor for
+	// dry == vdhDryStop: round one only establishes the corpus, with nothing
+	// yet to compare it against, so the earliest two consecutive unchanged
+	// rounds are two and three. (The old claim of four assumed round two MUST
+	// find something new because it is told not to re-report — a hope about the
+	// agent, not a bound.) Every incomplete round advances nothing while still
+	// costing a round, so six is that floor plus slack for three.
 	vdhRounds = 6
 	// vdhAttempts is the root lease the loop actually needs: recon, one recon
 	// retry, and six fully funded rounds. Nested scopes draw from the root, so
@@ -106,10 +113,11 @@ func VDH(run *Scope) State {
 		return recon.State
 	}
 
-	// The seed is the EMPTY corpus. recon's artifact is orientation notes, not
-	// findings; hashing it as the round-zero corpus would make round one
-	// permanently wet no matter what it found.
-	carry, prev, dry := []Result{recon}, "", 0
+	// The round-zero corpus is a value no corpus can equal. recon's artifact is
+	// orientation notes, not findings, so hashing it as round zero would make
+	// round one permanently wet — but "" was no better: it is exactly what
+	// vdhCorpus returns for four survivors that declared nothing.
+	carry, prev, dry := []Result{recon}, vdhNoCorpus, 0
 	// Exhausted seeds the loop's own outcome: the loop can run zero times —
 	// recon may have spent the root clock — and "no hunt was ever dispatched"
 	// is not the state a completed hunt returns. observed is the other half:

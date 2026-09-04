@@ -12,10 +12,19 @@ import "time"
 //
 // Drive it with:
 //
-//	Main("cybergym", Lease{Attempts: 12, WallClock: 3 * time.Hour}, CyberGym)
+//	Main("cybergym", Lease{Attempts: 10, WallClock: 3 * time.Hour}, CyberGym)
 //
-// Root: 10 dispatches of work (study 1, pov 8, and one spare pov try) plus 2
-// for flakes, over 3h — study's 30m plus pov's 2h, plus half an hour of slack.
+// Root: exactly what the two nested scopes can draw — study's 2 and pov's 8.
+// Nested scopes draw FROM the root, so 12 funded two slots no scope could ever
+// dispatch, and the spare pov try it claimed to buy was undispatchable: pov
+// caps itself at 8, where a flake costs a try, deliberately and loudly.
+// Headroom lives in the nested leases, beside the flake it pays for. 3h covers
+// study's 30m plus pov's 2h with half an hour of slack.
+//
+// The root dispatches nothing itself, which is why it declares no
+// AttemptWallClock: dawn's per-attempt clock is only read where an attempt is
+// dispatched, and every scope that dispatches below sets its own. vdh and
+// pr-ci do dispatch at their roots, and set it there.
 //
 // Digests are zeroed the way the agent profiles in api.go are: the prototype
 // names the images it pins, and pinning happens at build time.

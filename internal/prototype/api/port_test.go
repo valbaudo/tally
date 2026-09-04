@@ -27,7 +27,11 @@ const (
 
 // cybergym: sequential attempts against a sound proof-of-vulnerability oracle.
 func portCybergym() {
-	Main("cybergym", Lease{Attempts: 12, WallClock: 3 * time.Hour}, func(run *Scope) State {
+	// Root: exactly what the two nested scopes can draw — study's 2 and pov's
+	// 8. Nested scopes draw FROM the root, so anything larger funds slots no
+	// scope can dispatch. The root dispatches nothing itself, hence no
+	// AttemptWallClock: every scope that dispatches below sets its own.
+	Main("cybergym", Lease{Attempts: 10, WallClock: 3 * time.Hour}, func(run *Scope) State {
 		// Every lease here is work plus headroom: the retry the second attempt
 		// exists to pay for needs a slot AND a clock to run in.
 		study := run.Scope("study", Lease{Attempts: 2, WallClock: 30 * time.Minute, AttemptWallClock: 10 * time.Minute})
@@ -69,11 +73,21 @@ func portMDASH() {
 	}
 	briefs := [2]string{"argue it IS reachable", "argue it is NOT reachable"}
 	const auditCap = 3
+	// One clock for the oracle wherever it runs. The 24-wide prove fan is the
+	// same work in both phases, so a phase-sized clock — 10m in the route
+	// phase, sized for the cheap 2-wide brief fan sharing that scope — let the
+	// PHASE decide whether the fan reached a verdict or ran out of clock.
+	const proveClock = 20 * time.Minute
 
-	Main("mdash", Lease{Attempts: 2000, WallClock: 24 * time.Hour}, func(run *Scope) State {
+	// Root: exactly what the nested scopes can draw — two route scopes and up
+	// to two audit scopes, 80 apiece. The root dispatches nothing itself,
+	// hence no AttemptWallClock.
+	Main("mdash", Lease{Attempts: 320, WallClock: 24 * time.Hour}, func(run *Scope) State {
 		// Returns the oracle's own state: passed (proved), rejected (voted and
-		// found nothing), cancelled, or infra_error (never voted). A bool pair
-		// could not say the last one without the caller dropping half of it.
+		// found nothing), exhausted (dawn's clock ended the fan before any
+		// branch reached a verdict), cancelled, or infra_error (never voted).
+		// A bool pair could not say the last three without the caller dropping
+		// most of it.
 		// Stage ids carry phase AND env: attempt_id hashes no scope path, so
 		// "prove-7" is one stage to recovery everywhere it appears.
 		prove := func(scope *Scope, env Image, phase string) State {
@@ -85,23 +99,34 @@ func portMDASH() {
 				}
 			})
 			run.Record("prove-states-"+phase+"-"+string(env), states(branches))
-			verdict := InfraError
+			// The whole fan is read before anything is decided: returning on
+			// the first Passed branch left a Cancelled sibling further along
+			// unseen, so the caller kept fanning into a cancelled run and the
+			// actuator fired inside one.
+			verdict, proof := InfraError, -1
 			for i, r := range branches {
 				switch r.State {
-				case Passed:
-					if err := r.Actuate(fileFinding); err != nil {
-						run.Record(fmt.Sprintf("actuation-failed-%s-%s-%d", phase, env, i), err.Error())
-					}
-					return Passed
 				case Cancelled:
-					verdict = Cancelled
+					return Cancelled
+				case Passed:
+					if proof < 0 {
+						proof = i
+					}
 				case Rejected:
+					verdict = Rejected
+				case Exhausted:
 					if verdict == InfraError {
-						verdict = Rejected
+						verdict = Exhausted
 					}
 				}
 			}
-			return verdict
+			if proof < 0 {
+				return verdict
+			}
+			if err := branches[proof].Actuate(fileFinding); err != nil {
+				run.Record(fmt.Sprintf("actuation-failed-%s-%s-%d", phase, env, proof), err.Error())
+			}
+			return Passed
 		}
 
 		type agreement struct {
@@ -116,7 +141,9 @@ func portMDASH() {
 				run.Record("routing-stopped-early", fmt.Sprintf("root lease spent after %d of %d instances", routed, len(instances)))
 				break
 			}
-			scope := run.Scope(string(env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: 10 * time.Minute})
+			// The prove fan runs in this scope too, so the scope carries the
+			// oracle's clock; the 2-wide brief fan finishes well inside it.
+			scope := run.Scope(string(env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: proveClock})
 			branches := scope.Fan(2, func(i int) Stage {
 				return Stage{
 					ID: fmt.Sprintf("route-%s-%d", env, i), Agent: ClaudeCode, Env: env,
@@ -172,7 +199,7 @@ func portMDASH() {
 				run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements", audited, len(sample)))
 				break
 			}
-			scope := run.Scope("audit-"+string(g.env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: 20 * time.Minute})
+			scope := run.Scope("audit-"+string(g.env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: proveClock})
 			v := prove(scope, g.env, "audit")
 			if v == Cancelled {
 				return Cancelled
@@ -180,8 +207,9 @@ func portMDASH() {
 			run.Record("oracle-audit-"+string(g.env), v)
 			observed = observed || v != InfraError
 			// An agreement the oracle never tested is not one it failed to
-			// contradict: the denominator is audits performed.
-			if v == InfraError {
+			// contradict: the denominator is audits performed, and Passed and
+			// Rejected are the only states in which the oracle voted.
+			if v != Passed && v != Rejected {
 				continue
 			}
 			audited++
@@ -196,7 +224,13 @@ func portMDASH() {
 		} else {
 			run.Record("false_agreement_rate", float64(wrong)/float64(audited))
 		}
-		if !observed {
+		// A root lease spent before the first instance is a run in which dawn
+		// was never asked, not one in which it failed to answer; cybergym and
+		// vdh both call that Exhausted.
+		switch {
+		case routed == 0:
+			return Exhausted
+		case !observed:
 			return InfraError
 		}
 		return Unverified
@@ -214,12 +248,19 @@ func portVDH() {
 	classes := [4]string{"concat", "percent", "fstring", "dotformat"}
 	const (
 		dryStop = 2
+		// A value corpus() cannot return: every corpus it builds is empty or
+		// ends in a newline. Seeding prev with "" compared round one against a
+		// round that never ran, so four survivors that declared nothing were
+		// dry before anything had been hunted twice.
+		noCorpus = "no round has completed"
 		// Width plus two flakes: an infra_error retry spends the same counter.
 		roundCost     = 2 * len(classes)
 		roundAttempts = roundCost + 2
-		// Four rounds is the floor for dryStop=2 when round two is told to
-		// find something new; six is that floor plus slack for two rounds that
-		// lose a class and so advance nothing.
+		// Three rounds is the floor for dryStop=2: round one only establishes
+		// the corpus, with nothing yet to compare it against, so the earliest
+		// two consecutive unchanged rounds are two and three. Six is that
+		// floor plus slack for three rounds that lose a class and so advance
+		// nothing.
 		rounds = 6
 	)
 
@@ -240,10 +281,11 @@ func portVDH() {
 			return recon.State
 		}
 
-		// Empty seed: recon's notes are a different declared output from the
-		// findings the rounds produce, so hashing them together made round one
-		// permanently wet.
-		carry, prev, dry := []Result{recon}, "", 0
+		// Round-zero corpus: recon's notes are a different declared output from
+		// the findings the rounds produce, so hashing them together made round
+		// one permanently wet — and "" was no better, being what corpus()
+		// returns for survivors that declared nothing.
+		carry, prev, dry := []Result{recon}, noCorpus, 0
 		// Exhausted seeds the loop's outcome: zero rounds is not what a
 		// completed hunt returns. observed is the other half — rounds that ran
 		// with no gate ever voting are a catastrophe, not a measurement.
