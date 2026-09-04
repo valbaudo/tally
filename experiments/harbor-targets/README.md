@@ -5,6 +5,16 @@ Four toy targets wrapped as Harbor tasks, each following the settled rules from
 pinned image at `/tests/test.sh`, agent output transported by a top-level
 `artifacts` entry that is **never** under `/logs/verifier`.
 
+**All four are now runnable by a real agent once a token exists.** The Claude Code
+CLI is baked into every agent environment image at a pinned version, so Harbor's
+`ClaudeCode.install()` short-circuits (`command -v claude` exits 0) and never
+reaches its `apt-get`/`npm` bootstrap — which is what used to kill agent *setup*
+under `no-network`. The agent phase then runs on a narrow `allowlist`. **No
+credential was used or needed to verify any of this**: every number below comes
+from the `oracle` and `nop` agents, which cost nothing and need no auth. Whether
+the allowlists are *sufficient* for a real authenticated run is therefore
+reasoned, not measured — that is the one open item.
+
 All numbers below were re-measured independently on 2026-09-04 (arm64, OrbStack,
 Harbor 0.22.0), not copied from the authoring runs.
 
@@ -12,12 +22,12 @@ Harbor 0.22.0), not copied from the authoring runs.
 
 Run every command from **this directory**.
 
-| Task | Commands | Reward | Gate |
-|---|---|---|---|
-| `cybergym` | `harbor run -p cybergym -a oracle -o jobs --job-name X`<br>`harbor run -p cybergym -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **SOUND** — differential crash oracle |
-| `mdash` | `harbor run -p mdash -a oracle -o jobs --job-name X`<br>`harbor run -p mdash -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **SOUND, with a stated ceiling** |
-| `pr-ci` | `harbor run -p pr-ci -a oracle -o jobs --job-name X`<br>`harbor run -p pr-ci -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **SOUND** — gate's own suite decides |
-| `vdh` | `harbor run -p vdh -a oracle -o jobs --job-name X`<br>`harbor run -p vdh -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **FORMAT-ONLY — not a correctness oracle** |
+| Task | Commands | Reward | Gate | Baked CLI | Agent network |
+|---|---|---|---|---|---|
+| `cybergym` | `harbor run -p cybergym -a oracle -o jobs --job-name X`<br>`harbor run -p cybergym -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **SOUND** — differential crash oracle | `2.1.259` | `allowlist`: `api.anthropic.com`, `console.anthropic.com` |
+| `mdash` | `harbor run -p mdash -a oracle -o jobs --job-name X`<br>`harbor run -p mdash -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **SOUND, with a stated ceiling** | `2.1.259` | `allowlist`: `api.anthropic.com`, `platform.claude.com` |
+| `pr-ci` | `harbor run -p pr-ci -a oracle -o jobs --job-name X`<br>`harbor run -p pr-ci -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **SOUND** — gate's own suite decides | `2.1.259` | `allowlist`: `api.anthropic.com`, `console.anthropic.com`, `statsig.anthropic.com` |
+| `vdh` | `harbor run -p vdh -a oracle -o jobs --job-name X`<br>`harbor run -p vdh -a nop -o jobs --job-name Y` | `1.0`<br>`0.0` | **FORMAT-ONLY — not a correctness oracle** | `2.1.259` | `allowlist` (set on `[agent]`, baseline stays `no-network`): `api.anthropic.com`, `console.anthropic.com`, `statsig.anthropic.com` |
 
 Plus two decoy sub-tasks that exist only to prove `cybergym`'s gate is not fooled:
 
@@ -26,7 +36,9 @@ Plus two decoy sub-tasks that exist only to prove `cybergym`'s gate is not foole
 | PoV crashing **both** builds | `harbor run -p cybergym/decoys/both -a oracle -o jobs --job-name X` | `0.0` |
 | PoV crashing **neither** build | `harbor run -p cybergym/decoys/neither -a oracle -o jobs --job-name X` | `0.0` |
 
-Every trial finishes in 33–39s.
+Every trial finishes in 33–41s (independently re-measured 2026-09-04 across all
+ten runs above; baking the CLI cost nothing measurable at trial time, because
+Harbor caches the built environment image).
 
 ## vdh's gate checks well-formedness, not correctness
 
@@ -60,7 +72,10 @@ container for the app to run there, so `cat`-ing the source would also score 1.0
 Image IDs as built on this host. The verifier tag in each `task.toml` is the
 `-gate:1` one; the `-env:1` tags are manual builds of the `environment/` context
 kept only to record a digest, since Harbor deletes the environment image it
-builds after each trial and leaves no stable tag.
+builds after each trial and leaves no stable tag. **The `-env:1` digests below
+predate the CLI bake** for `cybergym`/`mdash`/`vdh` — they are the last recorded
+pre-CLI builds and are kept as the "before" reference; the gate digests are the
+load-bearing ones and are unchanged (re-checked 2026-09-04, all four match).
 
 | Tag | Image ID |
 |---|---|
@@ -123,9 +138,24 @@ not the ID printed by `docker images`.
   why the `both` decoy exists.
 - **Everything here is native arm64.** No amd64 emulation anywhere, so no
   emulation cost to report.
-- `pr-ci` is the one task whose *agent* environment uses `network_mode =
-  "public"`; the other three run the agent with `no-network` too. All four
-  verifiers are `no-network`.
+- **Every agent phase is now `allowlist`; every verifier is still `no-network`**
+  with its pinned gate image. `pr-ci` used to be the outlier at `"public"` — the
+  CLI work tightened it rather than loosening it. The host lists are *not*
+  identical across the four (see the table); nobody has yet run an authenticated
+  agent to settle which list is actually right.
+- **The `allowlist` can sit in either `[environment]` or `[agent]`.** Three tasks
+  set it on `[environment]` (so agent *setup* gets it too); `vdh` sets it on
+  `[agent]` as a phase override and leaves the baseline at `no-network`. Both
+  work — verified live by inspecting the egress sidecar's
+  `EGRESS_CONTROL_INITIAL_NETWORK_MODE` mid-trial. `allowed_hosts` is rejected
+  unless `network_mode = "allowlist"`, and it must live in the same table.
+- **Baking the CLI is not free.** Image content size, before -> after:
+  `cybergym` 28.9 -> 127.3 MB, `mdash` 46.6 -> 193.6 MB, `vdh` 46.6 -> 145.0 MB,
+  `pr-ci` 371.0 -> 514.7 MB. On-disk: 137 MB -> 452 MB, 211 -> 716, 211 -> 526,
+  1.46 GB -> 1.94 GB. Nearly all of it is one 216 MB self-contained native
+  `linux-arm64` binary at `bin/claude.exe` — 2.1.x ships **no `cli.js`**, so a
+  symlink to one produces a dangling link and `command -v claude` returns 127.
+  Builds stay cheap (~4 s warm, ~12 s `--no-cache`) once `node:22-slim` is local.
 - Nothing here pushes, commits, or opens a PR. `pr-ci`'s agent produces a
   proposal (a unified diff); any mutation would happen through dawn's actuator
   after the gate votes.

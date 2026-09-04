@@ -24,10 +24,12 @@ network_mode = "no-network"
 [verifier.env]
 
 [agent]
+network_mode = "allowlist"
+allowed_hosts = ["api.anthropic.com", "platform.claude.com"]
 timeout_sec = 600.0
 
 [environment]
-network_mode = "public"
+network_mode = "no-network"
 build_timeout_sec = 900.0
 os = "linux"
 mcp_servers = []

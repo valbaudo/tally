@@ -40,21 +40,22 @@ harbor run -p vdh -a oracle -o jobs --job-name vdh-pass   # -> 1.0
 harbor run -p vdh -a nop    -o jobs --job-name vdh-fail   # -> 0.0
 ```
 
-Measured 2026-09-04: **1.000 in 50s** (oracle), **0.000 in 36s** (nop).
-Real gate output from `jobs/vdh-pass/vdh__c4rXWLC/verifier/test-stdout.txt`:
+Re-measured 2026-09-04 **after baking the CLI in and allowlisting the agent
+phase**: **1.000 in 45s** (oracle), **0.000 in 49s** (nop) — unchanged verdicts.
+Real gate output from `jobs/pb-vdh-pass/vdh__QKsJPaF/verifier/test-stdout.txt`:
 
 ```
-=== vdh gate (citation/format check only) host=9cd20550a610 ===
+=== vdh gate (citation/format check only) host=b5ed17acfd00 ===
 findings.jsonl: 2 non-empty line(s)
   line 1: OK   src/users.py:12 class='sql-injection'
   line 2: OK   src/orders.py:14 class='sql-injection'
 VERDICT: 1 (well-formed + grounded citations; NOT a correctness oracle)
 ```
 
-and from `jobs/vdh-fail/vdh__AWpLHwN/verifier/test-stdout.txt`:
+and from `jobs/pb-vdh-fail/vdh__Po6obNQ/verifier/test-stdout.txt`:
 
 ```
-=== vdh gate (citation/format check only) host=6a15d52ac4e4 ===
+=== vdh gate (citation/format check only) host=b59000c8f4ec ===
 FAIL: /app/findings.jsonl does not exist (no findings is a failure, not 'zero findings')
 VERDICT: 0 (well-formed + grounded citations; NOT a correctness oracle)
 ```
@@ -64,8 +65,86 @@ VERDICT: 0 (well-formed + grounded citations; NOT a correctness oracle)
 | Tag | Image ID |
 |---|---|
 | `dawn-vdh-gate:1` | `sha256:964f8b6a6a042eb7f8b01801bd34da5ff602d3270e5c462cbf986a319f9e7eae` |
-| `dawn-vdh-env:1` (same context Harbor builds from `environment/`) | `sha256:5e755087c551b6b6c59e67eee0d175806c8a1f2a96904cc2c1d9a2bff36b8b0f` |
+| agent env (same context Harbor builds from `environment/`) | rebuilt per run; `pb-vdh-env:3` = `sha256:fa8efa4026a2c8775a2048bd23a3e402978487ea057a08dfeeb78bc3f227c826` |
 | base `python:3.13-slim` | `sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285` |
+
+## Agent CLI is baked in; agent phase is allowlisted
+
+`environment/Dockerfile` bakes **Claude Code `2.1.259`**, pinned, into the
+agent image. Why it has to be baked rather than installed at runtime:
+
+- Harbor's `ClaudeCode.install()` (`harbor/agents/installed/claude_code.py:437`)
+  returns early when `_installed_claude_satisfies_version()` passes. With no
+  version pin on the Harbor side that check is just `_INSTALL_CHECK_COMMAND`
+  (`:89`): `export PATH="$HOME/.local/bin:$PATH"; command -v claude >/dev/null 2>&1`.
+- `ensure_system_dependencies(curl, bash, nodejs, npm, procps)` is only
+  reached on the **non**-skip path. Under `no-network` that `apt-get` exits
+  100 and the trial dies before authentication is ever attempted.
+- Agent *setup* runs under the `[environment]` baseline, **not** the agent
+  phase policy — `resolve_agent_phase_policy()` is documented as "effective
+  agent policy during `agent.run()`". So an allowlist alone would not have
+  saved setup. Baking is the fix; the allowlist is only for `run()`.
+
+Measured on the built image:
+
+```
+$ docker run --rm pb-vdh-env:3 sh -lc 'export PATH="$HOME/.local/bin:$PATH"; command -v claude >/dev/null 2>&1; echo rc=$?'
+rc=0
+$ docker run --rm pb-vdh-env:3 sh -lc 'command -v claude; claude --version'
+/usr/local/bin/claude
+2.1.259 (Claude Code)
+```
+
+Also verified `rc=0` and `claude --version` with `--network none` **and**
+`--user 1000:1000`, i.e. under the conditions agent setup actually sees.
+
+Claude Code 2.1.259 ships as a self-contained native ELF
+(`bin/claude.exe`, 216 MB), so node is used only in a build stage to resolve
+the pin — the runtime image has **no node and no npm** (`command -v node` →
+127). Copying the single binary instead of the whole `node_modules` tree
+saved 190 MB (716 MB → 526 MB) versus keeping node around.
+
+Network policy, resolved by Harbor's own resolver against this `task.toml`:
+
+```
+agent_env_baseline    = no-network   allowed_hosts=[]
+agent_phase           = allowlist    allowed_hosts=['api.anthropic.com', 'console.anthropic.com', 'statsig.anthropic.com']
+verifier_env_baseline = no-network   allowed_hosts=[]
+verifier_phase        = no-network   allowed_hosts=[]
+```
+
+The verifier stays `no-network` on both baseline and phase, on its pinned
+baked `dawn-vdh-gate:1`. Legal `network_mode` values are
+`no-network` | `public` | `allowlist`; `"none"` is **not** legal and fails
+with the misleading "Either datasets or tasks must be provided."
+
+The allowlist is not just config: a trial now brings up Harbor's egress
+sidecar alongside the agent container, which a pure `no-network` task does
+not need. Caught mid-run with `docker ps`:
+
+```
+vdh__navumar__env-main-1                                    vdh__navumar__env-main   Created
+vdh__navumar__env-harbor-docker-egress-control-sidecar-1    harbor-prebuilt:...      Up (health: starting)
+```
+
+`docker inspect` on it shows `EGRESS_CONTROL_INITIAL_NETWORK_MODE=no-network`
+with an empty `EGRESS_CONTROL_INITIAL_ALLOWED_HOSTS` — i.e. it boots at the
+`[environment]` baseline and Harbor flips it to the allowlist for
+`agent.run()`. That is exactly the dynamic phase switch
+`Trial._validate_dynamic_phase_switch()` pre-validates.
+
+The three allowlisted hosts are Anthropic's documented Claude Code egress
+set (API, auth/token refresh, feature flags). **Only the fact that the
+allowlist config resolves, the sidecar attaches, and the trial runs is
+measured** — end-to-end authenticated traffic was not tested here,
+deliberately: no credential was used, and `oracle`/`nop` need none. Whether
+`console.anthropic.com` / `statsig.anthropic.com` are genuinely required is
+reasoned, not measured; trim them if a real run shows they are not.
+
+`GROUND_TRUTH.md` is still absent from both images after the change
+(`find / -iname '*GROUND_TRUTH*'` → 0 hits in `pb-vdh-env:3` and in
+`dawn-vdh-gate:1`), and `/app/repo` is byte-identical to the pre-change
+image (`sha256sum` over every file: no diff).
 
 ## Transport
 
@@ -91,8 +170,18 @@ agent writes is ever executed.
   score 0 instead of erroring out — but it also means a gate that treats a
   missing artifact as "vacuously fine" would hand out free 1.0s. Hence
   check 1 above.
-- `environment.network_mode = "no-network"` is fine here: the image is built
-  before the agent runs, and `python:3.13-slim` was pre-pulled.
+- `environment.network_mode = "no-network"` is the **baseline** and stays
+  that way; the agent gets network only via the `[agent]` phase override.
+  Image builds happen before any of this and are unaffected.
+- Image cost is real and not small: **211 MB → 526 MB (+315 MB)**, almost all
+  of it the 216 MB Claude Code binary. Build is cheap though — 12s cold
+  (`--no-cache`) with base images already pulled, 10s warm.
+- `instruction.md` tells the agent to run `python3 /app/repo/demo_exploits.py`,
+  which fails with `ModuleNotFoundError: No module named 'db'` because that
+  script does `sys.path.insert(0, "src")` — a *relative* path, so it only
+  works from `cwd=/app/repo`. Pre-existing, identical in the pre-change
+  image, left alone: the seeded source is vendored byte-identical into both
+  build contexts and touching it would drift the gate's line-range check.
 
 ## Self-test (host-side, no Harbor)
 
