@@ -2,25 +2,35 @@ package api
 
 // The check: all four independently drafted protocols must be expressible in
 // this surface, with nothing left over. These functions are never called —
-// compiling them IS the test. If a construct is missing, this file stops
-// building; if a construct is here that none of them uses, it has no forcing
-// protocol and must be deleted — unless a settled decision forces it, in which
-// case TRACE.md names that decision instead of naming a protocol.
+// compiling them is the test, and it is `go test` / `go vet` that compiles
+// them, never `go build`, which skips _test.go files entirely.
+//
+// Compilation can prove SUFFICIENCY only: if a construct is missing, this file
+// stops compiling. It cannot prove minimality, because nothing in Go fails
+// because a construct went unused — a construct no port here uses is caught by
+// the TRACE.md audit and by nothing else.
 
 import (
 	"fmt"
 	"time"
 )
 
+// Full-length digests: an Image is a digest-pinned reference and dawn rejects
+// anything else at dispatch, so a port that pins "sha256:aa" is demonstrating
+// a stage no run would accept. Two gate images, because a sound gate and a
+// format-only gate make opposite claims and one image cannot make both.
 const (
-	envImg  Image = "dawn-env@sha256:aa"
-	gateImg Image = "dawn-gate@sha256:bb"
+	envImg        Image = "dawn-env@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	soundGateImg  Image = "dawn-sound-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	formatGateImg Image = "dawn-format-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 )
 
 // cybergym: sequential attempts against a sound proof-of-vulnerability oracle.
 func portCybergym() {
-	Main("cybergym", Lease{Attempts: 12, WallClock: 2 * time.Hour}, func(run *Scope) State {
-		study := run.Scope("study", Lease{Attempts: 2, WallClock: 20 * time.Minute, AttemptWallClock: 10 * time.Minute})
+	Main("cybergym", Lease{Attempts: 12, WallClock: 3 * time.Hour}, func(run *Scope) State {
+		// Every lease here is work plus headroom: the retry the second attempt
+		// exists to pay for needs a slot AND a clock to run in.
+		study := run.Scope("study", Lease{Attempts: 2, WallClock: 30 * time.Minute, AttemptWallClock: 10 * time.Minute})
 		notes := study.Run(Stage{
 			ID: "study", Agent: ClaudeCode, Env: envImg,
 			Prompt: "Read /app/src/vuln.c and write findings.",
@@ -30,12 +40,12 @@ func portCybergym() {
 			return notes.State
 		}
 
-		pov := run.Scope("pov", Lease{Attempts: 8, WallClock: 90 * time.Minute, AttemptWallClock: 12 * time.Minute})
+		pov := run.Scope("pov", Lease{Attempts: 8, WallClock: 2 * time.Hour, AttemptWallClock: 12 * time.Minute})
 		stage := Stage{
 			ID: "pov", Agent: ClaudeCode, Env: envImg,
 			Inputs: []Result{notes},
 			Prompt: "Write a proof-of-vulnerability.",
-			Gate:   SoundGate(gateImg),
+			Gate:   SoundGate(soundGateImg),
 		}
 		// Seeded with a state, not a zero Result: the loop may run zero times,
 		// and Result{}.State is a seventh state.
@@ -53,29 +63,45 @@ func portCybergym() {
 // mdash: an opposed-brief router, a 24-wide prove fan on disagreement, and an
 // audited sample of the agreements that a proof can actually contradict.
 func portMDASH() {
-	instances := []Image{"dawn-mdash-stock@sha256:01", "dawn-mdash-patched@sha256:02"}
+	instances := []Image{
+		"dawn-mdash-stock@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		"dawn-mdash-patched@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+	}
 	briefs := [2]string{"argue it IS reachable", "argue it is NOT reachable"}
+	const auditCap = 3
 
 	Main("mdash", Lease{Attempts: 2000, WallClock: 24 * time.Hour}, func(run *Scope) State {
-		prove := func(scope *Scope, env Image, phase string) (proved, ran bool) {
+		// Returns the oracle's own state: passed (proved), rejected (voted and
+		// found nothing), cancelled, or infra_error (never voted). A bool pair
+		// could not say the last one without the caller dropping half of it.
+		// Stage ids carry phase AND env: attempt_id hashes no scope path, so
+		// "prove-7" is one stage to recovery everywhere it appears.
+		prove := func(scope *Scope, env Image, phase string) State {
 			branches := scope.Fan(24, func(i int) Stage {
 				return Stage{
-					ID: fmt.Sprintf("%s-prove-%d", phase, i), Agent: ClaudeCode, Env: env,
+					ID: fmt.Sprintf("%s-%s-prove-%d", phase, env, i), Agent: ClaudeCode, Env: env,
 					Prompt: "Read bob's note as alice.",
-					Gate:   SoundGate(gateImg),
+					Gate:   SoundGate(soundGateImg),
 				}
 			})
 			run.Record("prove-states-"+phase+"-"+string(env), states(branches))
-			for _, r := range branches {
-				if r.State == Passed {
+			verdict := InfraError
+			for i, r := range branches {
+				switch r.State {
+				case Passed:
 					if err := r.Actuate(fileFinding); err != nil {
-						run.Record("actuation_failed", err.Error())
+						run.Record(fmt.Sprintf("actuation-failed-%s-%s-%d", phase, env, i), err.Error())
 					}
-					return true, true
+					return Passed
+				case Cancelled:
+					verdict = Cancelled
+				case Rejected:
+					if verdict == InfraError {
+						verdict = Rejected
+					}
 				}
-				ran = ran || r.State == Rejected
 			}
-			return false, ran
+			return verdict
 		}
 
 		type agreement struct {
@@ -84,28 +110,41 @@ func portMDASH() {
 		}
 		var agreed []agreement
 		observed := false
+		routed, claimed := 0, 0
 		for _, env := range instances {
+			if !run.More() {
+				run.Record("routing-stopped-early", fmt.Sprintf("root lease spent after %d of %d instances", routed, len(instances)))
+				break
+			}
 			scope := run.Scope(string(env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: 10 * time.Minute})
-			routed := scope.Fan(2, func(i int) Stage {
+			branches := scope.Fan(2, func(i int) Stage {
 				return Stage{
-					ID: fmt.Sprintf("route-%d", i), Agent: ClaudeCode, Env: env,
+					ID: fmt.Sprintf("route-%s-%d", env, i), Agent: ClaudeCode, Env: env,
 					Prompt: briefs[i],
-					Gate:   FormatOnlyGate(gateImg),
+					Gate:   FormatOnlyGate(formatGateImg),
 				}
 			})
-			run.Record("route-states-"+string(env), states(routed))
-			a, aok := routed[0].Metric("exploitable")
-			b, bok := routed[1].Metric("exploitable")
+			run.Record("route-states-"+string(env), states(branches))
+			routed++
+			if cancelled(branches) {
+				return Cancelled
+			}
+			a, aok := branches[0].Metric("exploitable")
+			b, bok := branches[1].Metric("exploitable")
 			if aok && bok {
 				observed = true
+				claimed++
 				if a == b {
 					agreed = append(agreed, agreement{env, a})
 					continue
 				}
 			}
-			proved, ran := prove(scope, env, "route")
-			run.Record("proved-"+string(env), proved)
-			observed = observed || ran
+			v := prove(scope, env, "route")
+			if v == Cancelled {
+				return Cancelled
+			}
+			run.Record("oracle-route-"+string(env), v)
+			observed = observed || v != InfraError
 		}
 
 		// One-sided oracle: only a "not exploitable" agreement can be shown
@@ -116,20 +155,46 @@ func portMDASH() {
 				auditable = append(auditable, g)
 			}
 		}
-		wrong := 0
-		for _, g := range auditable {
+		// Every population the rate hangs off, so a reader can see the gap
+		// between agreements and the subset a one-sided oracle can check.
+		run.Record("instances_routed", routed)
+		run.Record("instances_with_both_claims", claimed)
+		run.Record("agreements", len(agreed))
+		run.Record("unauditable_agreements", len(agreed)-len(auditable))
+
+		sample := auditable
+		if len(sample) > auditCap {
+			sample = sample[:auditCap]
+		}
+		wrong, audited := 0, 0
+		for _, g := range sample {
+			if !run.More() {
+				run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements", audited, len(sample)))
+				break
+			}
 			scope := run.Scope("audit-"+string(g.env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: 20 * time.Minute})
-			proved, ran := prove(scope, g.env, "audit")
-			observed = observed || ran
-			if proved {
+			v := prove(scope, g.env, "audit")
+			if v == Cancelled {
+				return Cancelled
+			}
+			run.Record("oracle-audit-"+string(g.env), v)
+			observed = observed || v != InfraError
+			// An agreement the oracle never tested is not one it failed to
+			// contradict: the denominator is audits performed.
+			if v == InfraError {
+				continue
+			}
+			audited++
+			if v == Passed {
 				wrong++
 			}
 		}
-		run.Record("audited", len(auditable))
-		if len(auditable) == 0 {
-			run.Record("false_agreement_rate", "undefined: nothing was auditable")
+		run.Record("audit_sample", len(sample))
+		run.Record("audited", audited)
+		if audited == 0 {
+			run.Record("false_agreement_rate", "undefined: no auditable agreement was ever tested by the oracle")
 		} else {
-			run.Record("false_agreement_rate", float64(wrong)/float64(len(auditable)))
+			run.Record("false_agreement_rate", float64(wrong)/float64(audited))
 		}
 		if !observed {
 			return InfraError
@@ -147,12 +212,24 @@ func fileFinding(a *Actuation) error {
 // vdh: an outer loop with fan-in and no sound oracle.
 func portVDH() {
 	classes := [4]string{"concat", "percent", "fstring", "dotformat"}
-	const roundCost = 2 * len(classes)
-	const rounds = 4
+	const (
+		dryStop = 2
+		// Width plus two flakes: an infra_error retry spends the same counter.
+		roundCost     = 2 * len(classes)
+		roundAttempts = roundCost + 2
+		// Four rounds is the floor for dryStop=2 when round two is told to
+		// find something new; six is that floor plus slack for two rounds that
+		// lose a class and so advance nothing.
+		rounds = 6
+	)
 
-	Main("vdh", Lease{Attempts: 1 + rounds*roundCost, WallClock: 6 * time.Hour, AttemptWallClock: 30 * time.Minute}, func(p *Scope) State {
-		p.Record("caveat", fmt.Sprintf("cross-vendor decorrelation lost: codex fixes FanOut=%v, so every hunter is claude-code", Codex.FanOut))
-		p.Record("caveat", "coverage unknown: no stage here can reach passed")
+	Main("vdh", Lease{Attempts: 2 + rounds*roundAttempts, WallClock: 14 * time.Hour, AttemptWallClock: 30 * time.Minute}, func(p *Scope) State {
+		// One profile drives every hunter and validator, read from the same
+		// variable the caveat quotes.
+		hunter := ClaudeCode
+		// Two caveats, two names: Record writes a name once per run.
+		p.Record("caveat-vendor", fmt.Sprintf("cross-vendor decorrelation lost: one profile runs every hunt here, and codex fixes FanOut=%v, so it can only be claude-code", Codex.FanOut))
+		p.Record("caveat-coverage", "coverage unknown: no stage here can reach passed")
 
 		recon := p.Run(Stage{
 			ID: "recon", Agent: ClaudeCode, Env: envImg,
@@ -167,31 +244,51 @@ func portVDH() {
 		// findings the rounds produce, so hashing them together made round one
 		// permanently wet.
 		carry, prev, dry := []Result{recon}, "", 0
-		for round := 1; round <= rounds && dry < 2 && p.More(); round++ {
-			rs := p.Scope(fmt.Sprintf("round-%d", round), Lease{Attempts: roundCost, WallClock: 80 * time.Minute, AttemptWallClock: 30 * time.Minute})
+		// Exhausted seeds the loop's outcome: zero rounds is not what a
+		// completed hunt returns. observed is the other half — rounds that ran
+		// with no gate ever voting are a catastrophe, not a measurement.
+		ran, observed := 0, false
+		for round := 1; round <= rounds && dry < dryStop && p.More(); round++ {
+			rs := p.Scope(fmt.Sprintf("round-%d", round), Lease{Attempts: roundAttempts, WallClock: 2 * time.Hour, AttemptWallClock: 30 * time.Minute})
+			ran++
 			hunts := rs.Fan(len(classes), func(i int) Stage {
 				return Stage{
-					ID: fmt.Sprintf("hunt-r%d-%s", round, classes[i]), Agent: ClaudeCode, Env: envImg,
+					ID: fmt.Sprintf("hunt-r%d-%s", round, classes[i]), Agent: hunter, Env: envImg,
 					Prompt: "Hunt " + classes[i], Inputs: carry,
-					Gate: FormatOnlyGate(gateImg),
+					Gate: FormatOnlyGate(formatGateImg),
 				}
 			})
 			p.Record(fmt.Sprintf("round-%d-hunt-states", round), states(hunts))
+			if cancelled(hunts) {
+				return Cancelled
+			}
+
+			// A round is comparable only if all four classes were hunted and
+			// all four validated. Attrition hashes differently from the same
+			// findings a round earlier, so it would reset dry; total loss
+			// would clobber a real corpus with nothing. Neither is progress.
+			found := surviving(hunts)
+			observed = observed || len(found) > 0
+			if len(found) < len(classes) {
+				p.Record(fmt.Sprintf("round-%d-incomplete", round), fmt.Sprintf("only %d of %d hunt children reached a verdict; corpus unchanged", len(found), len(classes)))
+				continue
+			}
 
 			vals := rs.Fan(len(classes), func(i int) Stage {
 				return Stage{
-					ID: fmt.Sprintf("validate-r%d-%s", round, classes[i]), Agent: ClaudeCode, Env: envImg,
-					Prompt: "Disconfirm " + classes[i], Inputs: surviving(hunts),
-					Gate: FormatOnlyGate(gateImg),
+					ID: fmt.Sprintf("validate-r%d-%s", round, classes[i]), Agent: hunter, Env: envImg,
+					Prompt: "Disconfirm " + classes[i], Inputs: found,
+					Gate: FormatOnlyGate(formatGateImg),
 				}
 			})
 			p.Record(fmt.Sprintf("round-%d-validate-states", round), states(vals))
+			if cancelled(vals) {
+				return Cancelled
+			}
 
 			live := surviving(vals)
-			if len(live) == 0 {
-				// Unknown, not empty. Clobbering carry here would make total
-				// failure differ from prev and reset dry.
-				p.Record(fmt.Sprintf("round-%d-void", round), "no validate child reached a verdict")
+			if len(live) < len(classes) {
+				p.Record(fmt.Sprintf("round-%d-incomplete", round), fmt.Sprintf("only %d of %d validate children reached a verdict; corpus unchanged", len(live), len(classes)))
 				continue
 			}
 			carry = live
@@ -200,6 +297,13 @@ func portVDH() {
 			} else {
 				prev, dry = d, 0
 			}
+		}
+		p.Record("stop", fmt.Sprintf("%d of %d rounds ran, %d consecutive dry of %d needed, converged=%v", ran, rounds, dry, dryStop, dry >= dryStop))
+		switch {
+		case ran == 0:
+			return Exhausted
+		case !observed:
+			return InfraError
 		}
 		return Unverified
 	})
@@ -215,6 +319,17 @@ func surviving(rs []Result) []Result {
 		}
 	}
 	return out
+}
+
+// cancelled reports whether a drained fan contains a cancelled child: a cancel
+// is the run's business, not the round's.
+func cancelled(rs []Result) bool {
+	for _, r := range rs {
+		if r.State == Cancelled {
+			return true
+		}
+	}
+	return false
 }
 
 // states is what makes a dropped child loud: every branch of a drained fan.
@@ -233,7 +348,7 @@ func corpus(rs []Result) string {
 	s := ""
 	for _, r := range rs {
 		for _, a := range r.Manifest {
-			s += a.Name + a.Digest
+			s += a.Name + "@" + a.Digest + "\n"
 		}
 	}
 	return s
@@ -246,12 +361,15 @@ func portPRCI() {
 		fix := run.Run(Stage{
 			ID: "fix", Agent: ClaudeCode, Env: envImg,
 			Prompt: "Fix the red CI. Hand back a unified diff and nothing else.",
-			Gate:   SoundGate(gateImg),
+			Gate:   SoundGate(soundGateImg),
 		})
 		if fix.State != Passed {
 			return fix.State
 		}
 		if err := fix.Actuate(openPR); err != nil {
+			// Recorded, or "the gate said yes and the PR never opened" is
+			// indistinguishable from "no verdict was ever obtained".
+			run.Record("actuation_failed", err.Error())
 			return InfraError
 		}
 		return Passed

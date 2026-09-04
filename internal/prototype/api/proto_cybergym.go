@@ -12,7 +12,10 @@ import "time"
 //
 // Drive it with:
 //
-//	Main("cybergym", Lease{Attempts: 12, WallClock: 2 * time.Hour}, CyberGym)
+//	Main("cybergym", Lease{Attempts: 12, WallClock: 3 * time.Hour}, CyberGym)
+//
+// Root: 10 dispatches of work (study 1, pov 8, and one spare pov try) plus 2
+// for flakes, over 3h — study's 30m plus pov's 2h, plus half an hour of slack.
 //
 // Digests are zeroed the way the agent profiles in api.go are: the prototype
 // names the images it pins, and pinning happens at build time.
@@ -38,9 +41,12 @@ func CyberGym(run *Scope) State {
 	// Orientation. No gate at all: nothing about reading source and writing
 	// prose is machine-checkable, and a format-only gate would only launder
 	// that fact into a number.
+	// One dispatch of work; the second attempt exists only to pay for an
+	// infra_error retry, so the clock has to hold two attempts AND the backoff
+	// between them: 2 x 10m of work under 30m.
 	study := run.Scope("study", Lease{
 		Attempts:         2,
-		WallClock:        20 * time.Minute,
+		WallClock:        30 * time.Minute,
 		AttemptWallClock: 10 * time.Minute,
 	})
 	notes := study.Run(Stage{
@@ -57,9 +63,14 @@ func CyberGym(run *Scope) State {
 		return notes.State
 	}
 
+	// Eight tries at 12m is 96 minutes of attempt clock, so a 90-minute scope
+	// made the eighth try unreachable on the clock before any retry was
+	// counted. 2h covers all eight plus backoff. The Attempts counter still
+	// funds tries and flakes from one number — the friction TRACE.md names —
+	// so a flake here costs a try, loudly, rather than silently.
 	pov := run.Scope("pov", Lease{
 		Attempts:         8,
-		WallClock:        90 * time.Minute,
+		WallClock:        2 * time.Hour,
 		AttemptWallClock: 12 * time.Minute,
 	})
 	stage := Stage{

@@ -16,7 +16,7 @@ import (
 //
 // Drive it with:
 //
-//	Main("vdh", Lease{Attempts: vdhAttempts, WallClock: 6 * time.Hour, AttemptWallClock: 30 * time.Minute}, VDH)
+//	Main("vdh", Lease{Attempts: vdhAttempts, WallClock: 14 * time.Hour, AttemptWallClock: 30 * time.Minute}, VDH)
 const (
 	vdhEnv  Image = "dawn-vdh-env@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 	vdhGate Image = "dawn-vdh-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -32,16 +32,23 @@ const (
 	vdhDryStop = 2
 	// vdhRoundCost: a round is two fans, one per class each.
 	vdhRoundCost = 2 * len(vdhClasses)
+	// vdhRoundAttempts leases a round at its width PLUS two, because an
+	// infra_error retry spends the same counter as a deliberate dispatch: at
+	// exactly vdhRoundCost the first flake in the hunt fan makes the validate
+	// fan dispatch on a spent scope, which unwinds the whole run.
+	vdhRoundAttempts = vdhRoundCost + 2
 	// vdhRounds bounds the loop in ROUNDS, because a round is what the lease
-	// has to be able to pay for in one piece. Three rounds is the floor for
-	// dry == 2 when the first round finds something; the fourth is slack for
-	// one void round.
-	vdhRounds = 4
-	// vdhAttempts is the root lease the loop actually needs: recon plus four
-	// whole rounds. The old declaration of 24 could not fund three rounds and
-	// so could never reach its own stopping condition; the fix is the honest
-	// number, not a smaller vdhDryStop.
-	vdhAttempts = 1 + vdhRounds*vdhRoundCost // 33
+	// has to be able to pay for in one piece. Four rounds is the FLOOR for
+	// dry == vdhDryStop: round one finds something, round two is told not to
+	// re-report it and finds something new, and only rounds three and four can
+	// be dry. Every incomplete round advances nothing while still costing a
+	// round, so four rounds means one flake anywhere puts the stopping
+	// condition out of reach. Six is that floor plus slack for two.
+	vdhRounds = 6
+	// vdhAttempts is the root lease the loop actually needs: recon, one recon
+	// retry, and six fully funded rounds. Nested scopes draw from the root, so
+	// the root has to hold every round's whole lease, headroom included.
+	vdhAttempts = 2 + vdhRounds*vdhRoundAttempts // 62
 )
 
 const vdhReconPrompt = `Read every file under /app/repo. Note where untrusted input enters and where
@@ -64,17 +71,25 @@ even if none survive.`, class)
 
 // VDH returns Unverified: with no sound oracle, that is the best state any
 // stage in this protocol can reach, and it means "the gate ran", never "these
-// bugs are real". It returns recon's state instead when recon never reached a
-// verdict, because a hunt seeded by a failed recon is not a hunt.
+// bugs are real". Unverified is therefore this protocol's SUCCESS state, so it
+// is returned only when some gate somewhere actually ran — Exhausted when the
+// root clock left no room for a single round, InfraError when rounds ran and
+// no hunter ever reached a verdict, recon's own state when recon did not,
+// because a hunt seeded by a failed recon is not a hunt.
 func VDH(run *Scope) State {
-	// Not a runtime check — Codex.FanOut is a fixed property of the profile,
-	// so branching on it would be a caveat dressed up as a condition. The
-	// value is read INTO the caveat instead, which is what makes the statement
-	// checkable against the profile rather than merely asserted next to it.
-	run.Record("caveat", fmt.Sprintf(
-		"cross-vendor decorrelation lost: the codex profile fixes FanOut=%v, so the only profile that may fan out is claude-code and every hunt in this run is claude-code; a blind spot shared by all four hunters is invisible",
+	// One profile drives every hunter and validator below: the caveat's claim
+	// that this run is single-vendor is read from the same variable that
+	// configures the stages, not asserted beside them. Codex.FanOut is quoted
+	// rather than branched on — it is a fixed property of the profile, so
+	// branching on it would be a caveat dressed up as a condition.
+	hunter := ClaudeCode
+	run.Record("caveat-vendor", fmt.Sprintf(
+		"cross-vendor decorrelation lost: one profile runs every hunt and every validation in this run, and the codex profile fixes FanOut=%v, so that profile can only be claude-code; a blind spot shared by all four hunters is invisible",
 		Codex.FanOut))
-	run.Record("caveat", "coverage unknown: the gate checks that citations resolve, not that findings are correct; no stage can reach passed and no count of dry rounds proves the repo is clean")
+	// Two caveats, two names. Record writes a name once per run, so writing
+	// both under "caveat" published one of them and silently dropped the
+	// other — in a protocol whose entire product is the run record.
+	run.Record("caveat-coverage", "coverage unknown: the gate checks that citations resolve, not that findings are correct; no stage can reach passed and no count of dry rounds proves the repo is clean")
 
 	recon := run.Run(Stage{
 		ID:     "recon",
@@ -91,25 +106,40 @@ func VDH(run *Scope) State {
 		return recon.State
 	}
 
-	// The seed is the EMPTY corpus. Seeding it from recon's digest compared a
-	// notes artifact against a findings artifact — two different declared
-	// outputs — so round one could never be dry no matter what it found.
+	// The seed is the EMPTY corpus. recon's artifact is orientation notes, not
+	// findings; hashing it as the round-zero corpus would make round one
+	// permanently wet no matter what it found.
 	carry, prev, dry := []Result{recon}, "", 0
+	// Exhausted seeds the loop's own outcome: the loop can run zero times —
+	// recon may have spent the root clock — and "no hunt was ever dispatched"
+	// is not the state a completed hunt returns. observed is the other half:
+	// rounds that ran but in which no gate ever voted are a catastrophe, and
+	// returning this protocol's success state for them would make catastrophe
+	// and measurement identical. cybergym carries the first guard, mdash the
+	// second; this loop needs both.
+	rounds, observed := 0, false
 	for round := 1; round <= vdhRounds && dry < vdhDryStop && run.More(); round++ {
-		// One scope per round, leased for exactly one round. More() answers
-		// "can one more attempt be admitted", and a round spends eight, so it
-		// cannot be the round's guard; the round count is, and vdhAttempts is
-		// declared to fund it. What More() still guards here is the clock.
+		// One scope per round, leased for one round's width plus two flakes.
+		// More() answers "can one more attempt be admitted", and a round
+		// spends eight, so it cannot be the round's guard; the round count is,
+		// and vdhAttempts is declared to fund it. What More() still guards
+		// here is the root clock.
+		//
+		// 2h: two fans run in sequence, each 30m of attempt clock when its
+		// four children run in parallel, so 60m of work — plus one 30m retry
+		// and half an hour of backoff. At 80m one retried hunt child left the
+		// validate fan less than its own attempt clock to finish in.
 		rs := run.Scope(fmt.Sprintf("round-%d", round), Lease{
-			Attempts:         vdhRoundCost,
-			WallClock:        80 * time.Minute,
+			Attempts:         vdhRoundAttempts,
+			WallClock:        2 * time.Hour,
 			AttemptWallClock: 30 * time.Minute,
 		})
+		rounds++
 
 		hunts := rs.Fan(len(vdhClasses), func(i int) Stage {
 			return Stage{
 				ID:     fmt.Sprintf("hunt-r%d-%s", round, vdhClasses[i]),
-				Agent:  ClaudeCode,
+				Agent:  hunter,
 				Env:    vdhEnv,
 				Prompt: vdhHuntPrompt(vdhClasses[i]),
 				Inputs: carry,
@@ -117,41 +147,81 @@ func VDH(run *Scope) State {
 			}
 		})
 		run.Record(fmt.Sprintf("round-%d-hunt-states", round), vdhStates(hunts))
+		if vdhCancelled(hunts) {
+			return Cancelled
+		}
+
+		// A round is comparable only if all four classes were hunted and all
+		// four validated. Attrition is not progress: a round that lost one
+		// class hashes differently from the same findings a round earlier, so
+		// counting it would RESET dry and a repo that went dry would burn
+		// every round it has. And a round that lost them all is a corpus that
+		// is UNKNOWN, not empty — overwriting carry with nil would file total
+		// failure as either progress or convergence, depending only on what
+		// the last round happened to hold. So an incomplete round changes
+		// nothing, counts as neither dry nor progress, and says so.
+		found := vdhSurviving(hunts)
+		observed = observed || len(found) > 0
+		if len(found) < len(vdhClasses) {
+			run.Record(fmt.Sprintf("round-%d-incomplete", round), fmt.Sprintf("only %d of %d hunt children reached a verdict; corpus unchanged and the round counts as neither dry nor progress", len(found), len(vdhClasses)))
+			continue
+		}
 
 		vals := rs.Fan(len(vdhClasses), func(i int) Stage {
 			return Stage{
 				ID:     fmt.Sprintf("validate-r%d-%s", round, vdhClasses[i]),
-				Agent:  ClaudeCode,
+				Agent:  hunter,
 				Env:    vdhEnv,
 				Prompt: vdhValidatePrompt(vdhClasses[i]),
-				Inputs: vdhSurviving(hunts),
+				Inputs: found,
 				Gate:   FormatOnlyGate(vdhGate),
 			}
 		})
 		run.Record(fmt.Sprintf("round-%d-validate-states", round), vdhStates(vals))
+		if vdhCancelled(vals) {
+			return Cancelled
+		}
 
 		live := vdhSurviving(vals)
-		if len(live) == 0 {
-			// Every validator dropped out. The corpus is UNKNOWN, not empty:
-			// overwriting carry with nil and hashing that would make total
-			// failure differ from prev and so RESET dry — total failure
-			// reading as progress. Keep the last corpus actually observed and
-			// count the round as neither dry nor progress.
-			run.Record(fmt.Sprintf("round-%d-void", round), "no validate child reached a verdict; corpus unchanged and the round counts as neither dry nor progress")
+		if len(live) < len(vdhClasses) {
+			run.Record(fmt.Sprintf("round-%d-incomplete", round), fmt.Sprintf("only %d of %d validate children reached a verdict; corpus unchanged and the round counts as neither dry nor progress", len(live), len(vdhClasses)))
 			continue
 		}
 		carry = live
 
 		// A dry round changed nothing: the surviving corpus hashes to what it
-		// hashed last round. The manifest already carries the digests, so no
-		// agent output is parsed to decide the loop's exit.
+		// hashed last round, over the same four classes both times. The
+		// manifest already carries the digests, so no agent output is parsed
+		// to decide the loop's exit.
 		if d := vdhCorpus(carry); d == prev {
 			dry++
 		} else {
 			prev, dry = d, 0
 		}
 	}
+	// Why the loop stopped. "Went dry" and "ran out of rounds" are different
+	// findings about the repo and the loop returns the same state for both.
+	run.Record("stop", fmt.Sprintf("%d of %d rounds ran, %d consecutive dry of %d needed, converged=%v", rounds, vdhRounds, dry, vdhDryStop, dry >= vdhDryStop))
+	switch {
+	case rounds == 0:
+		return Exhausted
+	case !observed:
+		return InfraError
+	}
 	return Unverified
+}
+
+// vdhCancelled reports whether a drained fan contains a cancelled child. Every
+// other state is the round's business; a cancel is the run's, and continuing
+// would dispatch five more rounds into a cancelled run and then call the
+// result unverified.
+func vdhCancelled(rs []Result) bool {
+	for _, r := range rs {
+		if r.State == Cancelled {
+			return true
+		}
+	}
+	return false
 }
 
 // vdhSurviving keeps the children whose gate actually ran. Filtering on State,
@@ -176,11 +246,15 @@ func vdhStates(rs []Result) []State {
 	return out
 }
 
+// vdhCorpus fingerprints a round's surviving artifacts. The separator is
+// load-bearing: without it a name's tail and a digest's head are one string,
+// and two different corpora can fingerprint alike — a false match is a live
+// repo called dry two rounds early.
 func vdhCorpus(rs []Result) string {
 	s := ""
 	for _, r := range rs {
 		for _, a := range r.Manifest {
-			s += a.Name + a.Digest
+			s += a.Name + "@" + a.Digest + "\n"
 		}
 	}
 	return s

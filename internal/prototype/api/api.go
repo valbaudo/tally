@@ -4,7 +4,8 @@
 // reads back a closed set of states, and — only on passed — actuates. Nothing
 // else is expressible, on purpose: every construct here was forced by at least
 // one of the four independently drafted protocols (cybergym, mdash, vdh,
-// pr-ci). See TRACE.md for the derivation, including what was cut.
+// pr-ci), or by a settled decision that TRACE.md names instead. See TRACE.md
+// for the derivation, including what was cut.
 //
 // Everything the settled decisions already fix is absent from this surface:
 // the verifier always runs separate, no-network, after the agent's container
@@ -20,9 +21,10 @@ package api
 
 import "time"
 
-// State is a stage's outcome. Closed set of six; there is no seventh, and the
+// State is a stage's outcome. Six values, and dawn assigns no other; the
 // numeric reward is never one of them — it rides alongside as a metric
-// (Result.Metric).
+// (Result.Metric). The zero State is not one of the six, which is why a
+// protocol seeds a loop variable with a state rather than with a zero Result.
 //
 // dawn assigns a state by first match, parsing no agent output at all:
 //
@@ -43,11 +45,15 @@ const (
 	// Unverified: nothing established a verdict — a format-only gate, or no
 	// gate. It is the SUCCESS state of those stages, not a failure.
 	Unverified State = "unverified"
-	// Exhausted: dawn's own clock ended it, not the agent and not a gate. For
-	// a dispatched attempt that is the per-attempt wall clock (rule 4 above).
-	// A protocol returns it for the same reason one step up: a scope whose
-	// clock was spent before it could dispatch at all, which is the only
-	// honest word for "no gate ever voted because time ran out".
+	// Exhausted: dawn's own clock ended it, not the agent and not a gate. dawn
+	// assigns it to a dispatched attempt that hit its AttemptWallClock, and to
+	// nothing else (rule 4 above).
+	//
+	// A protocol may also RETURN it for a loop that never got to dispatch —
+	// More() false at the first turn — because that is the only honest word
+	// for "no gate ever voted because the lease ran out". That is the
+	// protocol's own reading of More(), never a state dawn assigned to a
+	// stage; see More.
 	Exhausted State = "exhausted"
 	// InfraError: dawn could not obtain a verdict. Retried with backoff inside
 	// the attempt's own scope, against that scope's attempt lease.
@@ -87,9 +93,13 @@ var (
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or
 // NoGate: soundness is declared statically, at the call site, as part of
-// naming the gate — so there is no field to forget, no way to pin an image
-// without saying what it establishes, and no way to omit the reason for having
-// no gate at all.
+// naming the gate, so there is no soundness field to forget and no way to pin
+// a verifier image without saying what it establishes.
+//
+// The constructors make the illegal states unnameable, not unrepresentable: a
+// zero Gate, SoundGate("") and NoGate("") are one value, and dawn rejects it
+// at dispatch for the same reason it rejects an unpinned Image — a gate is
+// either a digest-pinned image or a stated reason there is none.
 type Gate struct {
 	image      Image
 	formatOnly bool
@@ -106,24 +116,32 @@ func SoundGate(img Image) Gate { return Gate{image: img} }
 // dawn cannot verify.
 func FormatOnlyGate(img Image) Gate { return Gate{image: img, formatOnly: true} }
 
-// NoGate is the plain absence of a verifier plus the mandatory reason it is
-// absent. dawn disables the runner's verifier; the stage is Unverified by
-// construction. The reason is not optional because an ungated stage is the one
-// place a protocol can quietly stop checking anything.
+// NoGate is the plain absence of a verifier plus the reason it is absent. dawn
+// disables the runner's verifier; the stage is Unverified by construction. The
+// reason is required — an empty one is rejected at dispatch — because an
+// ungated stage is the one place a protocol can quietly stop checking
+// anything, and it is written into the run record where a reader can see it.
 func NoGate(reason string) Gate { return Gate{reason: reason} }
 
 // Lease is everything an author may declare about scarcity: three numbers, all
 // time or count. There is no token ceiling and no dollar ceiling — provider
 // quota has no published bound and its exhaustion may be unobservable, so dawn
 // tracks draw rate and never pretends to hold a balance.
+//
+// A lease sized to exactly the work it funds is a lease that cannot pay for
+// one flake: an infra_error retry spends the same Attempts counter and the
+// same clock as a deliberate attempt. Every lease below is therefore declared
+// as work PLUS headroom, and says in source how much of each — nothing in the
+// surface checks the arithmetic (TRACE.md, frictions).
 type Lease struct {
 	// Attempts bounds every dispatch in the scope, including fan children and
 	// including infra_error retries. It is the only bound on a nested fan.
 	Attempts int
-	// WallClock bounds the scope as a whole.
+	// WallClock bounds the scope as a whole. It has to cover the attempts
+	// Attempts funds, at AttemptWallClock apiece, plus their retry backoff.
 	WallClock time.Duration
-	// AttemptWallClock is dawn's own per-attempt clock — the only thing that
-	// can produce Exhausted, and the only thing that stops one wedged agent
+	// AttemptWallClock is dawn's own per-attempt clock: the only thing dawn
+	// turns into Exhausted, and the only thing that stops one wedged agent
 	// from eating the whole scope.
 	AttemptWallClock time.Duration
 }
@@ -178,8 +196,6 @@ type Result struct {
 	State State
 	// Manifest records what this attempt's declared outputs were.
 	Manifest Manifest
-
-	attempt string
 }
 
 // Metric reads one number the gate wrote alongside its reward — including
@@ -219,6 +235,11 @@ type Scope struct{}
 // journal and the restart sweep, so it must be able to re-enter the protocol
 // itself — on restart a stage whose result.json exists is never re-run, and
 // the recorded result is handed straight back.
+//
+// The State the protocol returns is the RUN's terminal state: dawn writes it
+// into the run record and exits on it. That is the only consumer, and it is
+// why every protocol here spends care on the difference between a measurement
+// and a catastrophe that produced the same artifacts.
 func Main(name string, root Lease, protocol func(*Scope) State) { panic("prototype") }
 
 // Scope opens a nested scope with its own lease. Nesting is how a protocol
@@ -231,9 +252,15 @@ func (s *Scope) Scope(id string, lease Lease) *Scope { panic("prototype") }
 // asks the admission queue rather than being told the answer to.
 //
 // Dispatching on a spent scope is a protocol bug, and dawn unwinds the run the
-// way a cancel does. It is deliberately not Exhausted: that word already means
-// one attempt hit its clock, and a best-of-N loop must be able to tell a
-// single slow attempt from a spent lease.
+// way a cancel does — dawn never turns a spent lease into a state of its own,
+// because Exhausted already means one attempt hit its clock and a best-of-N
+// loop must be able to tell a single slow attempt from a spent lease. What a
+// PROTOCOL calls its own run when More() was false before it dispatched
+// anything is the protocol's choice, and cybergym and vdh both call it
+// Exhausted.
+//
+// One bool for one attempt: it does not say whether the clock or the counter
+// is the binding half, and a fan of n asks it n times over.
 func (s *Scope) More() bool { panic("prototype") }
 
 // Run dispatches one attempt and blocks until it reaches a terminal state.
@@ -245,13 +272,24 @@ func (s *Scope) Run(stage Stage) Result { panic("prototype") }
 // children is a corpus that shrank without saying so. By the time a caller
 // sees an InfraError child, that branch already exhausted its own retries.
 //
-// There is no child limit and no concurrency argument: the scope's attempt
-// lease bounds the width, and the agent profile fixes the parallelism.
+// There is no child limit and no concurrency argument: the agent profile fixes
+// the parallelism, and n is the author's to size. Fan does NOT clamp n to the
+// lease — n, plus whatever retries those children turn out to owe, has to fit
+// in the scope's remaining Attempts, or a child dispatches on a spent scope,
+// which is the protocol bug More() describes. Declare the lease as the fan's
+// width plus retry headroom; nothing here checks that you did.
 func (s *Scope) Fan(n int, mk func(i int) Stage) []Result { panic("prototype") }
 
 // Record writes one named value into dawn's run record. It is the channel for
-// what no gate can write: arithmetic dawn does across many attempts, and the
-// caveats a protocol with no sound oracle is obliged to state. Such a protocol
-// never reaches Passed, so it never actuates, and the run record — not the
-// actuator — is its entire product.
+// what no gate can write: arithmetic dawn does across many attempts, the
+// caveats a protocol with no sound oracle is obliged to state, and the external
+// effects that failed after a gate had already voted yes.
+//
+// A name is written ONCE per run. Writing the same name twice is a protocol
+// bug: the second write is not a second value, and a reader of the run cannot
+// tell one caveat from two. Qualify every name by whatever varies around the
+// call — round, phase, instance, branch.
+//
+// For a protocol whose stages cannot reach Passed there is no actuator at all,
+// so the run record is not one product among several: it is the whole of it.
 func (s *Scope) Record(name string, value any) { panic("prototype") }

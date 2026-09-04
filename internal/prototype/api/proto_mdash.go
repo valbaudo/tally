@@ -58,9 +58,10 @@ const mdashAudit = 3
 
 // MDASH returns Unverified — the run's product is a rate in the run record and
 // whatever findings the prove fan actuated, never a verdict of its own — but
-// only when at least one gate anywhere actually voted. Unverified is this
-// protocol's SUCCESS state, so returning it after a run in which every stage
-// was infra_error would make catastrophe and measurement identical.
+// only when at least one gate anywhere ran and wrote something dawn could
+// read. Unverified is this protocol's SUCCESS state, so returning it after a
+// run in which every stage was infra_error would make catastrophe and
+// measurement identical. A cancel from outside is propagated as itself.
 func MDASH(run *Scope) State {
 	type agreement struct {
 		env   Image
@@ -69,29 +70,43 @@ func MDASH(run *Scope) State {
 	var agreed []agreement
 	observed := false
 
+	routed, claimed := 0, 0
 	for _, env := range mdashInstances {
+		// The root lease is the run's only bound, and dispatching past it
+		// unwinds the run — destroying the rate already measured. Stopping
+		// short is recorded, because a truncated denominator that says nothing
+		// is a smaller number reported as the same measurement.
+		if !run.More() {
+			run.Record("routing-stopped-early", fmt.Sprintf("root lease spent after %d of %d instances", routed, len(mdashInstances)))
+			break
+		}
 		scope := run.Scope(string(env), Lease{
 			Attempts:         80,
 			WallClock:        3 * time.Hour,
 			AttemptWallClock: 10 * time.Minute,
 		})
-		routed := scope.Fan(2, func(i int) Stage {
+		branches := scope.Fan(2, func(i int) Stage {
 			return Stage{
-				ID:     fmt.Sprintf("route-%d", i),
+				ID:     fmt.Sprintf("route-%s-%d", env, i),
 				Agent:  ClaudeCode,
 				Env:    env,
 				Prompt: mdashBriefs[i],
 				Gate:   FormatOnlyGate(mdashClaimGate),
 			}
 		})
-		run.Record("route-states-"+string(env), mdashStates(routed))
+		run.Record("route-states-"+string(env), mdashStates(branches))
+		routed++
+		if mdashCancelled(branches) {
+			return Cancelled
+		}
 		// dawn parses no CLI output, so the router's answer can only travel as
 		// a number its gate wrote. A missing metric means no claim came back;
 		// the oracle then decides instead of the router.
-		a, aok := routed[0].Metric("exploitable")
-		b, bok := routed[1].Metric("exploitable")
+		a, aok := branches[0].Metric("exploitable")
+		b, bok := branches[1].Metric("exploitable")
 		if aok && bok {
 			observed = true
+			claimed++
 			if a == b {
 				agreed = append(agreed, agreement{env, a})
 				continue
@@ -99,11 +114,15 @@ func MDASH(run *Scope) State {
 		}
 		// Disagreement, or a router that produced no claim at all. The
 		// oracle's answer is this instance's only real finding, so it is
-		// recorded: discarding it left the expensive half of the protocol
-		// with no trace in the run record.
-		proved, ran := mdashProve(run, scope, env, "route")
-		run.Record("proved-"+string(env), proved)
-		observed = observed || ran
+		// recorded — as the oracle's own state, because "the oracle voted no"
+		// and "the oracle never voted" are not the same finding and a bare
+		// false said both.
+		v := mdashProve(run, scope, env, "route")
+		if v == Cancelled {
+			return Cancelled
+		}
+		run.Record("oracle-route-"+string(env), v)
+		observed = observed || v != InfraError
 	}
 
 	// A proof is one-sided: it can contradict an agreement that said "not
@@ -118,6 +137,11 @@ func MDASH(run *Scope) State {
 			auditable = append(auditable, g)
 		}
 	}
+	// Every count the rate hangs off, with the population it was drawn from:
+	// "2 agreements" over four declared instances and over two that actually
+	// produced a pair of claims are different measurements.
+	run.Record("instances_routed", routed)
+	run.Record("instances_with_both_claims", claimed)
 	run.Record("agreements", len(agreed))
 	run.Record("unauditable_agreements", len(agreed)-len(auditable))
 
@@ -125,27 +149,46 @@ func MDASH(run *Scope) State {
 	if len(sample) > mdashAudit {
 		sample = sample[:mdashAudit]
 	}
-	wrong := 0
+	wrong, audited := 0, 0
 	for _, g := range sample {
+		if !run.More() {
+			run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements", audited, len(sample)))
+			break
+		}
 		scope := run.Scope("audit-"+string(g.env), Lease{
 			Attempts:         80,
 			WallClock:        3 * time.Hour,
 			AttemptWallClock: 20 * time.Minute,
 		})
-		proved, ran := mdashProve(run, scope, g.env, "audit")
-		observed = observed || ran
-		if proved {
+		v := mdashProve(run, scope, g.env, "audit")
+		if v == Cancelled {
+			return Cancelled
+		}
+		run.Record("oracle-audit-"+string(g.env), v)
+		observed = observed || v != InfraError
+		// An agreement the oracle never tested is not an agreement the oracle
+		// failed to contradict. Counting it would publish the strongest
+		// possible claim about the router out of a fan that never voted, so
+		// the denominator is audits PERFORMED, not audits dispatched.
+		if v == InfraError {
+			continue
+		}
+		audited++
+		if v == Passed {
 			wrong++
 		}
 	}
 	// The name is always in the record. An omitted rate is indistinguishable
 	// from a rate of zero to anyone reading the run afterwards, so an
-	// undefined one says so in the value.
-	run.Record("audited", len(sample))
-	if len(sample) == 0 {
-		run.Record("false_agreement_rate", "undefined: no agreement claimed not-exploitable, so nothing was auditable")
+	// undefined one says so in the value — and says only what it measured,
+	// since "nothing was auditable" and "nothing got audited" are different
+	// runs and the counts above tell them apart.
+	run.Record("audit_sample", len(sample))
+	run.Record("audited", audited)
+	if audited == 0 {
+		run.Record("false_agreement_rate", "undefined: no auditable agreement was ever tested by the oracle")
 	} else {
-		run.Record("false_agreement_rate", float64(wrong)/float64(len(sample)))
+		run.Record("false_agreement_rate", float64(wrong)/float64(audited))
 	}
 
 	if !observed {
@@ -159,17 +202,23 @@ func MDASH(run *Scope) State {
 // terminal state; one passed branch is a proof, and only that branch's gate
 // output is ever published.
 //
-// phase qualifies the stage ids. attempt_id hashes no scope path, so
-// "prove-7" under the routing scope and "prove-7" under the audit scope are
-// one stage to recovery; today they merely happen never to run against the
-// same env. "route-prove-7" and "audit-prove-7" do not depend on that.
+// It returns the ORACLE's state, from the same six: Passed (a branch proved
+// it), Rejected (the oracle voted and found nothing), Cancelled (the run was
+// cancelled underneath it), InfraError (no branch ever voted). A bool pair
+// could not say the fourth without the caller discarding half of it, and the
+// caller always did.
 //
-// ran reports whether any branch's gate voted at all, so the caller can tell
-// "the oracle found nothing" from "the oracle never ran".
-func mdashProve(run *Scope, scope *Scope, env Image, phase string) (proved, ran bool) {
+// Exhausted is not a vote: dawn's clock ended that attempt before a verdict
+// was recorded, which is the same evidence as no attempt at all.
+//
+// Both phase AND env qualify the stage ids. attempt_id hashes no scope path,
+// so "prove-7" is one stage to recovery everywhere it appears — across the two
+// phases and, worse, across the four instances, whose env digests are the only
+// other thing in that hash and which a run may pin identically.
+func mdashProve(run *Scope, scope *Scope, env Image, phase string) State {
 	branches := scope.Fan(24, func(i int) Stage {
 		return Stage{
-			ID:     fmt.Sprintf("%s-prove-%d", phase, i),
+			ID:     fmt.Sprintf("%s-%s-prove-%d", phase, env, i),
 			Agent:  ClaudeCode,
 			Env:    env,
 			Prompt: mdashProvePrompt,
@@ -177,16 +226,39 @@ func mdashProve(run *Scope, scope *Scope, env Image, phase string) (proved, ran 
 		}
 	})
 	run.Record("prove-states-"+phase+"-"+string(env), mdashStates(branches))
-	for _, r := range branches {
-		if r.State == Passed {
+	verdict := InfraError
+	for i, r := range branches {
+		switch r.State {
+		case Passed:
 			if err := r.Actuate(mdashFileFinding); err != nil {
-				run.Record("actuation_failed", err.Error())
+				// Qualified by everything that varies: this runs up to seven
+				// times a run, and one name would leave every failure but the
+				// last unrecorded — the one thing that cannot be re-derived
+				// from the states above.
+				run.Record(fmt.Sprintf("actuation-failed-%s-%s-%d", phase, env, i), err.Error())
 			}
-			return true, true
+			return Passed
+		case Cancelled:
+			verdict = Cancelled
+		case Rejected:
+			if verdict == InfraError {
+				verdict = Rejected
+			}
 		}
-		ran = ran || r.State == Rejected
 	}
-	return false, ran
+	return verdict
+}
+
+// mdashCancelled reports whether a drained fan contains a cancelled child, so
+// the protocol can stop rather than spend the rest of the lease dispatching
+// into a cancelled run and then reporting infra_error for it.
+func mdashCancelled(rs []Result) bool {
+	for _, r := range rs {
+		if r.State == Cancelled {
+			return true
+		}
+	}
+	return false
 }
 
 // mdashStates is every child of a drained fan, in index order: the record of
