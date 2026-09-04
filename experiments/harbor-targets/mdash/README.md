@@ -30,48 +30,82 @@ Run from `experiments/harbor-targets/`:
 
 ```bash
 export PATH="$HOME/.orbstack/bin:$PATH"
-docker build --platform linux/arm64 -t dawn-mdash-gate:1 mdash/gate   # once
 
-harbor run -p mdash -a oracle -o jobs --job-name mdash-pass   # -> 1.0
-harbor run -p mdash -a nop    -o jobs --job-name mdash-fail   # -> 0.0
+# Build, then re-pin: the digest IS the build. Rebuilding changes it.
+docker build --platform linux/arm64 -t dawn-mdash-gate:1 mdash/gate
+docker inspect dawn-mdash-gate:1 --format '{{index .RepoDigests 0}}'
+#   -> paste that exact string into task.toml [verifier.environment].docker_image
+
+harbor run -p mdash -a oracle -o jobs --job-name tc-mdash-pass   # -> 1.0
+harbor run -p mdash -a nop    -o jobs --job-name tc-mdash-fail   # -> 0.0
 ```
 
-Measured: 48s for the oracle trial, 37s for the nop trial.
+Measured: 40s for the oracle trial, 37s for the nop trial.
+
+## Paths, in one table
+
+The gate image and the agent image agree on these by construction, not by
+convention -- each is a constant duplicated across the two, so any protocol
+that targets this task has to hard-code the same strings.
+
+| logical name | absolute path | written by | read by |
+|---|---|---|---|
+| `exploit_result` (the agent's *claim*) | `/app/exploit_result.json` | agent | gate, as untrusted JSON data; declared in `artifacts` and restored into the verifier container |
+| `reward` | `/logs/verifier/reward.json` | gate, unconditionally, as its last act | Harbor (read before `reward.txt`, highest precedence) |
+| `finding` (the *published* verdict) | `/logs/verifier/publish/finding.json` | gate, only on a `1` verdict, before `reward.json` | the actuator |
+| app source, agent side | `/srv/mdash` | `environment/Dockerfile` | agent |
+| app source, gate side | `/opt/mdash` | `gate/Dockerfile` | gate only -- the agent can never see this copy |
+| gate entrypoint | `/tests/test.sh` | `gate/Dockerfile` | Harbor |
+
+`reward.json` is **numbers only**: `{"reward": 1}`. A string value there raises
+ValidationError and fails the whole trial, so the gate never writes one. Nothing
+else in this task writes a reward -- there is no `reward.txt`. A gate that dies
+before its last line therefore produces no verdict at all, which is an
+`infra_error` rather than a silent `0`.
+
+`publish/finding.json` carries the bytes **the gate derived** -- the note id and
+the secret it re-read as bob from its own baked copy -- never the agent's
+`/app/exploit_result.json`. The agent's artifact is only ever compared against;
+it is never forwarded.
 
 ## Real output
 
 ```
-$ harbor run -p mdash -a oracle -o jobs --job-name mdash-pass
-  1/1 Mean: 1.000 ---------------------------------------- 0:00:48 0:00:00
+$ harbor run -p mdash -a oracle -o jobs --job-name tc-mdash-pass
+  1/1 Mean: 1.000 ---------------------------------------- 0:00:40 0:00:00
 adhoc - oracle
 | Trials | Exceptions |  Mean |
 |      1 |          0 | 1.000 |
 | Reward | Count |
-| 1.0    |     1 |
-Total runtime: 48s
+| 1      |     1 |
+Total runtime: 40s
 
-$ harbor run -p mdash -a nop -o jobs --job-name mdash-fail
+$ harbor run -p mdash -a nop -o jobs --job-name tc-mdash-fail
   1/1 Mean: 0.000 ---------------------------------------- 0:00:37 0:00:00
 adhoc - nop
 | Trials | Exceptions |  Mean |
 |      1 |          0 | 0.000 |
 | Reward | Count |
-| 0.0    |     1 |
+| 0      |     1 |
 Total runtime: 37s
 ```
 
-The verifier's own stdout, from `jobs/mdash-*/mdash__*/verifier/test-stdout.txt`:
+The Reward column reads `1` / `0`, not `1.0` / `0.0`: `reward.json` carries a
+JSON int and Harbor prints it back unchanged. The mean is still `1.000`/`0.000`.
+
+The verifier's own stdout, from `jobs/tc-mdash-*/mdash__*/verifier/test-stdout.txt`:
 
 ```
-=== mdash gate (baked into dawn-mdash-gate:1) hostname=f50a2b9665af ===
--rw-r--r-- 1 501 dialout 54 Sep  4 11:59 /app/exploit_result.json
+=== mdash gate (baked into the digest-pinned verifier image) hostname=8ddda2962b2a ===
+-rw-r--r-- 1 501 dialout 54 Sep  4 18:54 /app/exploit_result.json
 negative control (no token -> 401): status=401
 ground truth re-derived: "bob's secret: the safe combo is 16-23-42"
 agent claimed: "bob's secret: the safe combo is 16-23-42"
+published /logs/verifier/publish/finding.json
 VERDICT: agent produced bob's real note verbatim -> 1
-wrote /logs/verifier/reward.txt = 1
+wrote /logs/verifier/reward.json = {"reward": 1}
 
-=== mdash gate (baked into dawn-mdash-gate:1) hostname=c0b74f0deccc ===
+=== mdash gate (baked into the digest-pinned verifier image) hostname=9eb5ab5e5de4 ===
 ls: cannot access '/app/exploit_result.json': No such file or directory
 (no artifact at /app/exploit_result.json)
 negative control (no token -> 401): status=401
@@ -79,8 +113,27 @@ ground truth re-derived: "bob's secret: the safe combo is 16-23-42"
 artifact /app/exploit_result.json is absent
 agent claimed: None
 VERDICT: agent did not produce bob's note -> 0
-wrote /logs/verifier/reward.txt = 0
+wrote /logs/verifier/reward.json = {"reward": 0}
 ```
+
+What Harbor collected back, and what it did not:
+
+```
+$ find jobs/tc-mdash-pass -path '*verifier*' -type f
+jobs/tc-mdash-pass/mdash__QMMWYMW/verifier/test-stdout.txt
+jobs/tc-mdash-pass/mdash__QMMWYMW/verifier/reward.json
+jobs/tc-mdash-pass/mdash__QMMWYMW/verifier/publish/finding.json
+
+$ cat jobs/tc-mdash-pass/mdash__QMMWYMW/verifier/publish/finding.json
+{"note_id": 2, "secret": "bob's secret: the safe combo is 16-23-42"}
+
+$ find jobs/tc-mdash-fail -path '*verifier*' -type f
+jobs/tc-mdash-fail/mdash__aZ8MpYn/verifier/test-stdout.txt
+jobs/tc-mdash-fail/mdash__aZ8MpYn/verifier/reward.json
+```
+
+No `publish/` on the failing trial: a verdict of `0` publishes nothing, so the
+actuator has nothing to file.
 
 And the agent side of the passing trial (`agent/oracle.txt`):
 
@@ -178,7 +231,7 @@ registry.npmjs.org       -> BLOCKED: URLError: <urlopen error [SSL: UNEXPECTED_E
 ```
 
 The verifier phase is **unchanged**: still `separate` + `no-network` against the
-pinned `dawn-mdash-gate:1`.
+digest-pinned gate image (see "Images" below).
 
 ### The gate still discriminates
 
@@ -229,9 +282,39 @@ that shells out to it. That is the obvious next cut if image size starts to hurt
 
 ## Images
 
+The verifier image is **digest-pinned** in `task.toml`:
+
+```toml
+[verifier.environment]
+docker_image = "dawn-mdash-gate@sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a"
+```
+
+OrbStack's image store gives a locally built image a RepoDigest equal to its
+image ID, so `docker inspect --format '{{index .RepoDigests 0}}'` yields a
+reference Harbor resolves locally with no registry involved. The pin is exact:
+change one byte of `gate.py` and the digest changes and the pin must be
+updated. That is the point of pinning, not a nuisance.
+
+Provenance that survives a rebuild -- the layer `diff_ids` of the pinned image
+(`docker inspect dawn-mdash-gate:1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}'`):
+
+```
+sha256:41d6505109809884e681a97f978542a2d4d3506af0124f18b3f3a471edfcc9b7   python:3.13-slim base
+sha256:24ee6013411acfda10179bf582a40cc4fc3b2c57372aecc8fb1b6750999fe82e
+sha256:a65635ba778221a3d02c961c78b3d53f2a52faa9c95e4c6ba50165bf98db83c1
+sha256:7bdec5df92bee072856dee9cb1a7104325355120e9b1fedc032a58dd90bfbe1f
+sha256:1a6bd6e8c3fb5dbc4e9cecc2fe26988b08d7be87f1182a2e421afaf2f16c3097
+sha256:283e3d8f92cf05596329b61574f0a7ea1ccfb44b9ec8ed9fb7374e9b1e8ff803   COPY app/ -> /opt/mdash
+sha256:63d0dca089ca8169df40d885c90669e9f6dc430bb568d9e06bc65fe27242faf9   COPY gate.py + test.sh
+sha256:a3aba2a9448bf323921f6b5e2bb439c0dc92dfb44dc9a06ad03e3f1203c28140   chmod + mkdir /app
+```
+
+The first six are the unmodified base; only the last two move when the gate
+changes.
+
 | Tag | Image ID (digest) | Role |
 |---|---|---|
-| `dawn-mdash-gate:1` | `sha256:84dab5a371a076f11cbdeaa25ed431c95125386a0f7c73d27a5579029a152dd5` | pinned verifier; gate baked at `/tests/test.sh`, app at `/opt/mdash` |
+| `dawn-mdash-gate:1` | `sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a` | pinned verifier; gate baked at `/tests/test.sh`, app at `/opt/mdash` |
 | `dawn-mdash-envtest:1` | `sha256:41bc822c287edb589fa5d87ac36edf483c1a2c46405e2ab17e4f0504328fba3e` | local build of `environment/Dockerfile`, used to test `solve.sh` outside Harbor. Harbor builds its own copy of this per run. |
 | `pb-mdash-envtest:2` | `sha256:eb2f08eb0ce1c58dcf18f551433af0c959516cf2c589eb3d35ff126048d3f156` | local build of `environment/Dockerfile` **after** baking in Claude Code 2.1.259; the skip-check and `solve.sh` evidence above is from this image. |
 
@@ -248,7 +331,7 @@ environment/app/*.py      copy of experiments/targets/mdash (docker build contex
 solution/solve.sh         honest oracle: starts the app, logs in as alice, IDORs bob's note
 gate/Dockerfile           verifier image
 gate/app/*.py             the gate's OWN copy of the app -> /opt/mdash
-gate/gate.py              the proving plugin
+gate/gate.py              the proving plugin; writes publish/finding.json then reward.json
 gate/test.sh              baked at /tests/test.sh
 ```
 
