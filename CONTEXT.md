@@ -48,7 +48,7 @@ A bounded region of a protocol run with its own budget lease, within the run-wid
 An atomic budget reservation held by a scope or attempt before dispatch. The budget authority is dawn's, never the gateway's.
 
 **actuator**:
-The trusted component that performs an external effect (push a branch, open a PR, call a scoring endpoint) once, after verification, so the agent never holds production credentials.
+The trusted component that performs an external effect (push a branch, open a PR, call a scoring endpoint) after verification, so the agent never holds production credentials. Runs in dawn's own process, fires only on `passed`, and publishes only bytes the gate itself wrote.
 
 **State**:
 A stage's outcome, one of a closed set: `passed`, `rejected`, `unverified`, `exhausted`, `infra_error`, `cancelled`. The numeric score rides alongside as a metric, never as the verdict.
