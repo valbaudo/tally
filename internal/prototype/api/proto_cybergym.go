@@ -32,7 +32,8 @@ the fix. Your study notes are mounted read-only — read them. You will not be
 told how the bug is fixed.`
 
 // CyberGym returns the run's terminal state: the PoV stage's, since a proof is
-// the run's entire product.
+// the run's entire product — or Exhausted if the lease left no room to try for
+// one at all.
 func CyberGym(run *Scope) State {
 	// Orientation. No gate at all: nothing about reading source and writing
 	// prose is machine-checkable, and a format-only gate would only launder
@@ -43,12 +44,11 @@ func CyberGym(run *Scope) State {
 		AttemptWallClock: 10 * time.Minute,
 	})
 	notes := study.Run(Stage{
-		ID:      "study",
-		Agent:   ClaudeCode,
-		Env:     cybergymEnv,
-		Prompt:  cybergymStudyPrompt,
-		Outputs: []string{"notes"},
-		Gate:    NoGate("orientation prose; the only checkable claim about it is whether the PoV stage's gate later passes"),
+		ID:     "study",
+		Agent:  ClaudeCode,
+		Env:    cybergymEnv,
+		Prompt: cybergymStudyPrompt,
+		Gate:   NoGate("orientation prose; the only checkable claim about it is whether the PoV stage's gate later passes"),
 	})
 	// Unverified is this stage's success state. The comparison is not a
 	// tautology: it is the only way to catch infra_error, exhausted or
@@ -63,24 +63,30 @@ func CyberGym(run *Scope) State {
 		AttemptWallClock: 12 * time.Minute,
 	})
 	stage := Stage{
-		ID:      "pov",
-		Agent:   ClaudeCode,
-		Env:     cybergymEnv,
-		Prompt:  cybergymPoVPrompt,
-		Inputs:  []Result{notes},
-		Outputs: []string{"pov"},
-		Gate:    SoundGate(cybergymGate),
+		ID:     "pov",
+		Agent:  ClaudeCode,
+		Env:    cybergymEnv,
+		Prompt: cybergymPoVPrompt,
+		Inputs: []Result{notes},
+		Gate:   SoundGate(cybergymGate),
 	}
 
 	// Sound oracle, so this is first-success, not best-of-N: there is nothing
 	// to compare and no score is ever read. Rejected — the gate ran and said
 	// no — is the only state worth another attempt; every other state is dawn
 	// telling us to stop.
-	var last Result
+	//
+	// The seed is a state, never a zero Result: the loop can run zero times
+	// (study may have spent the root wall clock), and a zero Result's State is
+	// the empty string, which is a seventh state escaping from a set of six.
+	// Zero iterations means no gate ever voted because dawn's clock ran out,
+	// and Exhausted is the word for that.
+	state := Exhausted
 	for pov.More() {
-		if last = pov.Run(stage); last.State != Rejected {
-			return last.State
+		if r := pov.Run(stage); r.State != Rejected {
+			return r.State
 		}
+		state = Rejected // the gate ran and said no; the lease is what ends this
 	}
-	return last.State // rejected, lease spent
+	return state
 }

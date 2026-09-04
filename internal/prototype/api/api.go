@@ -11,7 +11,9 @@
 // is gone, and always writes reward.json; the artifacts list, the output
 // paths, the retry backoff, the per-agent concurrency cap and the idempotency
 // key are dawn's, not the author's. An author cannot restate them and so
-// cannot contradict them.
+// cannot contradict them — which is why a Stage has no output field at all.
+// Naming the Env image is naming the task, and the task's declared artifacts
+// are already dawn's list.
 //
 // Prototype: signatures are load-bearing, bodies are not.
 package api
@@ -41,7 +43,11 @@ const (
 	// Unverified: nothing established a verdict — a format-only gate, or no
 	// gate. It is the SUCCESS state of those stages, not a failure.
 	Unverified State = "unverified"
-	// Exhausted: the attempt hit dawn's own per-attempt wall clock.
+	// Exhausted: dawn's own clock ended it, not the agent and not a gate. For
+	// a dispatched attempt that is the per-attempt wall clock (rule 4 above).
+	// A protocol returns it for the same reason one step up: a scope whose
+	// clock was spent before it could dispatch at all, which is the only
+	// honest word for "no gate ever voted because time ran out".
 	Exhausted State = "exhausted"
 	// InfraError: dawn could not obtain a verdict. Retried with backoff inside
 	// the attempt's own scope, against that scope's attempt lease.
@@ -59,10 +65,14 @@ type Image string
 // digest-pinned image. It is a fact about that image, never a knob — an author
 // picks a profile and declares nothing else about it, least of all its
 // concurrency, which is a correctness property dawn fixes.
+//
+// The name and the CLI image are dawn's own knowledge, so they are unexported:
+// a protocol selects a profile, it never reads one apart. FanOut is the single
+// exception, and only because the per-agent cap is a correctness fact a
+// protocol is obliged to state in its caveats.
 type Agent struct {
-	Name string
-	// Image is the digest-pinned layer that provides the CLI itself.
-	Image Image
+	name  string
+	image Image
 	// FanOut reports whether this profile may run more than one attempt at a
 	// time. Readable so a protocol can say in source that a fan is
 	// single-vendor and its blind spots are therefore correlated.
@@ -71,8 +81,8 @@ type Agent struct {
 
 // The profiles dawn ships. Only ClaudeCode may fan out.
 var (
-	ClaudeCode = Agent{Name: "claude-code", Image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: true}
-	Codex      = Agent{Name: "codex", Image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false}
+	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: true}
+	Codex      = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false}
 )
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or
@@ -118,28 +128,31 @@ type Lease struct {
 	AttemptWallClock time.Duration
 }
 
-// Artifact is one declared output that crossed a stage boundary. The logical
-// name comes from dawn's list; the path is dawn's too. The author never writes
-// a path and dawn never reads a name the agent invented.
+// Artifact is one declared output that crossed a stage boundary. Two fields,
+// because two are all a protocol can act on: the logical name from dawn's
+// list, and the digest of the bytes that carried it. The path, the size and
+// the producing attempt are dawn's bookkeeping, not the author's vocabulary.
 type Artifact struct {
-	Name    string
-	Path    string
-	Digest  string
-	Size    int64
-	StageID string
-	Attempt string // attempt_id that produced it
+	Name   string
+	Digest string
 }
 
-// Manifest is what a stage's declared outputs amounted to. A receiving stage
-// gets those files read-only at a fixed path plus this record; a protocol can
-// read the digests to decide whether anything actually changed.
+// Manifest is what a stage's declared outputs amounted to — the task's
+// artifacts list, which dawn owns and the author never restates. A declared
+// output that is missing or invalid is infra_error, always; an empty one is
+// present and valid. A receiving stage gets those files read-only at a fixed
+// path plus this record; a protocol reads the digests to decide whether
+// anything actually changed.
 type Manifest []Artifact
 
 // Stage is one runner call: one agent, one environment, one instruction, one
-// gate. Seven fields, and every one of them is something dawn cannot know.
+// gate. Six fields, and every one of them is something dawn cannot know.
 type Stage struct {
-	// ID is stable across attempts and unique within its scope; it is hashed
-	// into attempt_id, so recovery finds this stage's result and no other's.
+	// ID is stable across attempts and must be unique within the RUN, not
+	// merely within its scope: attempt_id hashes the stage id and no scope
+	// path, so two stages sharing an id are one stage to recovery unless
+	// something else in that hash — the content or input digest — differs.
+	// Relying on that difference is relying on an accident; qualify the id.
 	ID string
 	// Agent is the profile that drives the attempt.
 	Agent Agent
@@ -154,10 +167,6 @@ type Stage struct {
 	// only way anything crosses an attempt boundary: every attempt is a fresh
 	// container, so what survives, survives as bytes.
 	Inputs []Result
-	// Outputs are the logical names this stage declares, from dawn's list.
-	// Names only: dawn owns the paths. A declared output that is missing or
-	// invalid is infra_error, always; an empty one is present and valid.
-	Outputs []string
 	// Gate is the verifier. The zero value is not a gate — use NoGate.
 	Gate Gate
 }

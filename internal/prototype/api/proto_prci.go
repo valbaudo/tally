@@ -33,12 +33,11 @@ test suite or ci.sh are discarded before your fix is judged.`
 // spend, not signal.
 func PRCI(run *Scope) State {
 	fix := run.Run(Stage{
-		ID:      "fix",
-		Agent:   ClaudeCode,
-		Env:     prciEnv,
-		Prompt:  prciPrompt,
-		Outputs: []string{"fix.patch"},
-		Gate:    SoundGate(prciGate),
+		ID:     "fix",
+		Agent:  ClaudeCode,
+		Env:    prciEnv,
+		Prompt: prciPrompt,
+		Gate:   SoundGate(prciGate),
 	})
 	if fix.State != Passed {
 		return fix.State
