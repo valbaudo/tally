@@ -47,6 +47,10 @@ A bounded region of a protocol run with its own budget lease, within the run-wid
 **lease**:
 An atomic reservation a scope holds before dispatch, counted in wall clock, attempts, or container concurrency — never in money or tokens. Provider quota is not leasable: it has no published ceiling and its exhaustion may be unobservable, so dawn tracks draw rate, never a balance. Leases live in the scheduler's admission queue; there is no separate ledger.
 
+**admission queue**:
+The single gate every attempt passes before dispatch, holding all five scheduling dimensions at once. There is no separate budget ledger; leases live here.
+_Avoid_: scheduler as a second component, budget authority.
+
 **actuator**:
 The trusted component that performs an external effect (push a branch, open a PR, call a scoring endpoint) after verification, so the agent never holds production credentials. Runs in dawn's own process, fires only on `passed`, and publishes only bytes the gate itself wrote.
 
