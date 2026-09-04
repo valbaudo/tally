@@ -20,3 +20,7 @@ run.json
 /experiments/**/jobs/
 *.key
 litellm.log
+
+# python bytecode
+__pycache__/
+*.pyc

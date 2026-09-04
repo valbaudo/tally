@@ -1,0 +1,4 @@
+# Build outputs of build.sh -- regenerate with ./build.sh, don't commit binaries.
+vuln_bin
+fixed_bin
+*.dSYM/

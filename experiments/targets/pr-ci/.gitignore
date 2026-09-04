@@ -1,0 +1,4 @@
+# repo/ is a real, separate git repository (its own .git, its own commits),
+# regenerated on demand by init_repo.sh. Deliberately not committed into
+# dawn's own history -- same reasoning as experiments/harbor/jobs/.
+repo/
