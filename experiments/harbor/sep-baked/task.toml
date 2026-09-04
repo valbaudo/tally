@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = []
+
+[task]
+name = "dawn/sep-baked"
+version = "1.0.0"
+description = "Provisioning smoke test"
+keywords = []
+[[task.authors]]
+name = "Valerio Baudo"
+
+[metadata]
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+network_mode = "no-network"
+collect = []
+
+[verifier.environment]
+docker_image = "dawn-verifier:1"
+network_mode = "no-network"
+
+[verifier.env]
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 600.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

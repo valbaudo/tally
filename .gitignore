@@ -15,3 +15,8 @@ run.json
 .superpowers/
 .gstack/
 .dawn/
+
+# experiment outputs and local secrets
+/experiments/**/jobs/
+*.key
+litellm.log

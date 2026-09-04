@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = []
+
+[task]
+name = "dawn/preempt-sep"
+version = "1.0.0"
+description = "Provisioning smoke test"
+keywords = []
+[[task.authors]]
+name = "Valerio Baudo"
+
+[metadata]
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+network_mode = "no-network"
+collect = []
+
+[verifier.env]
+
+[verifier.environment]
+docker_image = "ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517"
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 600.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]
