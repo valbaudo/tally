@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = ["/app/findings.jsonl"]
+
+[task]
+name = "dawn/vdh"
+version = "1.0.0"
+description = "Toy SQL-injection hunt; gate is a citation/format check, not a correctness oracle"
+keywords = []
+[[task.authors]]
+name = "Valerio Baudo"
+
+[metadata]
+
+[verifier]
+timeout_sec = 300.0
+environment_mode = "separate"
+network_mode = "no-network"
+collect = []
+
+[verifier.environment]
+docker_image = "dawn-vdh-gate:1"
+network_mode = "no-network"
+
+[verifier.env]
+
+[agent]
+timeout_sec = 300.0
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 600.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]
