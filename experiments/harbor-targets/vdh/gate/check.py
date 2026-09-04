@@ -75,5 +75,9 @@ def main():
 
 reward = main()
 print(f"VERDICT: {reward} (well-formed + grounded citations; NOT a correctness oracle)")
+# LAST act, unconditional, numbers only. Harbor reads reward.json before
+# reward.txt; writing it last is what makes the verdict unforgeable. A gate
+# that dies before this line is an infra_error, not a verdict -- so there is
+# no reward.txt fallback anywhere.
 pathlib.Path("/logs/verifier").mkdir(parents=True, exist_ok=True)
-pathlib.Path("/logs/verifier/reward.txt").write_text(str(reward))
+pathlib.Path("/logs/verifier/reward.json").write_text(json.dumps({"reward": reward}))

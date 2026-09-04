@@ -4,10 +4,6 @@
 
 #define BUF_SIZE 32
 
-/* A synthetic "always crashes" marker, present in BOTH builds.
- * Exists only so the oracle's soundness can be tested: a PoV that
- * trips this is NOT evidence the fix works, and the oracle must
- * reject it. */
 static void maybe_universal_crash(const char *input) {
     if (strncmp(input, "PANIC", 5) == 0) {
         abort();
@@ -16,12 +12,7 @@ static void maybe_universal_crash(const char *input) {
 
 static void process(const char *input) {
     char buf[BUF_SIZE];
-#ifdef FIXED
-    strncpy(buf, input, BUF_SIZE - 1);
-    buf[BUF_SIZE - 1] = '\0';
-#else
-    strcpy(buf, input); /* BUG: unbounded copy into fixed-size stack buffer */
-#endif
+    strcpy(buf, input);
     printf("processed %zu bytes, buf=\"%.8s...\"\n", strlen(input), buf);
 }
 

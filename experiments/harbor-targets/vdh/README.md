@@ -9,6 +9,11 @@ bound-parameter sibling as a precision decoy) as a Harbor task.
 **The gate is a CITATION / FORMAT check. Passing means "well-formed, grounded
 findings". It does NOT mean "correct findings".**
 
+This is a `format_only` stage. A `format_only` stage can never reach
+`passed`; its 1.0 means *well-formed*, not *correct*. Do not "improve" this
+gate into an oracle — that would break a settled decision, not fix a
+limitation.
+
 There is deliberately no sound oracle for this target. The gate has never
 seen `GROUND_TRUTH.md` and cannot tell a true positive from a decoy. It
 checks only that the agent produced findings it can actually point at:
@@ -27,46 +32,148 @@ Measured proof it is not an oracle: a correctly-cited **safe decoy**
 (`src/users.py:6`, a bound-parameter query) scores **1.0**. Recall and
 precision against `GROUND_TRUTH.md` are for a human to compute host-side.
 
-`GROUND_TRUTH.md` is **not** baked into either image (verified: `find /
+`GROUND_TRUTH.md` is **not** baked into either image (verified: `find / -xdev
 -iname '*GROUND_TRUTH*'` returns 0 hits in both).
+
+## The verdict file
+
+`gate/check.py` writes **`/logs/verifier/reward.json`, unconditionally, as
+its last act** (`gate/check.py:83`), and nothing else in this task writes a
+reward:
+
+```python
+pathlib.Path("/logs/verifier").mkdir(parents=True, exist_ok=True)
+pathlib.Path("/logs/verifier/reward.json").write_text(json.dumps({"reward": reward}))
+```
+
+- **`reward.json`, not `reward.txt`.** Harbor reads `reward.json` first; it
+  is the highest-precedence verdict file. Harbor restores declared
+  `artifacts` into the verifier container *before* `/tests/test.sh` runs, so
+  writing the verdict **last** is what makes it unforgeable: whatever the
+  agent may have staged, the gate's write is the one that lands.
+- **Numbers only.** `{"reward": 1}`. A string value raises ValidationError
+  and fails the whole trial. Extra *numeric* keys are allowed and surface as
+  extra columns; this gate emits none.
+- **No `reward.txt` fallback anywhere** — the old write at `check.py:79` is
+  gone, and the unused task-dir `tests/test.sh` was moved to `reward.json`
+  too. A gate that dies before its last line writes nothing, and Harbor
+  reports that as `infra_error` rather than as a 0.0 verdict. That is the
+  point: a crash is not a judgement.
+
+No actuator publishes from this target, so the gate writes nothing to
+`/logs/verifier/publish/`.
+
+## Output paths
+
+The one path the agent writes and the gate reads is a constant duplicated
+between `instruction.md`, `task.toml`'s `artifacts`, and `gate/check.py`.
+Any protocol targeting this task needs this mapping:
+
+| Logical output | Absolute path (agent container) | Declared in |
+|---|---|---|
+| `findings` | `/app/findings.jsonl` | `task.toml` `artifacts`, `gate/check.py:10` |
+| `repo` (read-only input, agent's copy) | `/app/repo` | `environment/Dockerfile` |
+| `repo` (gate's own re-derived copy) | `/gate/repo` | `gate/Dockerfile`, `gate/check.py:11` |
+| verdict (gate-written, never agent-visible) | `/logs/verifier/reward.json` | `gate/check.py:83` |
+
+`/gate/repo` is the gate's private copy; the agent can neither read nor
+write it, and the gate never trusts `/app/repo`.
 
 ## Run it
 
 ```bash
 export PATH="$HOME/.orbstack/bin:$PATH"
 cd experiments/harbor-targets/vdh/gate && docker build -t dawn-vdh-gate:1 .
+# rebuilding changes the digest -- re-pin task.toml from:
+docker inspect dawn-vdh-gate:1 --format '{{index .RepoDigests 0}}'
 cd experiments/harbor-targets
-harbor run -p vdh -a oracle -o jobs --job-name vdh-pass   # -> 1.0
-harbor run -p vdh -a nop    -o jobs --job-name vdh-fail   # -> 0.0
+harbor run -p vdh -a oracle -o jobs --job-name tc-vdh-pass   # -> 1.0
+harbor run -p vdh -a nop    -o jobs --job-name tc-vdh-fail   # -> 0.0
 ```
 
-Re-measured 2026-09-04 **after baking the CLI in and allowlisting the agent
-phase**: **1.000 in 45s** (oracle), **0.000 in 49s** (nop) — unchanged verdicts.
-Real gate output from `jobs/pb-vdh-pass/vdh__QKsJPaF/verifier/test-stdout.txt`:
+Re-measured 2026-09-04 **after moving to `reward.json` and digest-pinning
+the gate image**: **1.000 in 49s** (oracle), **0.000 in 43s** (nop) —
+verdicts unchanged, so the gate still discriminates.
+
+`jobs/tc-vdh-pass/vdh__iUcEEBc/verifier/`:
 
 ```
-=== vdh gate (citation/format check only) host=b5ed17acfd00 ===
+=== vdh gate (citation/format check only) host=377b470959c1 ===
 findings.jsonl: 2 non-empty line(s)
   line 1: OK   src/users.py:12 class='sql-injection'
   line 2: OK   src/orders.py:14 class='sql-injection'
 VERDICT: 1 (well-formed + grounded citations; NOT a correctness oracle)
 ```
+```
+$ cat jobs/tc-vdh-pass/vdh__iUcEEBc/verifier/reward.json
+{"reward": 1}
+```
 
-and from `jobs/pb-vdh-fail/vdh__Po6obNQ/verifier/test-stdout.txt`:
+`jobs/tc-vdh-fail/vdh__u5Hhaz8/verifier/`:
 
 ```
-=== vdh gate (citation/format check only) host=b59000c8f4ec ===
+=== vdh gate (citation/format check only) host=7ada280f5533 ===
 FAIL: /app/findings.jsonl does not exist (no findings is a failure, not 'zero findings')
 VERDICT: 0 (well-formed + grounded citations; NOT a correctness oracle)
 ```
+```
+$ cat jobs/tc-vdh-fail/vdh__u5Hhaz8/verifier/reward.json
+{"reward": 0}
+```
 
-## Images (linux/arm64)
+Both verifier directories contain `reward.json` and `test-stdout.txt` and
+**no `reward.txt`**.
+
+## Images (linux/arm64) — the gate is digest-pinned
+
+`task.toml` names the verifier image by **digest**, not by tag:
+
+```toml
+[verifier.environment]
+docker_image = "dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0"
+```
+
+OrbStack's image store gives locally-built images a RepoDigest equal to the
+image ID, so no registry push is needed:
+
+```
+$ docker inspect dawn-vdh-gate:1 --format '{{index .RepoDigests 0}}'
+dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0
+$ docker inspect dawn-vdh-gate:1 --format '{{.Id}}'
+sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0
+```
+
+**Rebuilding changes the digest — that is what pinning means.** Re-run the
+`RepoDigests` inspect and update `task.toml` after every gate rebuild.
+
+The pin is load-bearing, not decorative. Measured: swapping the digest for
+`sha256:0000…0000` and running `harbor run -p vdh -a nop` gives
+**0 trials, 1 exception (`RuntimeError`)** in 28s — an infra failure, not a
+0.0 verdict. Restored afterwards.
+
+Provenance that survives a rebuild — the layer `diff_ids` of the gate image
+(`docker inspect dawn-vdh-gate:1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}'`):
+
+```
+sha256:41d6505109809884e681a97f978542a2d4d3506af0124f18b3f3a471edfcc9b7
+sha256:24ee6013411acfda10179bf582a40cc4fc3b2c57372aecc8fb1b6750999fe82e
+sha256:a65635ba778221a3d02c961c78b3d53f2a52faa9c95e4c6ba50165bf98db83c1
+sha256:7bdec5df92bee072856dee9cb1a7104325355120e9b1fedc032a58dd90bfbe1f
+sha256:80974fd24c795ef09bced1e4930dae1b4dd40364b615289b0fcda447151db9df
+sha256:492ede23dfa7e7cfb1bed3f783bdc14153e7782de88c57aaf5cd549e666fb650
+sha256:71ca7c952a26fa14869f69f2e51fea9dbf1407730d44824141db888020941837
+sha256:9951e203ffba4e1494d409d6c9f353cdffc40b0074b5da1a887db33b862e87e3
+```
 
 | Tag | Image ID |
 |---|---|
-| `dawn-vdh-gate:1` | `sha256:964f8b6a6a042eb7f8b01801bd34da5ff602d3270e5c462cbf986a319f9e7eae` |
+| `dawn-vdh-gate:1` (pinned) | `sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0` |
 | agent env (same context Harbor builds from `environment/`) | rebuilt per run; `pb-vdh-env:3` = `sha256:fa8efa4026a2c8775a2048bd23a3e402978487ea057a08dfeeb78bc3f227c826` |
 | base `python:3.13-slim` | `sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285` |
+
+The agent image is **not** pinned: Harbor rebuilds it from `environment/`
+on every run, so there is no stable digest to pin. Only the gate — the
+thing that decides the verdict — needs to be immutable.
 
 ## Agent CLI is baked in; agent phase is allowlisted
 
@@ -141,10 +248,17 @@ deliberately: no credential was used, and `oracle`/`nop` need none. Whether
 `console.anthropic.com` / `statsig.anthropic.com` are genuinely required is
 reasoned, not measured; trim them if a real run shows they are not.
 
-`GROUND_TRUTH.md` is still absent from both images after the change
-(`find / -iname '*GROUND_TRUTH*'` → 0 hits in `pb-vdh-env:3` and in
-`dawn-vdh-gate:1`), and `/app/repo` is byte-identical to the pre-change
-image (`sha256sum` over every file: no diff).
+`GROUND_TRUTH.md` is still absent from both images, re-verified after the
+`reward.json` + digest-pin change:
+
+```
+$ docker run --rm pb-vdh-env:3 sh -c 'find / -xdev -iname "*GROUND_TRUTH*"'
+$ docker run --rm dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0 \
+    sh -c 'find / -xdev -iname "*GROUND_TRUTH*"'
+```
+
+Both print nothing — 0 hits. `environment/` was not touched by this change,
+so the agent image is byte-for-byte the one measured above.
 
 ## Transport
 
