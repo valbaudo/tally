@@ -286,6 +286,10 @@ type Stage struct {
 	// path, so two stages sharing an id are one stage to recovery unless
 	// something else in that hash — the content or input digest — differs.
 	// Relying on that difference is relying on an accident; qualify the id.
+	// An id is one segment, [a-zA-Z0-9][a-zA-Z0-9._-]* (Harbor's own
+	// task-name grammar, refused at dispatch otherwise), so attempts/<id>/ is
+	// the id itself and no two ids share a directory. Qualify with '-' or
+	// '.': "pov-0", "hunt.sql-injection".
 	ID string
 	// Agent is the profile that drives the attempt.
 	Agent Agent

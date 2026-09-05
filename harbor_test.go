@@ -471,26 +471,38 @@ func TestTaskDirForJoinsTheGeneratedTaskDirName(t *testing.T) {
 	}
 }
 
-// Every stage id must produce a task name Harbor accepts. Its grammar, verbatim
-// from its own constants.py, is
+// taskName no longer sanitises anything — it trusts the id outright (see
+// harbor.go) — so the only thing left pinning Stage.ID's grammar (stageID,
+// runtime.go) and Harbor's own task-name grammar, verbatim from its
+// constants.py,
 //
 //	^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$
 //
-// and cybergym broke it twice. The slash first — Stage.ID's doc tells authors
-// to qualify ids, so "pov/0" is the documented case, and "dawn/pov/0" is
-// refused outright. Then the leading character: the first fix used fsSafe,
-// which passes '-', '_' and '.' through untouched, so ".draft" and "-x" were
-// still refused. Both burn the whole attempt lease before an agent runs,
-// because writeTask's refusal becomes an infra_error the scope retries.
+// to the same string is this test. Every candidate stageID accepts must
+// produce a taskName Harbor accepts too; a candidate stageID rejects is
+// skipped, not asserted on, since taskName never sees an id that never
+// reaches it. Loosen stageID to admit a character Harbor's own grammar
+// refuses — a space, a leading '.' or '-' — and the candidate that exercises
+// it newly passes the filter and fails here, without dispatchAttempt's own
+// guard ever running.
 func TestTaskNameAlwaysSatisfiesHarborsGrammar(t *testing.T) {
 	harborName := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
-	for _, id := range []string{
-		"fix", "pov/0", "hunt/sql-injection", "prove_2", "a.b",
-		".draft", "-x", "_scratch/1", "a b", "\u00e9t\u00e9", "s/t/u/v",
-	} {
+	candidates := []string{
+		"fix", "pov-0", "hunt.sql-injection", "prove_2", "a.b", "s",
+		".draft", "-x", "_scratch", "a b", "\u00e9t\u00e9", "s/t/u/v", "",
+	}
+	tested := 0
+	for _, id := range candidates {
+		if !stageID.MatchString(id) {
+			continue
+		}
+		tested++
 		if got := taskName(id); !harborName.MatchString(got) {
 			t.Errorf("taskName(%q) = %q, which Harbor refuses", id, got)
 		}
+	}
+	if tested == 0 {
+		t.Fatal("no candidate satisfied stageID — this test is vacuous")
 	}
 }
 
@@ -499,7 +511,7 @@ func TestTaskNameAlwaysSatisfiesHarborsGrammar(t *testing.T) {
 func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 	dir := t.TempDir()
 	s := Stage{
-		ID:     "pov/0",
+		ID:     "pov-0",
 		Agent:  Agent{name: "oracle"},
 		Env:    Image("rc-env@sha256:" + strings.Repeat("a", 64)),
 		Prompt: "do the thing",

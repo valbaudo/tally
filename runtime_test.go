@@ -335,7 +335,7 @@ func TestScopeRunWritesAReceipt(t *testing.T) {
 	s := r.root(Dispatching(1, time.Minute))
 	got := s.Run(okStage)
 
-	b, err := os.ReadFile(filepath.Join(r.dir, "attempts", fsSafe(okStage.ID), "1", "receipt.json"))
+	b, err := os.ReadFile(filepath.Join(r.dir, "attempts", okStage.ID, "1", "receipt.json"))
 	if err != nil {
 		t.Fatalf("receipt.json: %v", err)
 	}
@@ -518,7 +518,7 @@ func TestDispatchAttemptResumesFromExistingResultWithoutRedispatchingOrSpendingT
 	r, _ := testRun(t, f)
 	s := r.root(Dispatching(1, time.Minute))
 
-	evidence := filepath.Join(r.dir, "attempts", fsSafe(okStage.ID), "1")
+	evidence := filepath.Join(r.dir, "attempts", okStage.ID, "1")
 	writeCompletedTrial(t, evidence)
 
 	got := s.Run(okStage)
@@ -553,7 +553,7 @@ func TestDispatchAttemptResumesInfraErrorRetryThenDispatchesTheNextRetryForReal(
 	r, slept := testRun(t, f)
 	s := r.root(Dispatching(2, time.Minute))
 
-	evidence1 := filepath.Join(r.dir, "attempts", fsSafe(okStage.ID), "1")
+	evidence1 := filepath.Join(r.dir, "attempts", okStage.ID, "1")
 	writeCompletedInfraErrorTrial(t, evidence1)
 
 	got := s.Run(okStage)
@@ -571,6 +571,102 @@ func TestDispatchAttemptResumesInfraErrorRetryThenDispatchesTheNextRetryForReal(
 	}
 	if len(*slept) != 0 {
 		t.Fatalf("slept %v, want none: nothing was actually dispatched for the resumed retry, so there is nothing to back off from", *slept)
+	}
+}
+
+// Real resumes always find a receipt beside the trial — writeReceipt is the
+// last thing dispatchAttempt does for every dispatch, live or resumed. No
+// fixture above this one plants one: a guard that (wrongly) compared against
+// attemptID(s, retry) instead of attemptID(s, retry+1) would still pass every
+// test above and break every real resume.
+func TestResumeAdoptsItsOwnReceiptedTrial(t *testing.T) {
+	f := &fake{script: []State{Passed}} // wrong on purpose: must never be reached
+	r, _ := testRun(t, f)
+	s := r.root(Dispatching(1, time.Minute))
+
+	evidence := filepath.Join(r.dir, "attempts", okStage.ID, "1")
+	writeCompletedTrial(t, evidence)
+	writeReceipt(evidence, okStage, 1, Result{State: Unverified})
+
+	got := s.Run(okStage)
+	if f.calls != 0 {
+		t.Fatalf("dispatcher called %d times, want 0: a receipted attempt must not be re-dispatched", f.calls)
+	}
+	if got.State != Unverified {
+		t.Fatalf("state = %s, want unverified (adopted from its own receipted trial)", got.State)
+	}
+}
+
+// A crash between writing result.json and writing receipt.json, followed by
+// DAWN_RESUME onto a Prompt edited in the meantime, lands two different
+// stages on the same id's evidence path — the path matches, but the stage
+// changed, which the grammar cannot see. resumeResult must catch it by
+// checking the receipt beside the trial, not just the path it sits at, and
+// must leave that receipt untouched: it is the only record of why the resume
+// was refused.
+func TestResumeRefusesEvidenceThatIsNotThisAttempts(t *testing.T) {
+	a := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Gate: NoGate("test"), Prompt: "do the first thing"}
+	b := a
+	b.Prompt = "do a different thing entirely"
+
+	f := &fake{script: []State{Passed}} // wrong on purpose: must never be reached
+	r, _ := testRun(t, f)
+	s := r.root(Dispatching(1, time.Minute))
+
+	evidence := filepath.Join(r.dir, "attempts", "s", "1")
+	writeCompletedTrial(t, evidence)
+	writeReceipt(evidence, a, 1, Result{State: Unverified})
+	before, err := os.ReadFile(filepath.Join(evidence, "receipt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if msg := caughtBug(t, func() { s.Run(b) }); msg == "" {
+		t.Fatal("resuming stage b over stage a's receipted evidence did not unwind")
+	}
+	if f.calls != 0 {
+		t.Fatalf("dispatcher called %d times, want 0", f.calls)
+	}
+	if s.used != 0 {
+		t.Fatalf("scope.used = %d, want 0: a refused resume must not spend the lease", s.used)
+	}
+	after, err := os.ReadFile(filepath.Join(evidence, "receipt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("receipt.json changed: a refused resume must never overwrite the evidence that shows why")
+	}
+	var rec receipt
+	if err := json.Unmarshal(after, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.ID != attemptID(a, 1) {
+		t.Errorf("receipt.json id = %q, want stage a's untouched attemptID %q", rec.ID, attemptID(a, 1))
+	}
+}
+
+// Stage.ID has one grammar, enforced once, at dispatch (stageID, runtime.go).
+// Each of these breaks it differently: a slash (the hazard fsSafe used to
+// paper over by colliding it with a dash), a leading '.' or '-' (fsSafe let
+// both through untouched), a space, non-ASCII, empty, "..", and a
+// multi-segment path.
+func TestDispatchRefusesAStageIDThatIsNotOneSegment(t *testing.T) {
+	for _, id := range []string{"pov/0", ".draft", "-x", "a b", "été", "", "..", "s/t/u/v"} {
+		t.Run(id, func(t *testing.T) {
+			f := &fake{script: []State{Passed}}
+			r, _ := testRun(t, f)
+			s := r.root(Dispatching(1, time.Minute))
+			stage := okStage
+			stage.ID = id
+
+			if msg := caughtBug(t, func() { s.Run(stage) }); msg == "" {
+				t.Fatalf("stage id %q did not unwind as a protocol bug", id)
+			}
+			if f.calls != 0 {
+				t.Errorf("stage id %q: dispatcher called %d times, want 0", id, f.calls)
+			}
+		})
 	}
 }
 

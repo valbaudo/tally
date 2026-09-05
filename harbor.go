@@ -518,35 +518,10 @@ func classify(s Stage, t trial) Result {
 	return r
 }
 
-// taskName builds the Harbor task name for a stage. It is NOT identity — the
-// evidence path and attempt_id carry that — so it only has to be valid, and it
-// is built to be valid rather than hoped into it.
-//
-// Harbor validates the name against, verbatim from its own constants.py:
-//
-//	^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$
-//
-// Two ways a stage id breaks that, both found by running cybergym rather than
-// by reading. First the slash: Stage.ID's doc tells authors to qualify ids and
-// fsSafe exists because "Stage ids carry slashes", so a search sampling
-// "pov/0" is the documented case — and "dawn/pov/0" is refused outright, with
-// "Either datasets or tasks must be provided". Second the first character
-// after the slash: fsSafe passes a leading '-', '_' or '.' through untouched,
-// so "dawn/.draft" and "dawn/-x" are refused too. The first fix here caught
-// only the slash, which is why this is a function with the grammar written
-// next to it instead of a call to fsSafe at the format site.
-//
-// Both failures are silent in the worst way: writeTask's refusal becomes an
-// infra_error, which the scope retries with backoff, so a permanently
-// malformed name burns the whole attempt lease before any agent runs.
-//
-// The prefix costs nothing because names need not be distinct: two stages that
-// land on one name are still two evidence directories and two attempt_ids.
-func taskName(id string) string {
-	seg := fsSafe(id)
-	if c := seg[0]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
-		// fsSafe never returns empty (it yields "stage"), so seg[0] is safe.
-		seg = "s" + seg
-	}
-	return "dawn/" + seg
-}
+// taskName builds the Harbor task name for a stage. The id already satisfies
+// Harbor's own segment grammar (stageID, runtime.go — refused at dispatch
+// otherwise), so it is used verbatim; the "dawn/" prefix exists only because
+// Harbor's grammar wants two segments, not because names must be distinct —
+// two stages that land on one name are still two evidence directories and
+// two attempt_ids.
+func taskName(id string) string { return "dawn/" + id }

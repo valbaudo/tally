@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -399,6 +400,16 @@ func (s *Scope) Run(stage Stage) Result {
 	return s.dispatchAttempt(stage, true)
 }
 
+// stageID is Stage.ID's grammar: one Harbor task-name segment, verbatim from
+// Harbor's constants.py. It is also exactly one path segment — no slash, and
+// the leading alnum rules out "." and ".." — so an id IS its evidence
+// directory and its task name, translated nowhere: attempts/<id>/ is
+// injective in id by construction and "dawn/"+id is a name Harbor accepts.
+// Three bugs came from leaving the id unconstrained and sanitising it per
+// consumer (a double slash in the name, a leading '.', two ids on one
+// evidence directory); one grammar at dispatch replaces all three.
+var stageID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
 // dispatchAttempt is Run's body — compiles the stage into a task.toml dawn
 // owns entirely (artifacts list, separate no-network verifier, digest-pinned
 // verifier image, agent-phase allowlist) and dispatches it — parameterised on
@@ -412,6 +423,9 @@ func (s *Scope) Run(stage Stage) Result {
 // that race gets an ordinary InfraError — like any other spent-lease
 // dispatch — instead of tearing down every sibling with it (see Fan).
 func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
+	if !stageID.MatchString(stage.ID) {
+		bug("scope %s dispatched stage id %q: an id is one segment, %s — qualify with '-' or '.', not '/'", s.id, stage.ID, stageID)
+	}
 	if s.lease.AttemptWallClock <= 0 {
 		bug("scope %s dispatched %q with no AttemptWallClock: a scope that dispatches is built with Dispatching", s.id, stage.ID)
 	}
@@ -419,7 +433,7 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 	// attempt, after sleeping — and spends the same counter a deliberate
 	// attempt does. A caller never sees an InfraError that still had budget.
 	for retry := 0; ; retry++ {
-		evidence := filepath.Join(s.run.dir, "attempts", fsSafe(stage.ID), strconv.Itoa(retry+1))
+		evidence := filepath.Join(s.run.dir, "attempts", stage.ID, strconv.Itoa(retry+1))
 
 		// Resume: this exact retry already ran, in an earlier process, if
 		// result.json is sitting under evidence/jobs from a prior Dispatch.
@@ -432,7 +446,7 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 		// immediately would therefore see this scope's own Attempts counter
 		// under-report its history; every shipped protocol dispatches once
 		// per Run call and stops, so this never shows.
-		r, resumed := resumeResult(evidence, stage)
+		r, resumed := resumeResult(evidence, stage, retry+1)
 		if !resumed {
 			// Concurrency admission: charge() (already atomic, already walks
 			// ancestors) plus this one semaphore, acquired before
@@ -503,7 +517,28 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 // (harbor.go) turns it into the identical Result a live Dispatch would have
 // produced. ok is false the instant trial.read's glob does not find exactly
 // one result.json under evidence/jobs — nothing to resume, dispatch for real.
-func resumeResult(evidence string, s Stage) (Result, bool) {
+//
+// The receipt is the commit record — writeReceipt is the last thing
+// dispatchAttempt does for an attempt, and its id is attemptID(s, n): stage
+// id, content, inputs, attempt number. A receipt with THIS attempt's id
+// proves the trial beside it is this attempt's, not merely one that landed on
+// the same path. Any other receipt means the stage changed since it ran, or
+// two stages share one id; adopting that trial would answer a Run with a
+// verdict for work that never happened, and actuate on it. Refused, never
+// re-dispatched: re-dispatching would overwrite the evidence that shows why.
+// No receipt at all is today's rule unchanged — nothing finished here, or
+// dawn died in the instant between Harbor's result.json and its own receipt,
+// the one window this cannot see.
+func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
+	var rec receipt
+	switch err := readJSON(filepath.Join(evidence, "receipt.json"), &rec); {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		bug("receipt at %s unreadable: %v — refusing to resume over it", evidence, err)
+	case rec.ID != attemptID(s, attempt):
+		bug("evidence %s belongs to attempt %s (stage %q), not to stage %q's attempt %s: the stage changed since it ran, or two stages share one id",
+			evidence, rec.ID, rec.Stage, s.ID, attemptID(s, attempt))
+	}
 	var t trial
 	if err := t.read(filepath.Join(evidence, "jobs"), s.Outputs); err != nil {
 		return Result{}, false
@@ -796,23 +831,4 @@ func (r *run) flushActuations() {
 	if err := os.WriteFile(filepath.Join(r.dir, "actuations.json"), append(b, '\n'), 0o644); err != nil {
 		panic(fmt.Sprintf("dawn: actuation record: %v", err))
 	}
-}
-
-// fsSafe turns a stage id into one path segment. Stage ids carry slashes —
-// "hunt/sql-injection" — and an id is only unique run-wide, so the segment has
-// to preserve the whole id rather than its tail.
-func fsSafe(id string) string {
-	var b strings.Builder
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	if b.Len() == 0 {
-		return "stage"
-	}
-	return b.String()
 }

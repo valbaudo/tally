@@ -100,14 +100,19 @@ func protocol(run *dawn.Scope) dawn.State {
 		// The id is qualified by the sample number, and it has to be.
 		// Stage.ID's own doc says to qualify by whatever varies, and here the
 		// consequence of not doing so is silent: dawn keys an attempt's
-		// evidence on the stage id and the retry index, and that index resets
+		// evidence on the stage id verbatim (attempts/<id>/, no translation —
+		// see stageID, runtime.go) and the retry index, and that index resets
 		// on every Run call — so a second sample under the SAME id would find
 		// the first sample's result.json already sitting at its evidence path,
 		// short-circuit to it as though this process had crashed and resumed,
 		// and return the first verdict again without dispatching anything. The
-		// search would sample once and then spin.
+		// search would sample once and then spin. The grammar rules out a
+		// DIFFERENT hazard — two DISTINCT ids colliding on one evidence
+		// directory, which is what forced "-" instead of "/" here in the first
+		// place — but it cannot rule out this one: %d makes each id distinct,
+		// nothing sanitises it into being so.
 		r := run.Run(dawn.Stage{
-			ID:      fmt.Sprintf("pov/%d", i),
+			ID:      fmt.Sprintf("pov-%d", i),
 			Agent:   dawn.ClaudeCode,
 			Env:     env,
 			Prompt:  prompt,
