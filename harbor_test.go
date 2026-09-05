@@ -469,3 +469,40 @@ func TestTaskDirForJoinsTheGeneratedTaskDirName(t *testing.T) {
 		t.Fatalf("taskDirFor(%q) = %q, want %q", "/run/attempts/x/1", got, want)
 	}
 }
+
+// A stage id with a slash is the documented, encouraged case — Stage.ID tells
+// authors to qualify ids by whatever varies, and cybergym's search samples
+// "pov/0", "pov/1". Harbor refuses a task name carrying more than the one
+// slash dawn's own prefix adds: measured, "dawn/pov/0" fails to resolve at all
+// ("Either datasets or tasks must be provided") while "dawn/pov-0" is
+// accepted. dawn sanitised the id for the evidence path and not for the name,
+// so the first protocol to qualify an id spent its entire lease on
+// infra_error before an agent ever ran.
+func TestWriteTaskSanitisesASlashedStageIDIntoTheTaskName(t *testing.T) {
+	dir := t.TempDir()
+	s := Stage{
+		ID:     "pov/0",
+		Agent:  Agent{name: "oracle"},
+		Env:    Image("rc-env@sha256:" + strings.Repeat("a", 64)),
+		Prompt: "do the thing",
+		Gate:   SoundGate(Image("rc-gate@sha256:" + strings.Repeat("b", 64))),
+	}
+	if err := writeTask(dir, s, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "task.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.Contains(got, `name = "dawn/pov-0"`) {
+		t.Errorf("task name did not sanitise the slashed stage id; task.toml:\n%s", got)
+	}
+	// The prefix contributes exactly one slash and the id must contribute none.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "name = ") && strings.Count(line, "/") != 1 {
+			t.Errorf("task name carries %d slashes, Harbor accepts one: %q",
+				strings.Count(line, "/"), line)
+		}
+	}
+}

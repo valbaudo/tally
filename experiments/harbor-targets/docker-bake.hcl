@@ -34,3 +34,19 @@ target "pr-ci-gate" {
 group "pr-ci" {
   targets = ["pr-ci-env", "pr-ci-gate"]
 }
+
+target "cybergym-env" {
+  inherits = ["reproducible"]
+  context  = "cybergym/environment"
+  tags     = ["dawn-cybergym-env"]
+}
+
+target "cybergym-gate" {
+  inherits = ["reproducible"]
+  context  = "cybergym/gate"
+  tags     = ["dawn-cybergym-gate"]
+}
+
+group "cybergym" {
+  targets = ["cybergym-env", "cybergym-gate"]
+}

@@ -224,8 +224,17 @@ func writeTask(dir string, s Stage, attempt time.Duration) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "schema_version = \"1.4\"\n")
 	fmt.Fprintf(&b, "artifacts = [%q]\n\n", outputDir)
+	// fsSafe on the NAME as well as the path. Stage ids carry slashes — the
+	// Stage.ID doc tells authors to qualify them, and a loop that samples
+	// "pov/0", "pov/1" is doing exactly that — but Harbor refuses a task name
+	// with more than the one slash this prefix adds: measured, "dawn/pov/0" is
+	// rejected with "Either datasets or tasks must be provided" while
+	// "dawn/pov-0" is accepted. dawn already sanitizes the id for the evidence
+	// path and simply did not for the name, so the first protocol to qualify an
+	// id the documented way spent its whole lease on infra_error before any
+	// agent ran. The description keeps the id verbatim: nothing parses it.
 	fmt.Fprintf(&b, "[task]\nname = %q\nversion = \"1.0.0\"\ndescription = %q\n\n",
-		"dawn/"+s.ID, "dawn stage "+s.ID)
+		"dawn/"+fsSafe(s.ID), "dawn stage "+s.ID)
 
 	// The environment is the task: the input tree is baked into this image, so
 	// there is nothing to build and no Dockerfile to ship. Its baseline is

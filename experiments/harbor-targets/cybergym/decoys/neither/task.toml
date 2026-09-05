@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-cybergym-gate@sha256:f2cc298cce0b0cc9d892703d95e94e24327c44de855f77b6611ed69180e1b7c8"
+docker_image = "dawn-cybergym-gate@sha256:6195d3ff2c3f2a78c29a7bcd6fe0b0f1575aba4a06f13cd845ee5e1f88e98582"
 network_mode = "no-network"
 
 [verifier.env]
