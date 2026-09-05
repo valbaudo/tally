@@ -16,10 +16,16 @@ type fake struct {
 	script []State
 	err    error
 	calls  int
+	// dispatchCtxErr is ctx.Err() snapshotted SYNCHRONOUSLY inside Dispatch,
+	// before Scope.Run's own deferred cancel() ever fires — checking the ctx
+	// object itself after Run returns would always read Canceled, since
+	// Run's cancel() mutates that same object regardless of its parent.
+	dispatchCtxErr error
 }
 
 func (f *fake) Dispatch(ctx context.Context, stage Stage, evidence string) (Result, error) {
 	f.calls++
+	f.dispatchCtxErr = ctx.Err()
 	if f.err != nil {
 		return Result{}, f.err
 	}
@@ -36,6 +42,7 @@ func testRun(t *testing.T, f *fake) (*run, *[]time.Duration) {
 	var slept []time.Duration
 	r := &run{
 		dir:      t.TempDir(),
+		ctx:      context.Background(),
 		dispatch: f,
 		sleep:    func(d time.Duration) { slept = append(slept, d) },
 		values:   map[string]any{},
@@ -240,6 +247,22 @@ func TestAttemptClockIsTruncatedByTheScope(t *testing.T) {
 	s := r.root(Lease{Attempts: 1, WallClock: time.Minute, AttemptWallClock: time.Hour})
 	if got := s.attemptClock(); got > time.Minute || got < 50*time.Second {
 		t.Errorf("attemptClock = %v, want about the minute the scope has left", got)
+	}
+}
+
+// Decision 4: Scope.Run must thread the run's OWN context as the parent of
+// every attempt's context — never context.Background() — or an external
+// cancel (Main's signal.NotifyContext) would never reach a dispatched
+// attempt at all.
+func TestScopeRunDerivesFromTheRunsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the run's parent is already cancelled before dispatch
+	f := &fake{script: []State{Unverified}}
+	r, _ := testRun(t, f)
+	r.ctx = ctx
+	r.root(Dispatching(1, time.Minute)).Run(okStage)
+	if f.dispatchCtxErr != context.Canceled {
+		t.Fatalf("attempt ctx.Err() at dispatch = %v, want context.Canceled: Scope.Run is not deriving from run.ctx", f.dispatchCtxErr)
 	}
 }
 

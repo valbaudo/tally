@@ -62,11 +62,12 @@ func main() {
 // exhausted, infra_error and cancelled all publish nothing.
 func protocol(run *dawn.Scope) dawn.State {
 	fix := run.Run(dawn.Stage{
-		ID:     "fix",
-		Agent:  dawn.ClaudeCode,
-		Env:    env,
-		Prompt: prompt,
-		Gate:   dawn.SoundGate(gate),
+		ID:      "fix",
+		Agent:   dawn.ClaudeCode,
+		Env:     env,
+		Prompt:  prompt,
+		Outputs: []string{"fix.patch"},
+		Gate:    dawn.SoundGate(gate),
 	})
 	// The reward is a number the gate wrote, never a state. Recording it keeps
 	// the arithmetic dawn did across the attempt visible in the run record,

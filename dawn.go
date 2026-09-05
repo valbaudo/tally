@@ -15,12 +15,15 @@
 //
 // Everything the settled decisions already fix is absent from this surface:
 // the verifier always runs separate, no-network, after the agent's container
-// is gone, and always writes reward.json; the artifacts list, the output
-// paths, the retry backoff, the per-agent concurrency cap and the idempotency
-// key are dawn's, not the author's. An author cannot restate them and so
-// cannot contradict them — which is why a Stage has no output field at all.
-// Naming the Env image is naming the task, and the task's declared artifacts
-// are already dawn's list.
+// is gone, and always writes reward.json; the collected root, the retry
+// backoff, the per-agent concurrency cap and the idempotency key are dawn's,
+// not the author's. An author cannot restate them and so cannot contradict
+// them. Naming the Env image is naming the task, but the ROOT being dawn's
+// (outputDir) does not make the NAMES inside it dawn's too — nothing invents
+// a name for a file the agent has not written yet. That is why a Stage does
+// have an output field, Outputs: the one thing dawn cannot know in advance
+// and must still fix before dispatch, in Go source, rather than leave to
+// whatever the agent decides to call its own handover.
 package dawn
 
 import "time"
@@ -245,16 +248,19 @@ type Artifact struct {
 	Digest string
 }
 
-// Manifest is what a stage's declared outputs amounted to — the task's
-// artifacts list, which dawn owns and the author never restates. A declared
-// output that is missing or invalid is infra_error, always; an empty one is
-// present and valid. A receiving stage gets those files read-only at a fixed
-// path plus this record; a protocol reads the digests to decide whether
-// anything actually changed.
+// Manifest is what a stage's DECLARED outputs (Stage.Outputs) amounted to,
+// looked up by name under the collected root — never a walk of whatever else
+// the agent left there (see digest in harbor.go). A declared output that is
+// missing, uncollectable, or over maxOutputBytes is infra_error, always; a
+// stage that declares no outputs at all gets an empty Manifest, and that is
+// present and valid. A receiving stage gets the declared files read-only at
+// a fixed path plus this record; a protocol reads the digests to decide
+// whether anything actually changed.
 type Manifest []Artifact
 
 // Stage is one runner call: one agent, one environment, one instruction, one
-// gate. Six fields, and every one of them is something dawn cannot know.
+// set of declared outputs, one gate. Seven fields, and every one of them is
+// something dawn cannot know.
 type Stage struct {
 	// ID is stable across attempts and must be unique within the RUN, not
 	// merely within its scope: attempt_id hashes the stage id and no scope
@@ -270,6 +276,23 @@ type Stage struct {
 	// Prompt is the prose instruction. It is the only thing that tells the
 	// agent what to hand back, which makes it part of the integrity argument.
 	Prompt string
+	// Outputs is the exact set of relative paths under dawn's fixed output
+	// directory that the agent must write. Each entry is both the logical
+	// name AND the path — there is no separate Path field, because the root
+	// is already dawn's and only the name inside it was ever in question.
+	// writeTask puts these exact paths into the instruction, so the agent is
+	// never guessing what to call its handover; digest looks up each one by
+	// name instead of walking the output tree, so a file the agent invented
+	// and never declared cannot enter the Manifest.
+	//
+	// This is not pedantry. Today Artifact.Name is filepath.Rel's echo of
+	// whatever the agent chose to call its file — harmless only because
+	// nothing yet treats that string as a path. The moment Stage.Inputs
+	// materialises a PRIOR stage's manifest into a new container, that
+	// string becomes a mount path, and an agent in a container it never
+	// runs in would control a path inside it. A declared name is fixed here,
+	// in Go source, before either container exists.
+	Outputs []string
 	// Inputs are earlier results whose artifacts this stage reads. dawn mounts
 	// them read-only at a fixed path together with their manifest. This is the
 	// only way anything crosses an attempt boundary: every attempt is a fresh

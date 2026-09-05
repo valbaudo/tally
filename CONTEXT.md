@@ -61,7 +61,7 @@ A stage's outcome, one of a closed set: `passed`, `rejected`, `unverified`, `exh
 A declared output of a stage: bytes carrying a logical name from dawn's declared list. Never a path chosen by the agent, never executed.
 
 **manifest**:
-The record of what crossed a stage boundary — per artifact: logical name, path, content digest, size, and the stage and attempt that produced it.
+The record of what crossed a stage boundary — per artifact: logical name and content digest. Nothing else: path is outputDir + name, a pure function; which attempt produced it is already the evidence layout (`<run>/attempts/<stage>/<attempt>/`). A second representation of either would only have to agree with the first by convention.
 
 **declared output**:
 An output a protocol names in advance for a stage. Only declared outputs cross a boundary, and declaring them before dispatch is what makes an interrupted attempt inspectable.

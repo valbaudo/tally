@@ -3,6 +3,7 @@ package dawn
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,6 +132,9 @@ func TestClassifyAssignsStatesByFirstMatch(t *testing.T) {
 		"dawn's clock ended it":  {sound, trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}, TimedOut: true}, Exhausted},
 		"format-only clamped":    {format, won, Unverified},
 		"ungated":                {none, trial{Present: true}, Unverified},
+		// Rule 1 wins over everything, including a trial that otherwise looks
+		// like a clean win: cancelled from outside is never a verdict.
+		"externally cancelled": {sound, trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}, Cancelled: true}, Cancelled},
 	} {
 		if got := classify(c.s, c.t); got.State != c.want {
 			t.Errorf("%s: got %s, want %s", name, got.State, c.want)
@@ -144,5 +148,172 @@ func TestClassifyAssignsStatesByFirstMatch(t *testing.T) {
 	}
 	if _, ok := r.Metric("nope"); ok {
 		t.Error("a missing metric must not read as zero")
+	}
+}
+
+// digest looks up declared names; it must not pick up a file the agent wrote
+// but never declared, however innocuous — an undeclared file is inert.
+func TestDigestLooksUpDeclaredNamesOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "declared.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "undeclared.txt"), []byte("smuggled"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, present, err := digest(dir, []string{"declared.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !present {
+		t.Fatal("declared.txt exists and fits the cap: should be present")
+	}
+	if len(m) != 1 || m[0].Name != "declared.txt" {
+		t.Fatalf("manifest = %v, want exactly the one declared name", m)
+	}
+}
+
+// A declared output that was never written is not present, and infra_error
+// (via classify's Rule 2) is the only way it can go — never rejected.
+func TestDigestMissingDeclaredNameIsNotPresent(t *testing.T) {
+	m, present, err := digest(t.TempDir(), []string{"never-written.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present {
+		t.Fatal("a missing declared output must not be present")
+	}
+	if len(m) != 0 {
+		t.Fatalf("manifest = %v, want none: a missing output earns no partial manifest", m)
+	}
+}
+
+// Decision 3: an oversized declared output is not present either — dawn
+// refusing its own collection, not a gate voting no — and "never truncate"
+// means it is never even partially digested.
+func TestDigestOversizedDeclaredNameIsNotPresent(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "huge.bin")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxOutputBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	m, present, err := digest(dir, []string{"huge.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present {
+		t.Fatal("an over-cap declared output must not be present")
+	}
+	if len(m) != 0 {
+		t.Fatalf("manifest = %v, want none", m)
+	}
+}
+
+// A file exactly at the cap is not oversized — the boundary is "over", not
+// "at or over".
+func TestDigestAtTheCapIsPresent(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "exact.bin")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxOutputBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, present, err := digest(dir, []string{"exact.bin"}); err != nil || !present {
+		t.Fatalf("present=%v err=%v, want present at exactly the cap", present, err)
+	}
+}
+
+// Decision 1: the agent is told the exact filenames, not left to guess. A
+// stage with no declared outputs says so instead of naming nothing.
+func TestInstructionNamesEachDeclaredOutput(t *testing.T) {
+	s := Stage{Prompt: "do the thing", Outputs: []string{"fix.patch", "notes.txt"}}
+	got := instruction(s)
+	for _, name := range s.Outputs {
+		want := outputDir + "/" + name
+		if !strings.Contains(got, want) {
+			t.Errorf("instruction missing declared path %q\n%s", want, got)
+		}
+	}
+
+	none := instruction(Stage{Prompt: "do the thing"})
+	if strings.Contains(none, outputDir+"/") {
+		t.Errorf("a stage with no declared outputs must not name a path under it\n%s", none)
+	}
+}
+
+// clockOutcome is the pure translation from ctx.Err() dawn relies on to tell
+// its own clock apart from an external cancel; classify's Cancelled-first
+// rule is only as correct as this mapping.
+func TestClockOutcome(t *testing.T) {
+	for _, c := range []struct {
+		err                error
+		timedOut, canceled bool
+	}{
+		{nil, false, false},
+		{context.DeadlineExceeded, true, false},
+		{context.Canceled, false, true},
+	} {
+		gotTimedOut, gotCancelled := clockOutcome(c.err)
+		if gotTimedOut != c.timedOut || gotCancelled != c.canceled {
+			t.Errorf("clockOutcome(%v) = (%v, %v), want (%v, %v)", c.err, gotTimedOut, gotCancelled, c.timedOut, c.canceled)
+		}
+	}
+}
+
+// Decision 4: cmd.Cancel must send SIGTERM, not exec.CommandContext's default
+// SIGKILL — the whole point being that harbor gets to run its own shutdown
+// handler. Proven against a real subprocess and a real signal, not a mock.
+func TestTerminateGracefullySendsSIGTERMNotSIGKILL(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "term.seen")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c",
+		"trap 'touch "+marker+"; exit 0' TERM; sleep 5 & wait $!")
+	terminateGracefully(cmd, 2*time.Second)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond) // let the trap install before cancelling
+	cancel()
+	cmd.Wait()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("SIGTERM trap did not fire (got SIGKILL instead?): %v", err)
+	}
+}
+
+// The hard-kill backstop: a process that ignores SIGTERM entirely must still
+// be gone by WaitDelay, not left to run forever.
+func TestTerminateGracefullyForceKillsAfterWaitDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", "trap '' TERM; sleep 30 & wait $!")
+	terminateGracefully(cmd, 300*time.Millisecond)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitDelay did not force-kill a process ignoring SIGTERM")
 	}
 }

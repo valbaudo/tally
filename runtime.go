@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -88,6 +90,7 @@ var dispatcher runner
 // ever gets wide enough for the contention to show up, which it will not.
 type run struct {
 	dir      string
+	ctx      context.Context // parent of every attempt's context; cancelled -> Cancelled
 	dispatch runner
 	sleep    func(time.Duration) // time.Sleep; a test replaces it
 
@@ -129,11 +132,18 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	if dispatcher == nil {
 		panic("dawn: no runner registered")
 	}
+	// Captured once, here, and threaded down as the parent of every attempt's
+	// context (Scope.Run) — never context.Background(). Every in-flight and
+	// future attempt's ctx.Done fires the instant either signal arrives,
+	// which is what lets clockOutcome (harbor.go) tell dawn's own clock
+	// apart from an operator asking the whole run to stop.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	dir := filepath.Join(runRoot(), name+"-"+time.Now().UTC().Format("20060102T150405Z"))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(fmt.Sprintf("dawn: run directory: %v", err))
 	}
-	r := &run{dir: dir, dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}}
+	r := &run{dir: dir, ctx: ctx, dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}}
 	state := r.protocol(root, protocol)
 	r.mu.Lock()
 	r.values["state"] = string(state)
@@ -270,7 +280,10 @@ func (s *Scope) Run(stage Stage) Result {
 		if err := os.MkdirAll(evidence, 0o755); err != nil {
 			bug("cannot create the evidence directory %s: %v", evidence, err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), s.attemptClock())
+		// s.run.ctx (Main's signal.NotifyContext), never context.Background():
+		// a cancel from outside the run has to reach every attempt, including
+		// ones dispatched after the signal arrived.
+		ctx, cancel := context.WithTimeout(s.run.ctx, s.attemptClock())
 		r, err := s.run.dispatch.Dispatch(ctx, stage, evidence)
 		cancel()
 		if err != nil {
@@ -279,6 +292,11 @@ func (s *Scope) Run(stage Stage) Result {
 		if r.State != InfraError || !s.More() {
 			return r
 		}
+		// The one gap: this sleep is plain time.Sleep, not selecting on
+		// s.run.ctx.Done(). A cancel arriving mid-backoff is not noticed here
+		// — only at the next dispatch's context, whose Done fires immediately
+		// since the parent is already cancelled. Bounded, not unbounded: the
+		// longest this can delay noticing is retryBackoffCap (5 minutes).
 		s.run.sleep(retryBackoffGap(retry + 1))
 	}
 }

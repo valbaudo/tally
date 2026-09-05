@@ -13,11 +13,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -40,6 +40,65 @@ var agentAllowedHosts = []string{"api.anthropic.com", "platform.claude.com"}
 // pinned image. It is not the attempt clock and not the author's business.
 const gateTimeout = 10 * time.Minute
 
+// maxOutputBytes bounds a single declared output. 64 MiB: comfortably above
+// anything this package's own protocols hand back today (a unified diff, a
+// small report, a JSON manifest — all measured in KB), while still small
+// enough that hashing it, holding it, and shipping it to a later stage never
+// becomes the bottleneck an agent could weaponise by dumping arbitrary bulk
+// into outputDir. Raise it the day a protocol legitimately needs to hand
+// back something bigger.
+//
+// An oversized declared output is dawn refusing to trust its own collection,
+// not a gate voting no: digest flips trial.Present to false and lets it ride
+// the SAME infra_error rule a missing output already uses (Rule 2 in the
+// State doc) rather than adding a seventh state, or a "rejected" no gate
+// ever voted for. "Never truncate" means dawn never accepts partial bytes as
+// the real file — a file over the cap is taken whole or not at all.
+//
+// The honest cost: infra_error implies transience and spends retry budget
+// the same way a flaky collection does. A stage that is SYSTEMATICALLY
+// oversized — not flaky, wrong every time — burns its whole Attempts counter
+// looking exactly like bad luck before the lease gives out. That is the
+// accepted price of not inventing a seventh state for one classifier rule.
+const maxOutputBytes = 64 << 20 // 64 MiB
+
+// harborShutdownGrace bounds how long dawn waits, after asking harbor to
+// stop, before forcing it. Measured, not guessed
+// (docs/research/harbor-crash-cancel-behaviour.md): a SIGTERM'd harbor runs
+// its own handler, tears down Docker cleanly and writes a reconstructable
+// result.json with exception_type=CancelledError in ~14s; SIGKILL — what
+// exec.CommandContext sends by default — orphans the container and its
+// network forever with no result.json at all. 30s gives roughly 2x headroom
+// over the observed worst case, and is still short against an attempt clock
+// measured in minutes.
+const harborShutdownGrace = 30 * time.Second
+
+// terminateGracefully wires cmd so that a cancelled context asks the process
+// to stop the way harbor itself expects to be asked — SIGTERM, not
+// exec.CommandContext's default SIGKILL — and bounds how long dawn waits for
+// that before forcing it. grace is a parameter (not always harborShutdownGrace)
+// so the real timing can be exercised by a test without a 30-second wait.
+func terminateGracefully(cmd *exec.Cmd, grace time.Duration) {
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = grace
+}
+
+// clockOutcome reads what ended an attempt's context: dawn's own per-attempt
+// clock (context.DeadlineExceeded, Rule 4 — Exhausted) or the run's parent
+// context firing from outside (context.Canceled — Main's SIGINT/SIGTERM
+// handler, Rule 1 — Cancelled), or neither. A pure function of ctx.Err() so
+// the two are testable without a subprocess.
+func clockOutcome(err error) (timedOut, cancelled bool) {
+	switch err {
+	case context.DeadlineExceeded:
+		return true, false
+	case context.Canceled:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // trial is what one Harbor trial amounted to, as facts and not as a verdict.
 // Everything a classifier needs to reach one of the six states is here, and
 // nothing here has already reached one.
@@ -52,13 +111,22 @@ type trial struct {
 	// a crashed gate emits no verdict, which is the honest answer.
 	Rewards  map[string]float64
 	Rewarded bool
-	// Outputs is dawn's declared artifacts list as it came back: the files
-	// under outputDir, named and digested. Present is false when the entry was
-	// missing or could not be collected, which is always infra_error.
+	// Outputs is the Manifest of the stage's DECLARED outputs, looked up by
+	// name under the collected outputDir — never a walk of whatever else the
+	// agent left there (see digest). Present is false the instant any
+	// declared name was missing, uncollectable, or over maxOutputBytes;
+	// there is no such thing as half a Manifest, which is always infra_error.
 	Outputs Manifest
 	Present bool
-	// TimedOut reports that dawn's own clock ended the attempt.
+	// TimedOut reports that dawn's own per-attempt clock ended the attempt
+	// (ctx.Err() == context.DeadlineExceeded).
 	TimedOut bool
+	// Cancelled reports that the RUN's parent context ended the attempt from
+	// outside dawn's own clock (ctx.Err() == context.Canceled) — Main's
+	// signal.NotifyContext firing on SIGINT/SIGTERM. classify checks this
+	// first, ahead of every other rule: an attempt cancelled from outside
+	// never reads as a verdict of any kind.
+	Cancelled bool
 	// Fault is Harbor's exception for the trial, empty when there was none.
 	Fault string
 	// What the attempt drew. Zero for agents that report nothing (oracle, nop).
@@ -130,17 +198,27 @@ func quoted(ss []string) string {
 }
 
 // instruction is the author's prose plus the one thing dawn will not let the
-// author state: where the handover goes. dawn owns the artifacts list, so dawn
-// and not the protocol tells the agent the path it must write to.
+// author state: exactly which files it expects back, and where. dawn owns
+// the declared list, so dawn — never the protocol, never the agent's own
+// judgement — names every path the agent must write, so the agent is never
+// guessing what to call its handover.
 func instruction(s Stage) string {
-	return s.Prompt + fmt.Sprintf(`
-
----
-
-Hand your work over by writing files into `+"`%s`"+`. That directory is the
-only thing collected from this container; nothing else you do here is looked
-at, and nothing outside it crosses the boundary.
-`, outputDir)
+	var b strings.Builder
+	b.WriteString(s.Prompt)
+	b.WriteString("\n\n---\n\n")
+	if len(s.Outputs) == 0 {
+		fmt.Fprintf(&b, "This stage declares no output files. Nothing written "+
+			"into `%s`, or anywhere else in this container, crosses the boundary.\n", outputDir)
+		return b.String()
+	}
+	b.WriteString("Hand your work over by writing exactly these file(s):\n\n")
+	for _, name := range s.Outputs {
+		fmt.Fprintf(&b, "  - `%s`\n", outputDir+"/"+name)
+	}
+	fmt.Fprintf(&b, "\nThose paths, and only those paths, are collected from this "+
+		"container. Any other file left under `%s` is ignored; nothing outside "+
+		"it crosses the boundary.\n", outputDir)
+	return b.String()
 }
 
 // runTrial generates the task, runs exactly one Harbor trial against it, and
@@ -179,12 +257,13 @@ func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (
 	defer log.Close()
 	cmd := exec.CommandContext(ctx, "harbor", args...)
 	cmd.Stdout, cmd.Stderr = log, log
+	terminateGracefully(cmd, harborShutdownGrace)
 	runErr := cmd.Run()
-	t.TimedOut = ctx.Err() != nil
+	t.TimedOut, t.Cancelled = clockOutcome(ctx.Err())
 
 	// A non-zero harbor is not itself an error: the trial may still have
 	// produced a result, and a missing result is what "no verdict" looks like.
-	if err := t.read(filepath.Join(dir, "jobs")); err != nil {
+	if err := t.read(filepath.Join(dir, "jobs"), s.Outputs); err != nil {
 		if runErr != nil {
 			return t, fmt.Errorf("dawn: harbor failed (%w) and wrote no readable result: %v", runErr, err)
 		}
@@ -219,7 +298,7 @@ type manifestEntry struct {
 	Status      string `json:"status"`
 }
 
-func (t *trial) read(jobsDir string) error {
+func (t *trial) read(jobsDir string, outputs []string) error {
 	hits, _ := filepath.Glob(filepath.Join(jobsDir, "*", "*", "result.json"))
 	if len(hits) != 1 {
 		return fmt.Errorf("dawn: expected one trial result under %s, found %d", jobsDir, len(hits))
@@ -249,8 +328,14 @@ func (t *trial) read(jobsDir string) error {
 		if e.Source != outputDir {
 			continue
 		}
-		t.Present = e.Status == "ok" || e.Status == "empty"
-		t.Outputs, _ = digest(filepath.Join(trialDir, e.Destination))
+		if e.Status != "ok" && e.Status != "empty" {
+			continue // outputDir itself was not collected; Present stays false
+		}
+		m, ok, err := digest(filepath.Join(trialDir, e.Destination), outputs)
+		if err != nil {
+			return err
+		}
+		t.Outputs, t.Present = m, ok
 	}
 	return nil
 }
@@ -263,30 +348,47 @@ func readJSON(path string, v any) error {
 	return json.Unmarshal(b, v)
 }
 
-// digest turns the collected output tree into a Manifest: one entry per file,
-// named by its path under outputDir, digested by its bytes. The digests are
-// the only thing a protocol can compare across attempts to learn whether
-// anything actually changed.
-func digest(root string) (Manifest, error) {
-	var m Manifest
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+// digest looks up each of the stage's declared names under root — it does
+// NOT walk root. An undeclared file left in the output directory is
+// invisible to it: "declared" only means something if an undeclared file is
+// inert, and a file that never enters the Manifest is never mounted anywhere
+// downstream, so it cannot smuggle bytes into a later stage. The Manifest is
+// therefore a record of contract compliance — did the agent write what dawn
+// told it to write — never a filesystem audit of everything it left behind.
+//
+// present is false the instant any declared name is missing, is a directory,
+// or exceeds maxOutputBytes; there is no partial credit; the whole trial's
+// declared output set is either fully and honestly collected or it isn't
+// (Rule 2 in the State doc, via trial.Present).
+func digest(root string, names []string) (Manifest, bool, error) {
+	m := make(Manifest, 0, len(names))
+	for _, name := range names {
+		info, err := os.Stat(filepath.Join(root, name))
+		if err != nil || info.IsDir() || info.Size() > maxOutputBytes {
+			return m, false, nil
 		}
-		f, err := os.Open(p)
+		d, err := digestFile(filepath.Join(root, name))
 		if err != nil {
-			return err
+			return m, false, err
 		}
-		defer f.Close()
-		h := sha256.New()
-		if _, err := io.Copy(h, f); err != nil {
-			return err
-		}
-		name, _ := filepath.Rel(root, p)
-		m = append(m, Artifact{Name: filepath.ToSlash(name), Digest: "sha256:" + hex.EncodeToString(h.Sum(nil))})
-		return nil
-	})
-	return m, err
+		m = append(m, Artifact{Name: name, Digest: d})
+	}
+	return m, true, nil
+}
+
+// digestFile is the sha256 of one file's bytes, prefixed the way every
+// Artifact.Digest is.
+func digestFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // harborRunner is dawn's one runner. It is registered as THE dispatcher at
@@ -323,6 +425,12 @@ func classify(s Stage, t trial) Result {
 	r := Result{Manifest: t.Outputs, metrics: t.Rewards}
 	gated := s.Gate.image != ""
 	switch {
+	// Rule 1: cancelled from outside the run. Checked first, ahead of every
+	// other rule, because a trial the run itself asked to stop never reads as
+	// a verdict of any kind — not a timeout, not a missing output, not a gate
+	// that happened to still have voted.
+	case t.Cancelled:
+		r.State = Cancelled
 	// Rule 2: a declared output that is missing or could not be collected is
 	// infra_error, always — dawn cannot tell a bad attempt from a broken
 	// collection, and guessing in the agent's favour is how a forged verdict
