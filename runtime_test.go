@@ -41,11 +41,12 @@ func testRun(t *testing.T, f *fake) (*run, *[]time.Duration) {
 	t.Helper()
 	var slept []time.Duration
 	r := &run{
-		dir:      t.TempDir(),
-		ctx:      context.Background(),
-		dispatch: f,
-		sleep:    func(d time.Duration) { slept = append(slept, d) },
-		values:   map[string]any{},
+		dir:        t.TempDir(),
+		ctx:        context.Background(),
+		dispatch:   f,
+		sleep:      func(d time.Duration) { slept = append(slept, d) },
+		values:     map[string]any{},
+		actuations: map[string]string{},
 	}
 	return r, &slept
 }
@@ -305,5 +306,139 @@ func TestProtocolBugUnwindsToCancelled(t *testing.T) {
 	}
 	if r.values["protocol_bug"] == nil {
 		t.Error("the record does not say what the bug was")
+	}
+}
+
+// Scope.Run is the only writer of attempt identity onto a Result, and it has
+// to happen on the terminal Result — the one a protocol actually gets back —
+// or Actuate would have no key and no run to dedup against.
+func TestScopeRunThreadsAttemptIdentityIntoResult(t *testing.T) {
+	f := &fake{script: []State{Passed}}
+	r, _ := testRun(t, f)
+	got := r.root(Dispatching(1, time.Minute)).Run(okStage)
+	if got.attemptID == "" {
+		t.Error("Scope.Run did not set attemptID on the terminal Result")
+	}
+	if got.run != r {
+		t.Error("Scope.Run did not thread the run onto the Result")
+	}
+}
+
+// Decision 5: Actuate calls the closure only on Passed, and says why not
+// otherwise — never silently.
+func TestActuateFiresOnlyOnPassed(t *testing.T) {
+	for _, st := range []State{Rejected, Unverified, Exhausted, InfraError, Cancelled, State("")} {
+		called := false
+		err := Result{State: st}.Actuate(func(a *Actuation) error { called = true; return nil })
+		if called {
+			t.Errorf("state %s: Actuate called the closure", st)
+		}
+		if err == nil {
+			t.Errorf("state %s: Actuate returned nil, want a reason it did nothing", st)
+		}
+	}
+}
+
+// Actuate on Passed hands the closure the attempt_id as Key and a working
+// door onto the gate's own bytes — never the agent's.
+func TestActuatePassedThreadsKeyAndPublishedBytes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fix.patch"), []byte("gate bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := Result{State: Passed, attemptID: "attempt-abc", publishDir: dir, run: &run{dir: t.TempDir(), actuations: map[string]string{}}}
+	var gotKey, gotPath string
+	if err := r.Actuate(func(a *Actuation) error {
+		gotKey = a.Key
+		gotPath = a.Published("fix.patch")
+		return nil
+	}); err != nil {
+		t.Fatalf("Actuate on Passed: %v", err)
+	}
+	if gotKey != "attempt-abc" {
+		t.Errorf("Key = %q, want the attempt id", gotKey)
+	}
+	b, err := os.ReadFile(gotPath)
+	if err != nil || string(b) != "gate bytes" {
+		t.Errorf("Published(%q) = %q (%v), want the gate's own bytes", gotPath, b, err)
+	}
+}
+
+// A Published name the gate never wrote fails the whole actuation, even when
+// the actuator's own fn ignores the (still-returned) path and reports no
+// error itself.
+func TestPublishedMissingNameFailsTheActuation(t *testing.T) {
+	r := Result{State: Passed, attemptID: "x", publishDir: t.TempDir(), run: &run{dir: t.TempDir(), actuations: map[string]string{}}}
+	err := r.Actuate(func(a *Actuation) error {
+		a.Published("never-written.txt")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Actuate returned nil: a missing publish must fail the actuation")
+	}
+}
+
+// Decision 4, proven with a counter rather than a mock remote: a retried
+// Step for the same (attempt_id, name) returns the recorded identifier
+// without calling fn again.
+func TestStepDedupsWithinARun(t *testing.T) {
+	r, _ := testRun(t, &fake{script: []State{Unverified}})
+	a := &Actuation{Key: "attempt-1", run: r}
+	calls := 0
+	step := func() (string, error) { calls++; return "external-id", nil }
+
+	v1, err := a.Step("push", step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := a.Step("push", step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("fn called %d times, want 1: the second Step should have short-circuited", calls)
+	}
+	if v1 != v2 || v1 != "external-id" {
+		t.Fatalf("Step returned %q then %q, want the same recorded id both times", v1, v2)
+	}
+	// A different name under the same attempt is a different key.
+	if _, err := a.Step("tag", step); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("fn called %d times, want 2: a different step name must not dedup against \"push\"", calls)
+	}
+}
+
+// TestRecordInsideStepDoesNotDeadlock pins the one thing an author will
+// obviously write: recording the identifier the step just produced, from
+// inside the step. Step originally held the run's mutex across fn, and Record
+// takes that same mutex, so this deadlocked the whole run.
+//
+// It is a timeout rather than an assertion because a deadlock has no value to
+// compare — the failure mode is that this test never returns.
+func TestRecordInsideStepDoesNotDeadlock(t *testing.T) {
+	r := &run{dir: t.TempDir(), values: map[string]any{}, actuations: map[string]string{}}
+	scope := &Scope{run: r, id: "s"}
+	res := Result{State: Passed, attemptID: "attempt-1", run: r, publishDir: t.TempDir()}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- res.Actuate(func(a *Actuation) error {
+			_, err := a.Step("push", func() (string, error) {
+				scope.Record("pr", 42) // the deadlock, when Step held the lock
+				return "branch-1", nil
+			})
+			return err
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("actuate: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlocked: Step held the run lock across fn while Record wanted it")
 	}
 }

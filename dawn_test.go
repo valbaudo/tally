@@ -47,3 +47,36 @@ func TestDecided(t *testing.T) {
 		t.Error("anyDecided voted on a fan where nothing voted")
 	}
 }
+
+// attempt_id is stable for the same attempt and moves when any of its three
+// stated ingredients does — stage content, resolved inputs, or attempt
+// number — because a later ticket silently changing what feeds it is exactly
+// the failure the loud comment on attemptID warns about.
+func TestAttemptIDIsStableAndSensitiveToWhatItHashes(t *testing.T) {
+	base := Stage{
+		ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Prompt: "do it",
+		Outputs: []string{"out"}, Gate: SoundGate("g@sha256:0"),
+	}
+	if attemptID(base, 1) != attemptID(base, 1) {
+		t.Error("attemptID is not deterministic for identical inputs")
+	}
+	if attemptID(base, 1) == attemptID(base, 2) {
+		t.Error("attemptID must vary with the attempt number")
+	}
+	differentPrompt := base
+	differentPrompt.Prompt = "do it differently"
+	if attemptID(base, 1) == attemptID(differentPrompt, 1) {
+		t.Error("attemptID must vary with stage content (contentDigest)")
+	}
+	withInput := base
+	withInput.Inputs = []Result{{Manifest: Manifest{{Name: "a", Digest: "sha256:1"}}}}
+	if attemptID(base, 1) == attemptID(withInput, 1) {
+		t.Error("attemptID must vary with resolved inputs (inputDigest)")
+	}
+	// The stage id is hashed OUTSIDE contentDigest, but still feeds attemptID.
+	differentID := base
+	differentID.ID = "other"
+	if attemptID(base, 1) == attemptID(differentID, 1) {
+		t.Error("attemptID must vary with stage.ID")
+	}
+}

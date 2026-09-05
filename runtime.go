@@ -35,29 +35,120 @@ func (r Result) Metric(name string) (value float64, ok bool) {
 
 // Actuate performs an external effect. It runs in dawn's own process, where
 // the credentials live, and fires only on Passed — on any other state it does
-// nothing and reports why. dawn deduplicates its own retries against its own
-// durable record, keyed by the attempt_id.
+// nothing and reports why, and it never calls fn at all. An error fn returns
+// (or a Published lookup that found nothing) fails the actuation but never
+// touches r.State: the verdict already stands, only the effect failed.
+//
+// dawn deduplicates its own retries against its own durable record, keyed by
+// the attempt_id — see Actuation.Step. That record is PER-RUN, held in the
+// run directory, not a second global store: a global dedup store is a second
+// persistence layer with its own crash-recovery, growth and GC policy that
+// nothing in this design has an opinion on. The honest consequence: dawn
+// deduplicates a run's own retries, never two different runs. Running the
+// same protocol twice over unchanged inputs WILL perform the effect twice —
+// a new run is a new request that it happen.
+//
+// No Secret type guards the credentials an fn uses. A Secret.Reveal() method
+// exported so the actuator can use a credential is callable from anywhere in
+// the package, Stage-building code included, so a reveal method and a real
+// Prompt-interpolation guard against credential leakage cannot coexist in one
+// type. Credentials for an effect are ordinary strings in this trusted
+// actuator code; "credentials live in dawn's process" means they are never
+// shipped into a container, not that dawn custodies them behind a type.
 func (r Result) Actuate(fn func(*Actuation) error) error {
-	// runtime-core/actuator
-	panic("not yet implemented: runtime-core/actuator")
+	if r.State != Passed {
+		return fmt.Errorf("dawn: actuate: state is %s, not %s: nothing to actuate", r.State, Passed)
+	}
+	a := &Actuation{Key: r.attemptID, publishDir: r.publishDir, run: r.run}
+	err := fn(a)
+	if a.err != nil {
+		return a.err
+	}
+	return err
 }
 
-// Actuation is what an actuator is handed. It is deliberately narrow: a key
-// and a door onto the gate's published bytes, and nothing else.
+// Actuation is what an actuator is handed. It is deliberately narrow: a key,
+// a door onto the gate's published bytes, and a way to dedup a sub-step —
+// nothing else.
 type Actuation struct {
 	// Key is the attempt_id. dawn has already deduplicated against it; carry
 	// it into the remote effect (a branch name, a record id) to make the far
 	// side idempotent too, which dawn cannot do for you.
 	Key string
+	// publishDir is the gate's own publish directory for this attempt,
+	// threaded from Result.publishDir. Unexported: an actuator reaches it
+	// only through Published, never as a raw path it could point elsewhere.
+	publishDir string
+	// run is the run whose per-run actuation record Step consults, threaded
+	// from Result.run.
+	run *run
+	// err records a Published call that found nothing. Actuate checks it
+	// after fn returns, so a missing publish fails the actuation even if fn
+	// ignored Published's return value instead of erroring out itself.
+	err error
 }
 
 // Published resolves one file the GATE wrote to its publish directory. This is
 // the only door: the agent's raw declared output is unreachable from here, and
 // that filter is what makes publishing safe. dawn fails the actuation if the
-// gate wrote no such name.
+// gate wrote no such name — recorded here after a stat, and surfaced by
+// Actuate once fn returns, so a caller that forgets to check still fails
+// rather than pushing a path to nothing.
 func (a *Actuation) Published(name string) string {
-	// runtime-core/actuator
-	panic("not yet implemented: runtime-core/actuator")
+	p := filepath.Join(a.publishDir, name)
+	if _, err := os.Stat(p); err != nil {
+		a.err = fmt.Errorf("dawn: gate published no %q", name)
+	}
+	return p
+}
+
+// Step performs one named external sub-effect at most once per attempt. It
+// looks up (attempt_id, name) in the run's own actuation record before
+// calling fn; on a first success it records fn's returned external
+// identifier and returns it; on a repeat — a retried Actuate closure within
+// the SAME run — it returns the recorded identifier straight back without
+// calling fn again. This hoists the settled lookup-then-act rule once,
+// instead of every actuator author hand-rolling their own probe of a remote
+// system that answers "did this already happen?" badly or not at all.
+//
+// ponytail: fn runs under the run's single mutex — the same one Scope's
+// arithmetic already shares — so two Steps of the same run never race for
+// the same key, at the cost of stalling the rest of the run while one effect
+// is in flight. Fine for a local git push; per-key locks if actuation
+// concurrency ever matters.
+func (a *Actuation) Step(name string, fn func() (string, error)) (string, error) {
+	key := a.Key + "/" + name
+
+	// The lock is taken twice and never held across fn. An effect is the one
+	// thing in dawn that talks to the outside world and can block for as long
+	// as the outside world likes, and Record takes this same lock — so holding
+	// it across fn would deadlock the run the first time an author recorded
+	// the identifier the step just returned, which is the obvious thing to
+	// write. It would also serialise every effect in a fan behind whichever
+	// one is slowest.
+	a.run.mu.Lock()
+	v, done := a.run.actuations[key]
+	a.run.mu.Unlock()
+	if done {
+		return v, nil
+	}
+
+	v, err := fn()
+	if err != nil {
+		return "", err
+	}
+
+	a.run.mu.Lock()
+	defer a.run.mu.Unlock()
+	// Someone else recorded this key while fn ran. Their identifier is the one
+	// already published, so it wins; ours is a duplicate effect that at-least-
+	// once always allowed. Returning theirs keeps every later reader agreeing.
+	if prior, ok := a.run.actuations[key]; ok {
+		return prior, nil
+	}
+	a.run.actuations[key] = v
+	a.run.flushActuations()
+	return v, nil
 }
 
 // runner dispatches one compiled stage and blocks until it reaches a terminal
@@ -94,8 +185,9 @@ type run struct {
 	dispatch runner
 	sleep    func(time.Duration) // time.Sleep; a test replaces it
 
-	mu     sync.Mutex
-	values map[string]any
+	mu         sync.Mutex
+	values     map[string]any
+	actuations map[string]string // "attempt_id/step name" -> the external identifier Step recorded
 }
 
 // Scope is a bounded region of a run holding one lease. Everything dispatches
@@ -143,7 +235,7 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(fmt.Sprintf("dawn: run directory: %v", err))
 	}
-	r := &run{dir: dir, ctx: ctx, dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}}
+	r := &run{dir: dir, ctx: ctx, dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}, actuations: map[string]string{}}
 	state := r.protocol(root, protocol)
 	r.mu.Lock()
 	r.values["state"] = string(state)
@@ -290,6 +382,12 @@ func (s *Scope) Run(stage Stage) Result {
 			r = Result{State: InfraError}
 		}
 		if r.State != InfraError || !s.More() {
+			// Set here, on the terminal Result, and nowhere else: this is
+			// the one place both the stage and the settled attempt number
+			// (retry+1, the same number evidence/ is already keyed on) are
+			// both in hand.
+			r.attemptID = attemptID(stage, retry+1)
+			r.run = s.run
 			return r
 		}
 		// The one gap: this sleep is plain time.Sleep, not selecting on
@@ -359,6 +457,22 @@ func (r *run) flush() {
 	}
 	if err := os.WriteFile(filepath.Join(r.dir, "record.json"), append(b, '\n'), 0o644); err != nil {
 		panic(fmt.Sprintf("dawn: run record: %v", err))
+	}
+}
+
+// flushActuations rewrites the run's own actuation dedup record — a sibling
+// file to record.json, not a field inside it, because Record's one-write-
+// per-name rule and Step's whole point (the SAME key answered twice on
+// purpose) are different invariants and would be confusing sharing one map.
+// Held under run.mu, same as flush: a dedup record dawn cannot write is a
+// dedup record nothing can trust on the next retry.
+func (r *run) flushActuations() {
+	b, err := json.MarshalIndent(r.actuations, "", "  ")
+	if err != nil {
+		panic(fmt.Sprintf("dawn: actuation record: %v", err))
+	}
+	if err := os.WriteFile(filepath.Join(r.dir, "actuations.json"), append(b, '\n'), 0o644); err != nil {
+		panic(fmt.Sprintf("dawn: actuation record: %v", err))
 	}
 }
 

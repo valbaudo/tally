@@ -149,6 +149,36 @@ func TestClassifyAssignsStatesByFirstMatch(t *testing.T) {
 	if _, ok := r.Metric("nope"); ok {
 		t.Error("a missing metric must not read as zero")
 	}
+	// Decision 1: classify threads the trial's PublishDir onto the Result
+	// unconditionally, the same pattern as metrics, so Actuate has a door
+	// onto the gate's bytes by the time a Passed Result ever reaches it.
+	published := classify(sound, trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}, PublishDir: "/some/trial/verifier/publish"})
+	if published.publishDir != "/some/trial/verifier/publish" {
+		t.Errorf("publishDir = %q, want the trial's PublishDir threaded through", published.publishDir)
+	}
+}
+
+// trial.read resolves PublishDir from the SAME trialDir that yields
+// result.json — verifier/publish underneath it — without needing Harbor,
+// Docker or a manifest.json: this is dawn's own arithmetic on a path, not a
+// property of what the trial contained.
+func TestTrialReadSetsPublishDirFromTheTrialDir(t *testing.T) {
+	jobsDir := t.TempDir()
+	trialDir := filepath.Join(jobsDir, "task", "trial")
+	if err := os.MkdirAll(trialDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trialDir, "result.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var tr trial
+	if err := tr.read(jobsDir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(trialDir, "verifier", "publish"); tr.PublishDir != want {
+		t.Errorf("PublishDir = %q, want %q", tr.PublishDir, want)
+	}
 }
 
 // digest looks up declared names; it must not pick up a file the agent wrote

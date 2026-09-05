@@ -11,12 +11,17 @@
 // dawn's process where the credentials live, publishing the bytes the GATE
 // wrote and never the agent's raw patch.
 //
-// The actuator is not wired yet (runtime-core/actuator), so this program stops
-// at the verdict and returns it. Nothing here pushes; nothing here ever will,
-// since the push belongs to dawn's process and not to the agent's container.
+// The actuator pushes to a local bare git repo standing in for a real remote —
+// no network, no GitHub, but a genuine `git push` all the same, so the shape of
+// a real actuator (dedup by Step, publish only the gate's bytes) is exercised
+// end to end without spending anything real.
 package main
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/valbaudo/dawn"
@@ -59,7 +64,9 @@ func main() {
 }
 
 // protocol returns the stage's state unchanged. Rejected, unverified,
-// exhausted, infra_error and cancelled all publish nothing.
+// exhausted, infra_error and cancelled all publish nothing — fix.Actuate
+// enforces that itself, so actuate below is called unconditionally and simply
+// has nothing to do on any of those states.
 func protocol(run *dawn.Scope) dawn.State {
 	fix := run.Run(dawn.Stage{
 		ID:      "fix",
@@ -70,11 +77,83 @@ func protocol(run *dawn.Scope) dawn.State {
 		Gate:    dawn.SoundGate(gate),
 	})
 	// The reward is a number the gate wrote, never a state. Recording it keeps
-	// the arithmetic dawn did across the attempt visible in the run record,
-	// which for a protocol with no actuator yet is the whole product.
+	// the arithmetic dawn did across the attempt visible in the run record.
 	if reward, ok := fix.Metric("reward"); ok {
 		run.Record("fix_reward", reward)
 	}
 	run.Record("fix_manifest", fix.Manifest)
+
+	if fix.State == dawn.Passed {
+		if err := actuate(run, fix); err != nil {
+			run.Record("actuation_error", err.Error())
+		}
+	}
 	return fix.State
+}
+
+// actuate pushes the GATE's own fix.patch — never the agent's raw declared
+// output, which the gate may have filtered — to a branch in a local bare git
+// repo standing in for a real remote. Two ordered sub-steps, each deduped by
+// dawn against this run's own record: a retried Actuate closure within the
+// same run pushes the same branch and tag at most once.
+func actuate(run *dawn.Scope, fix dawn.Result) error {
+	return fix.Actuate(func(a *dawn.Actuation) error {
+		remote, err := os.MkdirTemp("", "dawn-prci-remote-")
+		if err != nil {
+			return err
+		}
+		if err := runGit("", "init", "--bare", "-q", remote); err != nil {
+			return err
+		}
+		run.Record("remote", remote)
+
+		work, err := os.MkdirTemp("", "dawn-prci-work-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(work)
+		branch := "dawn/" + a.Key
+		if err := runGit(work, "init", "-q", "-b", branch); err != nil {
+			return err
+		}
+		patch, err := os.ReadFile(a.Published("fix.patch"))
+		if err != nil {
+			return fmt.Errorf("reading the gate's published patch: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(work, "fix.patch"), patch, 0o644); err != nil {
+			return err
+		}
+		if err := runGit(work, "add", "fix.patch"); err != nil {
+			return err
+		}
+		if err := runGit(work, "-c", "user.email=dawn@localhost", "-c", "user.name=dawn",
+			"commit", "-q", "-m", "dawn: publish gate-verified fix"); err != nil {
+			return err
+		}
+
+		if _, err := a.Step("push", func() (string, error) {
+			return branch, runGit(work, "push", "-q", remote, branch)
+		}); err != nil {
+			return err
+		}
+		tag := "verified/" + a.Key
+		_, err = a.Step("tag", func() (string, error) {
+			if err := runGit(work, "tag", tag); err != nil {
+				return "", err
+			}
+			return tag, runGit(work, "push", "-q", remote, tag)
+		})
+		return err
+	})
+}
+
+// runGit runs one git command with dir as its working tree (ignored for a
+// bare init, which names its target directory as an argument instead).
+func runGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %v: %w: %s", args, err, out)
+	}
+	return nil
 }

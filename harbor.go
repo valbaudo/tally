@@ -118,6 +118,12 @@ type trial struct {
 	// there is no such thing as half a Manifest, which is always infra_error.
 	Outputs Manifest
 	Present bool
+	// PublishDir is the gate's own publish directory on the host — the
+	// verifier's trial dir plus "publish" — where a SoundGate hands the
+	// actuator the bytes it verified rather than the bytes the agent sent.
+	// Set unconditionally by read() from the same trialDir that yields
+	// reward.json; meaningless when no gate ran, exactly like Rewards above.
+	PublishDir string
 	// TimedOut reports that dawn's own per-attempt clock ended the attempt
 	// (ctx.Err() == context.DeadlineExceeded).
 	TimedOut bool
@@ -304,6 +310,7 @@ func (t *trial) read(jobsDir string, outputs []string) error {
 		return fmt.Errorf("dawn: expected one trial result under %s, found %d", jobsDir, len(hits))
 	}
 	trialDir := filepath.Dir(hits[0])
+	t.PublishDir = filepath.Join(trialDir, "verifier", "publish")
 
 	var r harborResult
 	if err := readJSON(hits[0], &r); err != nil {
@@ -422,7 +429,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 // agent output. It is a pure function of a Stage and a trial precisely so that
 // the rules can be read in one place and tested without Docker.
 func classify(s Stage, t trial) Result {
-	r := Result{Manifest: t.Outputs, metrics: t.Rewards}
+	r := Result{Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir}
 	gated := s.Gate.image != ""
 	switch {
 	// Rule 1: cancelled from outside the run. Checked first, ahead of every

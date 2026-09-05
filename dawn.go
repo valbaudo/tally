@@ -26,7 +26,12 @@
 // whatever the agent decides to call its own handover.
 package dawn
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"time"
+)
 
 // State is a stage's outcome. Six values, and dawn assigns no other; the
 // numeric reward is never one of them — it rides alongside as a metric
@@ -314,6 +319,79 @@ type Result struct {
 	// name and is told whether the gate wrote one, and can neither enumerate
 	// nor forge the set.
 	metrics map[string]float64
+	// publishDir is the gate's own publish directory for this trial — the
+	// same trial dir trial.read() already resolves to find reward.json, one
+	// level under it (verifier/publish). Set by classify unconditionally,
+	// the same pattern as metrics above: it is only MEANINGFUL when a gate
+	// ran and voted, but Actuate only ever calls the closure on Passed, and
+	// classify only reaches Passed for a gated, rewarded trial (harbor.go's
+	// Rule 5) — so by the time anything reads it, it is always valid.
+	publishDir string
+	// attemptID and run exist so Actuate can find a durable, per-run,
+	// per-attempt dedup record without a caller ever naming one: Scope.Run
+	// is the only writer, right before it hands the Result back.
+	attemptID string
+	run       *run
+}
+
+// attemptID names one dispatch attempt: stage.ID, a digest of the stage's own
+// content, a digest of its resolved inputs, and the attempt number Scope.Run
+// already counts (the nth dispatch of this scope's retry loop).
+//
+// LOUD COMMENT, because this hash is append-only vocabulary the instant
+// anything durable is keyed by it (the per-run actuation record, Step's
+// dedup): if a later ticket changes what feeds contentDigest or inputDigest,
+// every existing dedup record silently starts meaning something else — same
+// key, different attempt, and dawn would skip an effect that never actually
+// ran. Recovery, whenever it lands, must layer run/lineage identity
+// ALONGSIDE this hash — a sixth field appended elsewhere — never fold a new
+// ingredient INTO this hash after the fact.
+func attemptID(s Stage, attemptNumber int) string {
+	type key struct {
+		StageID       string
+		Content       string
+		Input         string
+		AttemptNumber int
+	}
+	// Marshal of plain strings, slices and ints never errors.
+	b, _ := json.Marshal(key{s.ID, contentDigest(s), inputDigest(s.Inputs), attemptNumber})
+	return sha256hex(b)
+}
+
+// contentDigest hashes the Stage fields that determine the generated task —
+// deliberately NOT the attempt clock (writeTask's timeout_sec, decided by the
+// scope, not the Stage), which varies per retry without changing the work a
+// retry repeats.
+func contentDigest(s Stage) string {
+	type content struct {
+		Agent   string
+		Env     Image
+		Prompt  string
+		Outputs []string
+		Gate    Image
+	}
+	b, _ := json.Marshal(content{s.Agent.name, s.Env, s.Prompt, s.Outputs, s.Gate.image})
+	return sha256hex(b)
+}
+
+// inputDigest hashes the ordered Manifest of each Result in Stage.Inputs —
+// already content digests, so this is a digest of digests. Order matters:
+// Inputs is a list a protocol wrote in a deliberate order.
+func inputDigest(inputs []Result) string {
+	type artifact struct{ Name, Digest string }
+	manifests := make([][]artifact, len(inputs))
+	for i, r := range inputs {
+		for _, a := range r.Manifest {
+			manifests[i] = append(manifests[i], artifact{a.Name, a.Digest})
+		}
+	}
+	b, _ := json.Marshal(manifests)
+	return sha256hex(b)
+}
+
+func sha256hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // anyDecided reports whether any child of a fan produced an outcome from the
