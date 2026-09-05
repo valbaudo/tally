@@ -26,9 +26,10 @@ type receipt struct {
 	Attempt int                `json:"attempt"`
 	ID      string             `json:"id"` // attemptID: joins actuations.json
 	Agent   string             `json:"agent"`
-	Gate    string             `json:"gate"`             // sound | format_only | none
+	Gate    string             `json:"gate"`             // sound | live | format_only | none
 	Image   Image              `json:"image,omitempty"`  // the gate's image; absent when there is none
 	Reason  string             `json:"reason,omitempty"` // NoGate's mandatory reason, verbatim
+	Hosts   []string           `json:"hosts,omitempty"`  // LiveGate's engagement scope; absent otherwise
 	State   State              `json:"state"`
 	Metrics map[string]float64 `json:"metrics,omitempty"` // everything the gate wrote
 	Drew    *draw              `json:"drew"`              // null: Harbor wrote no agent_result
@@ -55,6 +56,7 @@ func writeReceipt(evidence string, s Stage, attempt int, r Result) {
 		Gate:    s.Gate.kind(),
 		Image:   s.Gate.image,
 		Reason:  s.Gate.reason,
+		Hosts:   s.Gate.hosts,
 		State:   r.State,
 		Metrics: r.metrics,
 		Drew:    r.drew,
@@ -160,6 +162,9 @@ func renderStage(b *strings.Builder, rs []receipt) {
 	switch head.Gate {
 	case "sound":
 		fmt.Fprintf(b, "## %s — sound gate\n`%s`\n\n", head.Stage, head.Image)
+	case "live":
+		fmt.Fprintf(b, "## %s — live gate: reachable, not reached — dawn observes no traffic\n`%s`\nhosts: %s\n\n",
+			head.Stage, head.Image, strings.Join(head.Hosts, ", "))
 	case "format_only":
 		fmt.Fprintf(b, "## %s — format-only gate: its metrics say well-formed, not correct\n`%s`\n\n", head.Stage, head.Image)
 	default: // "none"
@@ -244,4 +249,8 @@ const notKnown = "## not known\n\n" +
 	"- An attempt whose draw reads `unknown` reported nothing to Harbor. What it\n" +
 	"  drew is recorded nowhere, and is not zero.\n" +
 	"- What a format-only or no-gate stage did NOT check is the author's to state,\n" +
-	"  not dawn's to infer: see each stage's reason, and the record above.\n"
+	"  not dawn's to infer: see each stage's reason, and the record above.\n" +
+	"- A live gate's pass also asserts the target was exploitable at that moment:\n" +
+	"  the verdict is not a function of pinned bytes alone and may not reproduce.\n" +
+	"  The hosts listed are where the gate COULD reach, enforced by the container's\n" +
+	"  egress policy — never where it did; dawn observes no traffic.\n"

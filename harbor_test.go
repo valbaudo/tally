@@ -59,6 +59,60 @@ func TestWriteTaskCarriesTheSettledRules(t *testing.T) {
 	}
 }
 
+// A LiveGate must open the verifier phase onto its declared hosts in BOTH
+// [verifier] and [verifier.environment] — Harbor enforces egress per-process,
+// so allowing only one half would still let the gate's own container phone
+// out unchecked, or would block the verifier process itself from reaching the
+// hosts its own environment is allowed to reach. [environment] and [agent]
+// are untouched: the engagement scope is the gate's alone.
+func TestWriteTaskOnLiveGateOpensBothVerifierPhases(t *testing.T) {
+	dir := t.TempDir()
+	s := Stage{
+		ID:     "exploit",
+		Agent:  Agent{name: "oracle"},
+		Env:    Image("rc-env@sha256:" + strings.Repeat("a", 64)),
+		Prompt: "prove it",
+		Gate:   LiveGate(Image("rc-gate@sha256:"+strings.Repeat("b", 64)), "target.example.com", "10.0.0.5"),
+	}
+	if err := writeTask(dir, s, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, filepath.Join(dir, "task.toml"))
+
+	verifier, verifierEnv := splitAtVerifierEnvironment(t, got)
+	for _, section := range []struct{ name, body string }{{"[verifier]", verifier}, {"[verifier.environment]", verifierEnv}} {
+		if !strings.Contains(section.body, `network_mode = "allowlist"`) {
+			t.Errorf("%s missing allowlist network_mode\n%s", section.name, got)
+		}
+		if !strings.Contains(section.body, `allowed_hosts = ["target.example.com", "10.0.0.5"]`) {
+			t.Errorf("%s missing the declared hosts\n%s", section.name, got)
+		}
+	}
+	if !strings.Contains(got, `[environment]`+"\n"+`docker_image = "rc-env@sha256:`) || !strings.Contains(got, `network_mode = "no-network"`+"\n"+`os = "linux"`) {
+		t.Errorf("[environment] must stay no-network for a live gate\n%s", got)
+	}
+	if !strings.Contains(got, `[agent]`+"\n"+`network_mode = "allowlist"`+"\n"+`allowed_hosts = ["api.anthropic.com", "platform.claude.com"]`) {
+		t.Errorf("[agent] must be unchanged by a live gate\n%s", got)
+	}
+	if strings.Contains(got, "/logs/verifier") {
+		t.Errorf("task names a path under /logs/verifier\n%s", got)
+	}
+}
+
+// splitAtVerifierEnvironment splits task.toml's text at the [verifier] and
+// [verifier.environment] table headers so a test can assert on each section
+// without a substring match from one leaking into the other (both sections
+// share every key name: network_mode, allowed_hosts).
+func splitAtVerifierEnvironment(t *testing.T, taskToml string) (verifier, verifierEnv string) {
+	t.Helper()
+	i := strings.Index(taskToml, "[verifier]\n")
+	j := strings.Index(taskToml, "[verifier.environment]\n")
+	if i == -1 || j == -1 || j < i {
+		t.Fatalf("task.toml missing [verifier]/[verifier.environment] in order\n%s", taskToml)
+	}
+	return taskToml[i:j], taskToml[j:]
+}
+
 func TestWriteTaskRejectsUnpinnedAndUnexplained(t *testing.T) {
 	pinned := Image("x@sha256:" + strings.Repeat("c", 64))
 	for name, s := range map[string]Stage{
@@ -251,6 +305,18 @@ func TestClassifyAssignsStatesByFirstMatch(t *testing.T) {
 	published := classify(sound, trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}, PublishDir: "/some/trial/verifier/publish"})
 	if published.publishDir != "/some/trial/verifier/publish" {
 		t.Errorf("publishDir = %q, want the trial's PublishDir threaded through", published.publishDir)
+	}
+}
+
+// This is the test that proves the "no classifier change" claim: a live gate
+// is gated && !formatOnly, and classify's Rule 5 already sends that straight
+// to Passed for a rewarded, present trial. If this ever needed a new branch
+// in classify, this test would be the one to catch it.
+func TestClassifyPassesALiveGatedStageOnRewardedPresentTrial(t *testing.T) {
+	live := Stage{Gate: LiveGate(Image("x@sha256:"+strings.Repeat("e", 64)), "target.example.com")}
+	won := trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}}
+	if got := classify(live, won); got.State != Passed {
+		t.Errorf("live gate, rewarded and present: got %s, want %s", got.State, Passed)
 	}
 }
 

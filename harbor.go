@@ -32,11 +32,16 @@ import (
 // verdict outright. Nothing dawn emits may name a path under that tree.
 // It is also the gate's side of the contract, and the one place it is written:
 // a gate finds each declared output at outputDir/<name>, exactly where the
-// agent was told to write it; it runs as /tests/test.sh, no-network, with
-// nothing else of the agent's; it publishes to /logs/verifier/publish/<name>;
-// and it writes {"reward": n} to /logs/verifier/reward.json as its LAST act,
-// never skipping the write because a file is already there (Harbor restores
-// the agent's artifacts before the gate runs; the last writer wins).
+// agent was told to write it; it runs as /tests/test.sh, with nothing else of
+// the agent's; it publishes to /logs/verifier/publish/<name>; and it writes
+// {"reward": n} to /logs/verifier/reward.json as its LAST act, never skipping
+// the write because a file is already there (Harbor restores the agent's
+// artifacts before the gate runs; the last writer wins).
+//
+// A gate is no-network by default, so its verdict is a function of pinned
+// bytes alone. LiveGate is the one exception: it reaches its declared hosts,
+// and its verdict is then a function of pinned bytes AND those hosts' state at
+// the moment it ran — see LiveGate's own comment for what that costs.
 //
 // That number is a claim about the artifact and about nothing else. A gate
 // that cannot make the claim — its own baked app will not start, its own
@@ -238,10 +243,16 @@ func writeTask(dir string, s Stage, attempt time.Duration) error {
 
 	if gated {
 		// separate: the gate never sees the agent's filesystem, only the
-		// artifacts Harbor restores into its own container. no-network: it
-		// cannot phone anything, so its verdict is a function of bytes.
-		fmt.Fprintf(&b, "[verifier]\nenvironment_mode = \"separate\"\nnetwork_mode = \"no-network\"\ntimeout_sec = %.1f\n\n", gateTimeout.Seconds())
-		fmt.Fprintf(&b, "[verifier.environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\n", s.Gate.image)
+		// artifacts Harbor restores into its own container. A LiveGate opens
+		// onto its declared hosts and nothing else; every other gate stays
+		// no-network, so its verdict is a function of bytes alone.
+		if len(s.Gate.hosts) > 0 {
+			fmt.Fprintf(&b, "[verifier]\nenvironment_mode = \"separate\"\nnetwork_mode = \"allowlist\"\nallowed_hosts = [%s]\ntimeout_sec = %.1f\n\n", quoted(s.Gate.hosts), gateTimeout.Seconds())
+			fmt.Fprintf(&b, "[verifier.environment]\ndocker_image = %q\nnetwork_mode = \"allowlist\"\nallowed_hosts = [%s]\n", s.Gate.image, quoted(s.Gate.hosts))
+		} else {
+			fmt.Fprintf(&b, "[verifier]\nenvironment_mode = \"separate\"\nnetwork_mode = \"no-network\"\ntimeout_sec = %.1f\n\n", gateTimeout.Seconds())
+			fmt.Fprintf(&b, "[verifier.environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\n", s.Gate.image)
+		}
 	}
 	return os.WriteFile(filepath.Join(dir, "task.toml"), []byte(b.String()), 0o644)
 }

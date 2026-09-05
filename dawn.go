@@ -131,11 +131,32 @@ type Gate struct {
 	image      Image
 	formatOnly bool
 	reason     string
+	hosts      []string // non-empty ⟹ a live gate; the enforced engagement scope
 }
 
 // SoundGate is a gate whose passed verdict is a claim about the world. It is
 // the only kind of gate a stage can reach Passed through.
 func SoundGate(img Image) Gate { return Gate{image: img} }
+
+// LiveGate is a sound gate that reaches the named hosts. Its passed verdict is
+// a real claim about the world AND a function of those hosts' state at the
+// moment it ran — not of pinned bytes alone, which is what every other gate's
+// verdict is. That is exactly right for proving an exploit against a running
+// system and exactly wrong for the claim a SoundGate makes, so it is a
+// separate constructor rather than an optional argument: `grep LiveGate`
+// enumerates every stage in every protocol whose verdict touched a live
+// system, and an empty-versus-non-empty argument list would bury that.
+//
+// hosts are the engagement scope, and they are enforced by the container's
+// egress policy rather than by the gate's good behaviour. dawn is therefore
+// entitled to say where the gate COULD reach; it observes no traffic and
+// never claims where it did.
+//
+// The hosts are deliberately NOT part of attempt identity — see contentDigest,
+// whose comment says why nothing may be folded into that hash after the fact.
+// Two stages that differ only in gate hosts must differ in their Stage.ID, by
+// the same "qualify the id by whatever varies" rule Stage.ID already states.
+func LiveGate(img Image, hosts ...string) Gate { return Gate{image: img, hosts: hosts} }
 
 // FormatOnlyGate is a gate that can check shape but establish nothing. dawn
 // clamps such a stage to Unverified mechanically: there is no code path from
@@ -151,14 +172,16 @@ func FormatOnlyGate(img Image) Gate { return Gate{image: img, formatOnly: true} 
 func NoGate(reason string) Gate { return Gate{reason: reason} }
 
 // kind is the gate's soundness as one word, for the receipt. It reads the
-// same three constructors an author already chose between, so a receipt can
-// never disagree with the source about what a stage established.
+// same constructors an author already chose between, so a receipt can never
+// disagree with the source about what a stage established.
 func (g Gate) kind() string {
 	switch {
 	case g.image == "":
 		return "none"
 	case g.formatOnly:
 		return "format_only"
+	case len(g.hosts) > 0:
+		return "live"
 	default:
 		return "sound"
 	}
@@ -384,7 +407,12 @@ func attemptID(s Stage, attemptNumber int) string {
 // contentDigest hashes the Stage fields that determine the generated task —
 // deliberately NOT the attempt clock (writeTask's timeout_sec, decided by the
 // scope, not the Stage), which varies per retry without changing the work a
-// retry repeats.
+// retry repeats. Also deliberately NOT Gate.hosts: adding a field to this
+// struct changes the marshalled bytes for every existing stage — a nil slice
+// becomes "GateHosts":null — which would silently re-key every dedup and
+// resume record keyed on attemptID, exactly what attemptID's LOUD COMMENT
+// forbids. A LiveGate's hosts are therefore not attempt identity; see
+// LiveGate's own comment for what that means for Stage.ID.
 func contentDigest(s Stage) string {
 	type content struct {
 		Agent   string

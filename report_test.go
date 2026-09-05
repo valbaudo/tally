@@ -85,6 +85,40 @@ func TestReportRendersEachGateKind(t *testing.T) {
 	}
 }
 
+// A live gate's receipt must render its hosts in the heading, framed as
+// reachable rather than reached, and the report's footer must carry the
+// caveat that its pass is a claim about a moment, not about pinned bytes.
+//
+// This goes through the real writeReceipt, not a hand-crafted receipt.json:
+// receipt.Gate comes from Gate.kind(), so this is also the test that ties a
+// regression in kind() (the "live" case falling through to "sound") to a
+// visible failure here, not just in the kind() test itself.
+func TestReportRendersLiveGateHostsAndCaveat(t *testing.T) {
+	dir := t.TempDir()
+	s := Stage{ID: "exploit", Agent: ClaudeCode, Gate: LiveGate(Image("g@sha256:aaa"), "target.example.com", "10.0.0.5")}
+	evidence := filepath.Join(dir, "attempts", s.ID, "1")
+	if err := os.MkdirAll(evidence, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeReceipt(evidence, s, 1, Result{State: Passed, metrics: map[string]float64{"reward": 1}})
+
+	got, err := report(dir)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	for _, want := range []string{
+		"live gate",
+		"reachable, not reached",
+		"dawn observes no traffic",
+		"target.example.com, 10.0.0.5",
+		"was exploitable at that moment",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report does not contain %q:\n%s", want, got)
+		}
+	}
+}
+
 // Metrics render sorted by name, so the same evidence always renders the same
 // bytes regardless of map iteration order.
 func TestReportMetricsAreSortedAndDeterministic(t *testing.T) {

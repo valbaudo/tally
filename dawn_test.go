@@ -1,6 +1,7 @@
 package dawn
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,6 +46,34 @@ func TestDecided(t *testing.T) {
 	}
 	if anyDecided([]Result{{State: InfraError}, {State: Exhausted}}) {
 		t.Error("anyDecided voted on a fan where nothing voted")
+	}
+}
+
+// LiveGate is a sound gate, not a format-only one: it must report "live" from
+// kind() (not fall through to "sound", which would make its receipt and its
+// report indistinguishable from a gate that never touched a live host), and
+// it must still be capable of Passed, which formatOnly forecloses.
+func TestLiveGateKindAndFormatOnly(t *testing.T) {
+	g := LiveGate(Image("g@sha256:"+strings.Repeat("a", 64)), "target.example.com")
+	if got := g.kind(); got != "live" {
+		t.Errorf("LiveGate.kind() = %q, want %q", got, "live")
+	}
+	if g.formatOnly {
+		t.Error("LiveGate must not be format-only")
+	}
+}
+
+// contentDigest must NOT move when a stage's gate hosts change — hosts are
+// the engagement scope, not attempt identity (LiveGate's own comment says
+// why). This is the test that proves adding Gate.hosts did not silently
+// re-key every existing dedup and resume record keyed on attemptID.
+func TestContentDigestIgnoresGateHosts(t *testing.T) {
+	img := Image("g@sha256:" + strings.Repeat("c", 64))
+	sound := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Prompt: "do it", Gate: SoundGate(img)}
+	live := sound
+	live.Gate = LiveGate(img, "target.example.com")
+	if contentDigest(sound) != contentDigest(live) {
+		t.Error("contentDigest moved when only Gate.hosts changed: hosts must not be folded into attempt identity")
 	}
 }
 
