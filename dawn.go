@@ -181,18 +181,28 @@ const (
 	retryBackoffCap  = 5 * time.Minute
 )
 
+// retryBackoffGap is the delay before the nth retry within one scope: the base
+// doubled n-1 times, clamped. It is the schedule itself, and the only place it
+// is written down — Dispatching funds it ahead of time, Scope.Run sleeps it.
+func retryBackoffGap(n int) time.Duration {
+	d := retryBackoffBase
+	for i := 1; i < n && d < retryBackoffCap; i++ {
+		d *= 2
+	}
+	if d > retryBackoffCap {
+		d = retryBackoffCap
+	}
+	return d
+}
+
 // retryBackoffTotal is the worst-case time a scope of n attempts spends
 // asleep: every attempt after the first waited out a full backoff, which is
 // exactly what happens when a scope burns its whole counter retrying one
 // infra_error. n-1 gaps, because nothing is slept before the first dispatch.
 func retryBackoffTotal(attempts int) time.Duration {
 	var total time.Duration
-	d := retryBackoffBase
-	for i := 1; i < attempts; i++ {
-		total += d
-		if d *= 2; d > retryBackoffCap {
-			d = retryBackoffCap
-		}
+	for n := 1; n < attempts; n++ {
+		total += retryBackoffGap(n)
 	}
 	return total
 }
@@ -276,6 +286,11 @@ type Result struct {
 	State State
 	// Manifest records what this attempt's declared outputs were.
 	Manifest Manifest
+	// metrics is what the gate wrote alongside its reward, read through
+	// Metric. Unexported because it is not vocabulary: a protocol asks for a
+	// name and is told whether the gate wrote one, and can neither enumerate
+	// nor forge the set.
+	metrics map[string]float64
 }
 
 // anyDecided reports whether any child of a fan produced an outcome from the
