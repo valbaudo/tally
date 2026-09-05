@@ -7,6 +7,9 @@
 # test.sh's `git apply` mutates /gate/repo's working tree, so the oracle run
 # below leaves it fixed -- restored to the pristine seed commit before this
 # script exits, so that mutation never survives into the shipped image layer.
+# The restore also rebuilds .git/index from HEAD: checkout/clean leave behind
+# inode/ctime stat data in the index, which would otherwise make the shipped
+# layer differ per build even though the tree content is identical.
 set -uo pipefail
 want() { /tests/test.sh >/dev/null 2>&1; r=$(cat /logs/verifier/reward.json 2>/dev/null); rm -rf /logs
          [ "$r" = "{\"reward\": $1}" ] || { echo "SELFTEST FAILED: $2 -> ${r:-no reward.json}"; exit 1; }; }
@@ -18,7 +21,7 @@ mkdir -p /app/outputs
 want 0 "nothing at /app/outputs/fix.patch"
 cp /gate/oracle.patch /app/outputs/fix.patch
 want 1 "oracle at /app/outputs/fix.patch"
-git -C /gate/repo checkout -q -- . && git -C /gate/repo clean -fdq
+git -C /gate/repo checkout -q -- . && git -C /gate/repo clean -fdq && rm /gate/repo/.git/index && git -C /gate/repo read-tree HEAD
 mv /gate/repo /gate/repo.off
 abstain "oracle present but the gate's own repo is gone"
 mv /gate/repo.off /gate/repo

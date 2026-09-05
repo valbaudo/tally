@@ -151,7 +151,7 @@ docker inspect dawn-<task>-gate:2 --format '{{index .RepoDigests 0}}'
 |---|---|
 | `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:f2cc298cce0b0cc9d892703d95e94e24327c44de855f77b6611ed69180e1b7c8` |
 | `mdash` | `dawn-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411` |
-| `pr-ci` | `dawn-pr-ci-gate@sha256:92b3e3998583779e3b666b5e8ee959f2ce510d046d43229a2b86d04c942a0025` |
+| `pr-ci` | `dawn-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607` — reproducibly built from `docker-bake.hcl`; the digest **is** the generation, no `:N` tag |
 | `vdh` | `dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756` |
 
 `:2` is the generation that reads the agent's output at `/app/outputs/<name>`

@@ -28,9 +28,12 @@ import (
 )
 
 // The two images, pinned by digest and not by tag, because the whole soundness
-// argument is an argument about which bytes are in which image. Rebuilding
-// either one invalidates the pin here and dawn refuses the stage at dispatch
-// rather than running against bytes nobody named.
+// argument is an argument about which bytes are in which image. Both are built
+// from experiments/harbor-targets/docker-bake.hcl, which makes that build a
+// pure function of the tree; rebuilding from an unchanged tree reproduces the
+// same digest, and rebuilding after a real change invalidates the pin here,
+// so dawn refuses the stage at dispatch rather than running against bytes
+// nobody named.
 //
 // The environment carries the seeded repo at /app/repo, an empty /app/outputs,
 // and a baked @anthropic-ai/claude-code@2.1.259 — baked because Harbor runs the
@@ -38,8 +41,8 @@ import (
 // phase is not allowed to reach. The gate carries the pristine repo at
 // /gate/repo and dawn's verdict script at /tests/test.sh.
 const (
-	env  dawn.Image = "dawn-pr-ci-env@sha256:b75eb2a91c251a49b58d0ff902ee60336748161d6dabe970b54496d7db509aa2"
-	gate dawn.Image = "dawn-pr-ci-gate@sha256:92b3e3998583779e3b666b5e8ee959f2ce510d046d43229a2b86d04c942a0025"
+	env  dawn.Image = "dawn-pr-ci-env@sha256:40020257211730cd3f754b2779c2d42af59fe75c3e4edf04f5bf5f77a349c46c"
+	gate dawn.Image = "dawn-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607"
 )
 
 // The prompt is part of the integrity argument: it is the only thing that tells
