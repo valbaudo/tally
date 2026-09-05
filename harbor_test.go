@@ -442,3 +442,30 @@ func TestTerminateGracefullyForceKillsAfterWaitDelay(t *testing.T) {
 		t.Fatal("WaitDelay did not force-kill a process ignoring SIGTERM")
 	}
 }
+
+// runTrial generates its task directory with THIS exact basename, without
+// exception, because it is the one thing reap.go's whole reap set depends
+// on: Harbor's LocalTaskId.get_name() reads a task directory's basename
+// verbatim as the seed for trial_name, so this name — not "task", not
+// anything else — is what makes every container dawn creates start with
+// reapPrefix. A regression here silently breaks reaping without breaking a
+// single Harbor trial.
+func TestGeneratedTaskDirNameIsDawn(t *testing.T) {
+	if generatedTaskDirName != "dawn" {
+		t.Fatalf("generatedTaskDirName = %q, want %q: reap.go's reapPrefix is derived from this constant", generatedTaskDirName, "dawn")
+	}
+	if want := generatedTaskDirName + "__"; reapPrefix != want {
+		t.Fatalf("reapPrefix = %q, want %q", reapPrefix, want)
+	}
+}
+
+// taskDirFor is the exact function runTrial calls to place the generated
+// task — the constant test above proves nothing if this join ever drifts
+// from it (a literal "task" snuck back in here, say).
+func TestTaskDirForJoinsTheGeneratedTaskDirName(t *testing.T) {
+	got := taskDirFor("/run/attempts/x/1")
+	want := "/run/attempts/x/1/dawn"
+	if got != want {
+		t.Fatalf("taskDirFor(%q) = %q, want %q", "/run/attempts/x/1", got, want)
+	}
+}

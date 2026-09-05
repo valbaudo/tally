@@ -8,6 +8,7 @@ package dawn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -213,10 +214,18 @@ type protocolBug struct{ msg string }
 
 func bug(format string, args ...any) { panic(protocolBug{fmt.Sprintf(format, args...)}) }
 
-// Main is the process entry point: it makes func main legal. dawn owns the
-// journal and the restart sweep, so it must be able to re-enter the protocol
-// itself — on restart a stage whose result.json exists is never re-run, and
-// the recorded result is handed straight back.
+// Main is the process entry point: it makes func main legal. dawn owns
+// resumption and the restart sweep, so it must be able to re-enter the
+// protocol itself — on restart, a stage whose result.json already exists on
+// disk is never re-run; dispatchAttempt hands the reconstructed Result
+// straight back (see resumeResult).
+//
+// There is no separate journal: os.MkdirAll(evidence, …), which
+// dispatchAttempt already calls before every Dispatch, IS "journal before
+// dispatch" — a directory, not a file. Everything a resume needs is already
+// on disk or rebuilds for free by re-entering this same deterministic
+// protocol function from the top and replaying the same calls in the same
+// order.
 //
 // The State the protocol returns is the RUN's terminal state: dawn writes it
 // into the run record and exits on it. That is the only consumer, and it is
@@ -226,6 +235,17 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	if dispatcher == nil {
 		panic("dawn: no runner registered")
 	}
+	dir, err := resolveRunDir(name)
+	if err != nil {
+		panic(fmt.Sprintf("dawn: %v", err))
+	}
+	// The reap is synchronous and unconditional, on every invocation — see
+	// reap.go. It runs after the run directory is settled (so a bad
+	// DAWN_RESUME fails loud without needing Docker at all) and before
+	// anything is dispatched.
+	if err := reap(); err != nil {
+		panic(fmt.Sprintf("dawn: reap: %v", err))
+	}
 	// Captured once, here, and threaded down as the parent of every attempt's
 	// context (Scope.Run) — never context.Background(). Every in-flight and
 	// future attempt's ctx.Done fires the instant either signal arrives,
@@ -233,11 +253,7 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	// apart from an operator asking the whole run to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	dir := filepath.Join(runRoot(), name+"-"+time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		panic(fmt.Sprintf("dawn: run directory: %v", err))
-	}
-	r := &run{dir: dir, ctx: ctx, dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}, actuations: map[string]string{}}
+	r := newRun(dir, ctx, dispatcher)
 	state := r.protocol(root, protocol)
 	r.mu.Lock()
 	r.values["state"] = string(state)
@@ -253,6 +269,31 @@ func runRoot() string {
 		return d
 	}
 	return "dawn-runs"
+}
+
+// resolveRunDir picks the run directory for this Main invocation.
+// DAWN_RESUME=<dir>, same family as DAWN_RUN_ROOT/DAWN_MAX_CONCURRENT since
+// dawn owns no flag parser (func main belongs to the protocol author),
+// reuses a literal path so a crashed run can be re-entered; otherwise a
+// fresh "name-<timestamp>" is minted under runRoot(). A DAWN_RESUME naming a
+// directory that does not exist is refused rather than silently minting a
+// new run under that name — a typo must fail loud, not quietly start over.
+func resolveRunDir(name string) (string, error) {
+	if d := os.Getenv("DAWN_RESUME"); d != "" {
+		info, err := os.Stat(d)
+		if err != nil {
+			return "", fmt.Errorf("DAWN_RESUME=%q: %w", d, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("DAWN_RESUME=%q: not a directory", d)
+		}
+		return d, nil
+	}
+	dir := filepath.Join(runRoot(), name+"-"+time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("run directory: %w", err)
+	}
+	return dir, nil
 }
 
 // protocol runs the protocol against a fresh root scope and unwinds a protocol
@@ -377,32 +418,50 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 	// attempt, after sleeping — and spends the same counter a deliberate
 	// attempt does. A caller never sees an InfraError that still had budget.
 	for retry := 0; ; retry++ {
-		// Concurrency admission: charge() (already atomic, already walks
-		// ancestors) plus this one semaphore, acquired before charge/Dispatch
-		// and released right after — see agentGates. Held only across the
-		// charge+dispatch below, never across the backoff sleep, so a
-		// flaky child doesn't sit on a slot while it waits to retry.
-		release := acquireAgentGate(stage.Agent, stage.Env)
-		if !s.charge() {
-			release()
-			if retry == 0 && bugOnFirstCharge {
-				bug("scope %s dispatched %q on a spent lease: guard the dispatch with More()", s.id, stage.ID)
-			}
-			return Result{State: InfraError}
-		}
 		evidence := filepath.Join(s.run.dir, "attempts", fsSafe(stage.ID), strconv.Itoa(retry+1))
-		if err := os.MkdirAll(evidence, 0o755); err != nil {
-			bug("cannot create the evidence directory %s: %v", evidence, err)
-		}
-		// s.run.ctx (Main's signal.NotifyContext), never context.Background():
-		// a cancel from outside the run has to reach every attempt, including
-		// ones dispatched after the signal arrived.
-		ctx, cancel := context.WithTimeout(s.run.ctx, s.attemptClock())
-		r, err := s.run.dispatch.Dispatch(ctx, stage, evidence)
-		cancel()
-		release()
-		if err != nil {
-			r = Result{State: InfraError}
+
+		// Resume: this exact retry already ran, in an earlier process, if
+		// result.json is sitting under evidence/jobs from a prior Dispatch.
+		// trial.read + classify (harbor.go) is the SAME reconstruction a live
+		// Dispatch performs, so a resumed attempt reads as the identical
+		// Result — without spending a charge(), because this attempt's charge
+		// was already booked, in the run that actually dispatched it, and
+		// there is no journal recording that booking to replay. A protocol
+		// that loops past a resumed short-circuit rather than returning
+		// immediately would therefore see this scope's own Attempts counter
+		// under-report its history; every shipped protocol dispatches once
+		// per Run call and stops, so this never shows.
+		r, resumed := resumeResult(evidence, stage)
+		if !resumed {
+			// Concurrency admission: charge() (already atomic, already walks
+			// ancestors) plus this one semaphore, acquired before
+			// charge/Dispatch and released right after — see agentGates.
+			// Held only across the charge+dispatch below, never across the
+			// backoff sleep, so a flaky child doesn't sit on a slot while it
+			// waits to retry.
+			release := acquireAgentGate(stage.Agent, stage.Env)
+			if !s.charge() {
+				release()
+				if retry == 0 && bugOnFirstCharge {
+					bug("scope %s dispatched %q on a spent lease: guard the dispatch with More()", s.id, stage.ID)
+				}
+				return Result{State: InfraError}
+			}
+			if err := os.MkdirAll(evidence, 0o755); err != nil {
+				bug("cannot create the evidence directory %s: %v", evidence, err)
+			}
+			// s.run.ctx (Main's signal.NotifyContext), never
+			// context.Background(): a cancel from outside the run has to
+			// reach every attempt, including ones dispatched after the
+			// signal arrived.
+			ctx, cancel := context.WithTimeout(s.run.ctx, s.attemptClock())
+			var err error
+			r, err = s.run.dispatch.Dispatch(ctx, stage, evidence)
+			cancel()
+			release()
+			if err != nil {
+				r = Result{State: InfraError}
+			}
 		}
 		if r.State != InfraError || !s.More() {
 			// Set here, on the terminal Result, and nowhere else: this is
@@ -413,6 +472,12 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 			r.run = s.run
 			return r
 		}
+		if resumed {
+			// Nothing was actually dispatched just now, so there is nothing
+			// to back off from — move straight to checking whether the NEXT
+			// retry was also already run.
+			continue
+		}
 		// The one gap: this sleep is plain time.Sleep, not selecting on
 		// s.run.ctx.Done(). A cancel arriving mid-backoff is not noticed here
 		// — only at the next dispatch's context, whose Done fires immediately
@@ -420,6 +485,22 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 		// longest this can delay noticing is retryBackoffCap (5 minutes).
 		s.run.sleep(retryBackoffGap(retry + 1))
 	}
+}
+
+// resumeResult reconstructs a completed attempt from a PRIOR process's
+// evidence directory instead of dispatching it again — the whole of "resume"
+// for one attempt. os.MkdirAll(evidence, …), which the live path below still
+// calls before every Dispatch, already puts a result.json where the SAME
+// deterministic replay looks for one; trial.read finds it and classify
+// (harbor.go) turns it into the identical Result a live Dispatch would have
+// produced. ok is false the instant trial.read's glob does not find exactly
+// one result.json under evidence/jobs — nothing to resume, dispatch for real.
+func resumeResult(evidence string, s Stage) (Result, bool) {
+	var t trial
+	if err := t.read(filepath.Join(evidence, "jobs"), s.Outputs); err != nil {
+		return Result{}, false
+	}
+	return classify(s, t), true
 }
 
 // fanWidth is the Q2 concurrency formula: clamp(1, NumCPU, 80% of host
@@ -658,6 +739,47 @@ func (r *run) flush() {
 // purpose) are different invariants and would be confusing sharing one map.
 // Held under run.mu, same as flush: a dedup record dawn cannot write is a
 // dedup record nothing can trust on the next retry.
+// loadActuations reads back the dedup record a previous invocation of this
+// same run directory wrote.
+//
+// Without it, resume re-runs every actuator: Main always started with an empty
+// map, so a stage that already pushed a branch pushed it again. That directly
+// contradicts the actuator's own rule — dawn deduplicates a run's OWN retries,
+// and a crash-and-resume is exactly the retry that rule was written for. The
+// per-run scope of the record is deliberate and unchanged; this only makes the
+// record survive the process, which is what "durable" was always supposed to
+// mean.
+//
+// A missing file is the normal case for a fresh run, not an error. A corrupt
+// one is: silently continuing with an empty map would re-fire effects that
+// already happened, which is the single thing this record exists to prevent.
+// newRun is the only way a run is built, so the dedup record is read back as
+// part of construction rather than as a call Main has to remember. The first
+// version of this was a separate r.loadActuations() line in Main, and a test
+// that called loadActuations itself passed happily when that line was deleted
+// — the check could not fail. Construction is the honest place for it: a run
+// without its record is not a half-built run, it is a run that will re-fire
+// effects that already happened.
+func newRun(dir string, ctx context.Context, d runner) *run {
+	r := &run{dir: dir, ctx: ctx, dispatch: d, sleep: time.Sleep,
+		values: map[string]any{}, actuations: map[string]string{}}
+	r.loadActuations()
+	return r
+}
+
+func (r *run) loadActuations() {
+	b, err := os.ReadFile(filepath.Join(r.dir, "actuations.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		panic(fmt.Sprintf("dawn: actuation record unreadable at %s: %v", r.dir, err))
+	}
+	if err := json.Unmarshal(b, &r.actuations); err != nil {
+		panic(fmt.Sprintf("dawn: actuation record corrupt at %s: %v — refusing to resume, because an empty record re-fires effects that already happened", r.dir, err))
+	}
+}
+
 func (r *run) flushActuations() {
 	b, err := json.MarshalIndent(r.actuations, "", "  ")
 	if err != nil {

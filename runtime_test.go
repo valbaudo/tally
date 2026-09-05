@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -440,5 +442,195 @@ func TestRecordInsideStepDoesNotDeadlock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("deadlocked: Step held the run lock across fn while Record wanted it")
+	}
+}
+
+// --- Decision 3: resume, via dispatchAttempt's before-charge() check ---
+
+// writeCompletedTrial drops a minimal but genuine result.json (plus a
+// manifest.json that collected outputDir empty-but-present) under evidence,
+// in exactly the shape a prior process's real Dispatch call would have left
+// it — evidence/jobs/<job>/<trial>/result.json — so trial.read's glob finds
+// it. An ungated stage with no declared outputs then classifies Unverified.
+func writeCompletedTrial(t *testing.T, evidence string) {
+	t.Helper()
+	trialDir := filepath.Join(evidence, "jobs", "job1", "trial1")
+	if err := os.MkdirAll(filepath.Join(trialDir, "artifacts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trialDir, "result.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`[{"source":%q,"destination":".","status":"ok"}]`, outputDir)
+	if err := os.WriteFile(filepath.Join(trialDir, "artifacts", "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeCompletedInfraErrorTrial drops a result.json with NO manifest.json —
+// trial.read still finds the one result, but Present stays false, so
+// classify reads it as infra_error (Rule 2), the same as a live attempt
+// whose declared output was never collected.
+func writeCompletedInfraErrorTrial(t *testing.T, evidence string) {
+	t.Helper()
+	trialDir := filepath.Join(evidence, "jobs", "job1", "trial1")
+	if err := os.MkdirAll(trialDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trialDir, "result.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This is the real work of Decision 3: a completed attempt's evidence
+// directory already has a result.json — left by dispatchAttempt's own
+// os.MkdirAll-then-Dispatch in a PRIOR process — and resuming into the same
+// stage must reconstruct that Result via trial.read + classify without
+// calling the dispatcher again and without spending the scope's lease a
+// second time (it was already spent when the attempt first ran).
+func TestDispatchAttemptResumesFromExistingResultWithoutRedispatchingOrSpendingTheLease(t *testing.T) {
+	f := &fake{script: []State{Passed}} // wrong on purpose: must never be reached
+	r, _ := testRun(t, f)
+	s := r.root(Dispatching(1, time.Minute))
+
+	evidence := filepath.Join(r.dir, "attempts", fsSafe(okStage.ID), "1")
+	writeCompletedTrial(t, evidence)
+
+	got := s.Run(okStage)
+	if f.calls != 0 {
+		t.Fatalf("dispatcher called %d times, want 0: a completed attempt must not be re-dispatched", f.calls)
+	}
+	if got.State != Unverified {
+		t.Fatalf("state = %s, want unverified (reconstructed from the fixture on disk)", got.State)
+	}
+	if s.used != 0 {
+		t.Fatalf("scope.used = %d, want 0: a resumed attempt must not spend the lease a second time", s.used)
+	}
+	if !s.More() {
+		t.Fatal("More() = false: the lease should still show its full budget after a resumed attempt")
+	}
+	if got.attemptID != attemptID(okStage, 1) {
+		t.Errorf("attemptID = %q, want the same id a live dispatch would have produced", got.attemptID)
+	}
+	if got.run != r {
+		t.Error("a resumed Result must still thread the run, or Actuate has nothing to dedup against")
+	}
+}
+
+// A resumed run whose first retry was already infra_error on disk, and whose
+// second retry never got that far (nothing under its evidence directory),
+// replays the first retry for free and then dispatches the second for real —
+// proving the short-circuit does not swallow retries that never happened,
+// and does not sleep a backoff for a retry that was not actually just
+// dispatched.
+func TestDispatchAttemptResumesInfraErrorRetryThenDispatchesTheNextRetryForReal(t *testing.T) {
+	f := &fake{script: []State{Rejected}}
+	r, slept := testRun(t, f)
+	s := r.root(Dispatching(2, time.Minute))
+
+	evidence1 := filepath.Join(r.dir, "attempts", fsSafe(okStage.ID), "1")
+	writeCompletedInfraErrorTrial(t, evidence1)
+
+	got := s.Run(okStage)
+	if f.calls != 1 {
+		t.Fatalf("dispatcher called %d times, want 1: only retry 2 (never on disk) should really dispatch", f.calls)
+	}
+	if got.State != Rejected {
+		t.Fatalf("state = %s, want rejected (the live retry 2)", got.State)
+	}
+	if got.attemptID != attemptID(okStage, 2) {
+		t.Errorf("attemptID = %q, want retry 2's id", got.attemptID)
+	}
+	if s.used != 1 {
+		t.Fatalf("scope.used = %d, want 1: only the live retry may spend the lease", s.used)
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("slept %v, want none: nothing was actually dispatched for the resumed retry, so there is nothing to back off from", *slept)
+	}
+}
+
+// --- Decision 2: DAWN_RESUME ---
+
+// DAWN_RESUME reuses a literal path rather than minting a fresh
+// "name-<timestamp>", mirroring DAWN_RUN_ROOT/DAWN_MAX_CONCURRENT since dawn
+// owns no flag parser.
+func TestResolveRunDirHonoursDawnResume(t *testing.T) {
+	existing := t.TempDir()
+	t.Setenv("DAWN_RESUME", existing)
+	got, err := resolveRunDir("whatever")
+	if err != nil {
+		t.Fatalf("resolveRunDir: %v", err)
+	}
+	if got != existing {
+		t.Fatalf("resolveRunDir() = %q, want the literal DAWN_RESUME path %q", got, existing)
+	}
+}
+
+// A typo'd DAWN_RESUME must fail loud, before anything else runs, rather
+// than silently minting a brand-new run under a name nobody asked for.
+func TestResolveRunDirDawnResumeToMissingDirFailsLoud(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	t.Setenv("DAWN_RESUME", missing)
+	if _, err := resolveRunDir("whatever"); err == nil {
+		t.Fatal("resolveRunDir did not fail for a DAWN_RESUME directory that does not exist")
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Fatal("resolveRunDir must not create the directory it just refused to resume")
+	}
+}
+
+// Without DAWN_RESUME, a fresh run is minted (and actually created on disk)
+// under runRoot(), name-qualified and timestamped.
+func TestResolveRunDirMintsAFreshRunByDefault(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("DAWN_RUN_ROOT", root)
+	dir, err := resolveRunDir("myproto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dir, filepath.Join(root, "myproto-")) {
+		t.Fatalf("resolveRunDir() = %q, want it under %q named after the protocol", dir, root)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("resolveRunDir() must create the fresh run directory: %v", err)
+	}
+}
+
+// TestResumeDoesNotRefireActuators pins the actuator's own rule across the one
+// retry it was written for: a crash and resume. Main used to start with an
+// empty actuation map, so a resumed stage pushed its branch a second time.
+func TestResumeDoesNotRefireActuators(t *testing.T) {
+	dir := t.TempDir()
+
+	// First invocation: the effect happens once and is recorded.
+	first := newRun(dir, context.Background(), nil)
+	calls := 0
+	res := Result{State: Passed, attemptID: "attempt-1", run: first, publishDir: t.TempDir()}
+	if err := res.Actuate(func(a *Actuation) error {
+		_, err := a.Step("push", func() (string, error) { calls++; return "branch-1", nil })
+		return err
+	}); err != nil {
+		t.Fatalf("first actuate: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("first run made %d calls, want 1", calls)
+	}
+
+	// Second invocation over the SAME run directory, as DAWN_RESUME does.
+	second := newRun(dir, context.Background(), nil)
+	res2 := Result{State: Passed, attemptID: "attempt-1", run: second, publishDir: t.TempDir()}
+	got, err := "", error(nil)
+	if err = res2.Actuate(func(a *Actuation) error {
+		var e error
+		got, e = a.Step("push", func() (string, error) { calls++; return "branch-2", nil })
+		return e
+	}); err != nil {
+		t.Fatalf("resumed actuate: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("resume re-fired the actuator: %d calls, want 1 — the effect already happened", calls)
+	}
+	if got != "branch-1" {
+		t.Errorf("resume returned %q, want the recorded identifier %q", got, "branch-1")
 	}
 }

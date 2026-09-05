@@ -32,6 +32,19 @@ import (
 // verdict outright. Nothing dawn emits may name a path under that tree.
 const outputDir = "/app/outputs"
 
+// generatedTaskDirName is the basename runTrial gives the task directory it
+// generates for Harbor. It is load-bearing, not cosmetic: Harbor's
+// LocalTaskId.get_name() reads a task directory's basename verbatim as the
+// seed for trial_name, and reap.go's whole reap set is every compose project
+// whose name starts with this string plus "__" (see reap.go for the rest of
+// the chain). This is a STRING MATCH, not a cryptographic tag — see reap.go.
+const generatedTaskDirName = "dawn"
+
+// taskDirFor is the exact join runTrial uses to place the generated task
+// under one attempt's evidence directory — pulled out to a named function so
+// the naming decision itself is testable without invoking Harbor.
+func taskDirFor(evidence string) string { return filepath.Join(evidence, generatedTaskDirName) }
+
 // The agent phase reaches these two hosts and no others. Verified by grepping
 // the pinned CLI binary: everything else it contacts degrades quietly.
 var agentAllowedHosts = []string{"api.anthropic.com", "platform.claude.com"}
@@ -239,7 +252,7 @@ func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (
 		return trial{}, err
 	}
 	t := trial{Dir: dir}
-	taskDir := filepath.Join(dir, "task")
+	taskDir := taskDirFor(dir)
 	if err := writeTask(taskDir, s, attempt); err != nil {
 		return t, err
 	}
