@@ -1,76 +1,103 @@
 # dawn
 
-**Four facts an agent cannot forge. Everything else is yours.**
+**dawn runs an agent against a verifier and believes only the verifier.**
 
-Wiped to zero on 2026-09-02. The design is [docs/GLUE-DESIGN.md](docs/GLUE-DESIGN.md);
-this repo is at v0-not-started, deliberately.
+A *protocol* is a Go program written against package `dawn`: it declares stages, bounds
+them with leases, reads back a closed set of six states, and — only on `passed` —
+actuates. dawn compiles each stage into a task it owns entirely, runs it, and assigns a
+state **without parsing a single line of agent output**.
 
-## What this is
+Vocabulary is in [CONTEXT.md](CONTEXT.md). Every decision behind the design, with the
+measurement that forced it, is on the map: [Map: dawn, the mechasuit around any agent
+CLI](https://github.com/valbaudo/dawn/issues/13).
 
-Nineteen teams built vulnerability-research agents on the CyberGym Level 1 board.
-The scaffold around the model is worth +4 to +23 points of success rate — more than a
-model generation. Every team hand-built the same four things badly, and disagreed about
-everything else.
+## Running a protocol from a clean checkout
 
-Three are implemented. The fourth is designed and not built, and this table says so
-rather than shipping the claim:
+Four commands. `protocols/prci` is the worked example: an agent is handed a repo whose
+CI is red and hands back a unified diff; a separate, pinned, no-network gate applies it
+to its **own** pristine repo behind `git apply --include=calc.py`, runs its own baked
+suite, and only then does the actuator publish — the bytes the *gate* wrote, never the
+agent's.
 
-| Fact | Enforced by | Not by | State |
-|---|---|---|---|
-| what it spent | the proxy is the only route out of the netns | asking | **built** |
-| whether it succeeded | `class` written only by supervisor-side code | a label check inside the agent | **built** |
-| its own isolation spec | recorded from the effective container config | trusting the digest field | **built** |
-| shared state generations | refs + CAS in a database the container cannot reach | file locks in the workspace | **NOT BUILT** |
+**1. Host.** [OrbStack](https://orbstack.dev) (or Docker) running, and Harbor:
 
-`grep -n 'CREATE TABLE' internal/store/store.go` returns two: `events` and `pool`. There is
-no refs table and `go doc` exports no `CAS`. Earlier revisions of this file and of
-docs/GLUE-DESIGN.md asserted otherwise; they were wrong.
-
-Why it survived unnoticed is the interesting part: CyberGym, Glasswing and MDASH are all
-**read-only on their target** — 50 hunters share nothing — so no harness we built needed
-it. The unimplemented fact is exactly the one only the harnesses we did not build require:
-Cloudflare's Fixing stage writing patches, or any non-security harness with N agents
-editing one workspace. It gets built when that second caller exists, not before.
-
-Membership rule: a fact belongs inside iff the agent would profit from forging it **and**
-the agent's code is the natural place to produce it. Memory fails that rule — authoring
-memory is the agent's whole job — so memory is a table, not a primitive.
-
-Refused, permanently: merge policy, projection and ranking, retry policy, memory
-semantics, workflow definition, payload schemas, replay/resume. If the nineteen harnesses
-disagree about it, it is your code. Control flow is a `for` loop.
-
-## Why the tree is empty
-
-`workflow/`, `scheduler/`, `value/`, `content/`, `workspace/`, `plan/`, `gate/`,
-`backend/`, `cmd/` — 13,611 lines — deleted. The scheduler's central `LeafRunner` port
-had four test implementations and zero real ones. The plan language typed the payload
-(`additionalProperties: false`, every field required, always) and recorded none of cost,
-tokens, timing, attempt index or execution position.
-
-`store/`, `proc/` and the flock went too. They build and they are tested, and v0 has no
-caller for any of them — and carrying them biases v0 toward using them. The flock is
-worse than unused: one run per state directory is the opposite of a sweep.
-
-They come back, with their tests, the day a harness needs them:
-
-```sh
-git checkout pre-glue-wipe -- store proc
+```bash
+uv tool install harbor==0.22.0
 ```
 
-Everything deleted is at `pre-glue-wipe`. Reasoning worth keeping is prose in
-[docs/salvage/](docs/salvage/dawn-reasoning.md).
+**2. Build the images.** Every image a protocol pins is built from one declarative file:
 
-## v0
+```bash
+docker buildx bake -f experiments/harbor-targets/docker-bake.hcl pr-ci
+```
 
-Two weeks, ~800 lines, target NSFOCUS (95.0%): the LLM proxy, one append-only `events`
-table, an atomic budget reserve inside the proxy handler, `glue top`, `glue table`.
+The two digests this produces are the constants in
+[protocols/prci/main.go](protocols/prci/main.go). **They will match**: the build is a
+pure function of this tree, and `docker-bake.hcl` says which seven causes of drift had
+to be removed to make that true. If they *don't* match, your source differs from the
+commit the pins were taken at — re-pin, don't work around it.
 
-No memory, no blobs, no refs, no shim, no `Inject`, no sandbox primitive — the harness
-calls `docker run` in ordinary Go.
+These are **arm64** digests. On amd64 the base images resolve to different bytes, so the
+build is reproducible but the digests are not the ones committed here.
 
-Keep going if provider-console reconciliation lands within 2%, the submission table needs
-zero hand-editing, spend never crosses the cap under 20 workers, and you reach for
-`glue top` instead of tailing logs. Stop if building NSFOCUS *on* it costs more than
-building it plain — the substrate has to be net-negative for the harness author, or it is
-a tax.
+**3. Authenticate.** dawn spends no money and holds no API key; it inherits a
+subscription OAuth token from the environment. Mint one yourself — this step is
+deliberately not automated, because it prints a live secret:
+
+```bash
+claude setup-token
+```
+
+Keep it in a `0600` file **outside this repo**, then:
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="$(cat ~/.config/dawn-token)"
+export CLAUDE_FORCE_OAUTH=1
+```
+
+**4. Run.**
+
+```bash
+go run ./protocols/prci
+```
+
+About 55 seconds. It prints the terminal state and the run directory; the receipt is at
+`dawn-runs/<run>/report.md`, and every attempt's evidence — the generated task, the
+Harbor log, the trial, the collected artifacts — is under `dawn-runs/<run>/attempts/`.
+Run directories are gitignored.
+
+`DAWN_RESUME=<run-dir> go run ./protocols/prci` re-enters a crashed run: finished
+attempts are reconstructed from disk rather than re-dispatched, and actuators that
+already fired do not fire again.
+
+### If you skip step 2
+
+The failure is honest but the wording is Docker's, not dawn's. Measured, with a gate
+image that was never built:
+
+```
+Error response from daemon: pull access denied for dawn-pr-ci-gate,
+repository does not exist or may require 'docker login'
+```
+
+dawn reports `infra_error` — it obtained no verdict — and the run's `report.md` shows
+the attempt with **no metrics and a real token draw**. That is not a wasted diagnostic:
+a bad *gate* pin is only discovered **after** the agent has run, so it costs a full
+attempt (≈140k tokens in the measured case). A bad *environment* pin fails before the
+agent starts.
+
+## What is here
+
+| | |
+|---|---|
+| `dawn.go` | the whole author-facing surface: six states, `Stage`, `Gate`, `Lease`, `Result` |
+| `runtime.go` | scopes, leases, admission, fan-out, resume, the actuator |
+| `harbor.go` | the runner: generates the task, runs one trial, classifies it |
+| `report.go` | the run's receipt |
+| `protocols/prci/` | the worked example |
+| `experiments/harbor-targets/` | four toy targets and their gates, with the bake file |
+| `docs/research/` | primary-source findings the decisions rest on |
+
+⚠️ `docs/salvage/` is a **superseded** design from before a reset on 2026-09-02. It is
+kept as a record and is **not authority** — it describes a workflow language and a
+`glue` binary that no longer exist.

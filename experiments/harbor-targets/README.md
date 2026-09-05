@@ -140,19 +140,34 @@ container for the app to run there, so `cat`-ing the source would also score 1.0
 Every `task.toml` now pins its verifier by **RepoDigest**, not by a mutable tag.
 OrbStack gives a locally built image a RepoDigest equal to its image ID, and
 Harbor hands the string straight to `docker compose`, which resolves
-`name@sha256:...` from the local store with no registry round-trip. Rebuilding
-the gate changes the digest — that is what pinning means. Re-pin from:
+`name@sha256:...` from the local store with no registry round-trip.
+
+**Build with `docker buildx bake -f docker-bake.hcl <target>`, never a bare
+`docker build`.** A bare build reintroduces the drift `docker-bake.hcl` exists
+to remove — see its comments for the three specific causes (an unpinned
+`SOURCE_DATE_EPOCH`, a per-build provenance/SBOM attestation that rides as a
+second manifest and moves `RepoDigests[0]` even when every layer is
+identical, and an unpack setting for OrbStack's containerd exporter). Re-pin
+after every bake:
 
 ```bash
-docker inspect dawn-<task>-gate:2 --format '{{index .RepoDigests 0}}'
+docker buildx bake -f docker-bake.hcl pr-ci
+docker inspect dawn-pr-ci-gate:1 --format '{{index .RepoDigests 0}}'
 ```
+
+Only `pr-ci` has bake targets today (`pr-ci-env`, `pr-ci-gate`). Its digest is
+a pure function of the source tree: cloning fresh and baking with `--no-cache`
+reproduces the exact digest committed in `protocols/prci/main.go`. `cybergym`,
+`mdash` and `vdh` have no bake target yet and are still built with a plain
+`docker build`; their pins are **build-local** — true of this machine's build,
+not guaranteed to reproduce elsewhere — until they get one too.
 
 | Task | `[verifier.environment] docker_image` |
 |---|---|
-| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:f2cc298cce0b0cc9d892703d95e94e24327c44de855f77b6611ed69180e1b7c8` |
-| `mdash` | `dawn-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411` |
-| `pr-ci` | `dawn-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607` — reproducibly built from `docker-bake.hcl`; the digest **is** the generation, no `:N` tag |
-| `vdh` | `dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756` |
+| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:f2cc298cce0b0cc9d892703d95e94e24327c44de855f77b6611ed69180e1b7c8` — build-local, no bake target yet |
+| `mdash` | `dawn-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411` — build-local, no bake target yet |
+| `pr-ci` | `dawn-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607` — reproducible: a clean checkout bakes to this exact digest |
+| `vdh` | `dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756` — build-local, no bake target yet |
 
 `:2` is the generation that reads the agent's output at `/app/outputs/<name>`
 (dawn's `outputDir`) and self-tests that contract at build time; `:1` is the
@@ -168,10 +183,9 @@ The **agent** environment images are deliberately not pinned — Harbor rebuilds
 them from `environment/` on every run and leaves no stable tag. Only the gate,
 which decides the verdict, has to be immutable.
 
-The image *ID* is a config digest carrying build metadata and moves on rebuild
-even when a step is cached. For provenance that survives a rebuild, compare
-`RootFS.Layers` diff_ids (recorded in each task's own README), not the ID
-printed by `docker images`.
+For the three targets without a bake target yet, don't rely on the digest
+staying put across a rebuild — compare `RootFS.Layers` diff_ids instead
+(recorded in each task's own README), which survive one.
 
 ## Gotchas
 
@@ -201,9 +215,12 @@ printed by `docker images`.
   source therefore has to be vendored into both contexts. If the upstream source
   in `../targets/` moves a line, both copies must be re-copied or the gate's
   line-range and evidence checks silently drift from what the agent sees.
-- **`RepoDigest` is not the image ID.** They coincided on some earlier local
-  builds and no longer do (`cybergym`: RepoDigest `43ad1ec4...`, config digest
-  `6f16d03b...`). Pin the `RepoDigests[0]` string; anything else may not resolve.
+- **A bare `docker build` does not reproduce a pinned digest.** Only `pr-ci`
+  bakes via `docker-bake.hcl` today, and only its digest is proven to
+  reproduce from a clean checkout; `cybergym`, `mdash` and `vdh` are still
+  built ad hoc and their pins are build-local until they get a bake target
+  too. Pin the `RepoDigests[0]` string either way; anything else may not
+  resolve.
 - **The agent must not be able to read the fix.** `cybergym/environment/vuln.c`
   used to be byte-identical to `gate/vuln.c`, `#ifdef FIXED` and all. It now
   carries the vulnerable `strcpy` only. Verified:

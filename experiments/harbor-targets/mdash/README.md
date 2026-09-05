@@ -1,5 +1,10 @@
 # dawn/mdash -- a Harbor task around the mdash toy IDOR
 
+> Pasted trial output in this file is literal, from the runs it names, so its
+> paths predate the `/app/outputs` rename. It is evidence, not the contract —
+> for that, see `outputDir` in `harbor.go`.
+
+
 ## What it demonstrates
 
 That a **proving plugin can live entirely inside a pinned verifier image** and
@@ -10,7 +15,7 @@ the verifier is `separate` (so it cannot see the agent's filesystem) and
 The agent's job is to *exercise* a broken-object-level-authorization flaw in
 `/srv/mdash` (source: `experiments/targets/mdash/`): log in as `alice`, then
 read **bob's** private note with alice's own token. It writes what it obtained
-to `/app/exploit_result.json`.
+to `/app/outputs/exploit_result.json`.
 
 The gate does **not** trust that file's claim of success. It bakes its own copy
 of the service at `/opt/mdash`, starts it on loopback inside the verifier
@@ -46,16 +51,25 @@ Measured: 40s for the oracle trial, 37s for the nop trial.
 
 The gate image and the agent image agree on these by construction, not by
 convention -- each is a constant duplicated across the two, so any protocol
-that targets this task has to hard-code the same strings.
+that targets this task has to hard-code the same strings. The `/app/outputs`
+root itself is not one of them: it is dawn's fixed output directory, defined
+once as `outputDir` in `harbor.go`, and this table only restates the name
+under it for readers of this target.
 
 | logical name | absolute path | written by | read by |
 |---|---|---|---|
-| `exploit_result` (the agent's *claim*) | `/app/exploit_result.json` | agent | gate, as untrusted JSON data; declared in `artifacts` and restored into the verifier container |
+| `exploit_result` (the agent's *claim*) | `/app/outputs/exploit_result.json` | agent | gate, as untrusted JSON data; declared in `artifacts` and restored into the verifier container |
 | `reward` | `/logs/verifier/reward.json` | gate, unconditionally, as its last act | Harbor (read before `reward.txt`, highest precedence) |
 | `finding` (the *published* verdict) | `/logs/verifier/publish/finding.json` | gate, only on a `1` verdict, before `reward.json` | the actuator |
 | app source, agent side | `/srv/mdash` | `environment/Dockerfile` | agent |
 | app source, gate side | `/opt/mdash` | `gate/Dockerfile` | gate only -- the agent can never see this copy |
 | gate entrypoint | `/tests/test.sh` | `gate/Dockerfile` | Harbor |
+
+This table used to point at `/app/exploit_result.json` directly -- the
+pre-dawn generation of the contract. A gate reading a path dawn never
+delivers an artifact to gets nothing, writes `reward: 0`, and dawn classifies
+that as `Rejected`, so the stale path was quietly fabricating rejections;
+`gate/selftest.sh` now proves the real path at image build time.
 
 `reward.json` is **numbers only**: `{"reward": 1}`. A string value there raises
 ValidationError and fails the whole trial, so the gate never writes one. Nothing
@@ -65,10 +79,11 @@ before its last line therefore produces no verdict at all, which is an
 
 `publish/finding.json` carries the bytes **the gate derived** -- the note id and
 the secret it re-read as bob from its own baked copy -- never the agent's
-`/app/exploit_result.json`. The agent's artifact is only ever compared against;
-it is never forwarded.
+`/app/outputs/exploit_result.json`. The agent's artifact is only ever compared
+against; it is never forwarded.
 
 ## Real output
+
 
 ```
 $ harbor run -p mdash -a oracle -o jobs --job-name tc-mdash-pass
@@ -324,7 +339,7 @@ Both `linux/arm64`, both `FROM python:3.13-slim`
 ## Layout
 
 ```
-task.toml                 artifacts = ["/app/exploit_result.json"]; separate + no-network
+task.toml                 artifacts = ["/app/outputs"]; separate + no-network
 instruction.md            what the agent is told
 environment/Dockerfile    agent image; app source -> /srv/mdash
 environment/app/*.py      copy of experiments/targets/mdash (docker build context is environment/)
@@ -342,9 +357,9 @@ gate/test.sh              baked at /tests/test.sh
   `gate/app/`. Harbor passes `context_dir=<task>/environment`
   (`harbor/environments/docker/docker.py:243`).
 - **`artifacts` must not name a path under `/logs/verifier`** (settled rule 5):
-  the artifact is `/app/exploit_result.json`. Harbor re-materialises it at that
-  exact path inside the verifier container before `/tests/test.sh` runs -- the
-  `ls -l` line in the pasted verifier stdout is the proof.
+  the artifact is `/app/outputs/exploit_result.json`. Harbor re-materialises it
+  at that exact path inside the verifier container before `/tests/test.sh`
+  runs -- the `ls -l` line in the pasted verifier stdout is the proof.
 - The gate image must `mkdir -p /app`; the artifact restore lands there.
 - The target itself needs no egress (stdlib + loopback), but the **agent CLI**
   does -- see "Baking the CLI in" below. `no-network` on the agent environment

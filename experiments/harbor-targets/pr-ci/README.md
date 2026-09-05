@@ -1,5 +1,10 @@
 # pr-ci — the mutating protocol, verified before anything is pushed
 
+> Pasted trial output in this file is literal, from the runs it names, so its
+> paths predate the `/app/outputs` rename. It is evidence, not the contract —
+> for that, see `outputDir` in `harbor.go`.
+
+
 Source target: [`../../targets/pr-ci/`](../../targets/pr-ci/). A tiny git repo
 whose CI is red because `average()` in `calc.py` subtracts a stray `1`.
 The agent's job is to make CI green.
@@ -10,7 +15,7 @@ The agent's job is to make CI green.
 tree, and without the agent ever pushing anything.**
 
 The agent gets the repo at `/app/repo` and hands back exactly one thing: a
-**unified diff** at `/app/fix.patch`. It does not hand over a mutated
+**unified diff** at `/app/outputs/fix.patch`. It does not hand over a mutated
 repository — that would be a large agent-controlled tree the gate would have
 to trust. A diff is small, is inert data, and can be filtered.
 
@@ -23,7 +28,7 @@ baked copy** of the same seed repo, applies the agent's diff with
 The one line that carries the integrity argument:
 
 ```sh
-git apply -v --include=calc.py --whitespace=nowarn /app/fix.patch
+git apply -v --include=calc.py --whitespace=nowarn /app/outputs/fix.patch
 ```
 
 `--include=calc.py` drops every hunk aimed at anything else, so the test
@@ -44,7 +49,7 @@ verified proposal is what gets actuated. The agent never touches the remote.
 **The actuator publishes only bytes the gate wrote.** On a green verdict the
 gate re-derives the diff from its own pristine repo *after* the filter ran and
 drops it at `/logs/verifier/publish/fix.patch`. That is not the agent's
-`/app/fix.patch`. The two differ exactly where it matters: measured below, a
+`/app/outputs/fix.patch`. The two differ exactly where it matters: measured below, a
 raw patch of **936 bytes touching `calc.py`, `ci.sh` and `test_calc.py`**
 publishes as **276 bytes touching `calc.py`**. Publishing the raw artifact
 would push the very hunks `--include` just discarded — it would actuate the
@@ -74,18 +79,26 @@ answer. A dead gate must not be able to emit a verdict.
 
 ### Output paths
 
-Every logical name the gate and any protocol targeting it must agree on. These
-absolute paths are currently constants duplicated between the gate image and
-the protocol; this table is the contract.
+
+Every logical name the gate and any protocol targeting it must agree on. The
+actual contract is `outputDir` in `harbor.go` — dawn's one fixed output
+directory, not this target's to define; this table restates the names under
+it for readers of this target, it is not the contract itself.
 
 | logical name | absolute path | written by | direction |
 |---|---|---|---|
-| `patch` | `/app/fix.patch` | agent | agent -> gate (Harbor `artifacts`) |
+| `patch` | `/app/outputs/fix.patch` | agent | agent -> gate (Harbor `artifacts`) |
 | `repo` | `/app/repo` | environment image | given to the agent |
 | `pristine_repo` | `/gate/repo` | gate image | gate-only, never in the agent's container |
 | `gate` | `/tests/test.sh` | gate image | Harbor entrypoint |
 | `published_patch` | `/logs/verifier/publish/fix.patch` | gate | gate -> actuator |
 | `reward` | `/logs/verifier/reward.json` | gate | gate -> Harbor |
+
+This table used to name `/app/fix.patch` directly — the pre-dawn generation
+of the contract. A gate reading a path dawn never delivers an artifact to
+gets nothing, writes `reward: 0`, and dawn classifies that as `Rejected`, so
+the stale path was fabricating rejections rather than describing the gate;
+`gate/selftest.sh` now proves the real path at image build time.
 
 ## The two commands
 
@@ -271,7 +284,7 @@ pr-ci__tacvfm9__env-main-1
 ```
 
 The verifier phase is untouched: still `no-network`, still the pinned
-`dawn-pr-ci-gate:1`, still `artifacts = ["/app/fix.patch"]` with nothing under
+`dawn-pr-ci-gate:1`, still `artifacts = ["/app/outputs"]` with nothing under
 `/logs/verifier`.
 
 **Cost.** The agent image grows from 1.46 GB to 1.94 GB on disk (371 MB → 515
@@ -353,15 +366,16 @@ error: No valid patches in input (allow with "--allow-empty")
 ## Gotchas hit here
 
 - **A missing artifact does not abort the run.** With `nop` there is no
-  `/app/fix.patch`; the manifest records `"status": "failed"` for that entry
-  and the verifier still runs, seeing no file. That is what makes the honest
-  `no artifact -> 0` branch reachable rather than an exception. Do not add an
-  empty placeholder patch to the environment image to "fix" this — there is
-  nothing to fix.
-- **`artifacts` re-materialises at the source path.** `/app/fix.patch` in the
-  agent container reappears at `/app/fix.patch` in the verifier container, so
-  the gate image must have `/app` (`mkdir -p /app` in `gate/Dockerfile`).
-  Deliberately not under `/logs/verifier` — restoration happens *before* the
+  `/app/outputs/fix.patch`; the manifest records `"status": "failed"` for that
+  entry and the verifier still runs, seeing no file. That is what makes the
+  honest `no artifact -> 0` branch reachable rather than an exception. Do not
+  add an empty placeholder patch to the environment image to "fix" this —
+  there is nothing to fix.
+- **`artifacts` re-materialises at the source path.** `/app/outputs/fix.patch`
+  in the agent container reappears at `/app/outputs/fix.patch` in the verifier
+  container, so the gate image must have `/app/outputs` (`mkdir -p
+  /app/outputs` in `gate/Dockerfile`). Deliberately not under
+  `/logs/verifier` — restoration happens *before* the
   gate runs, so an artifact declared under that path would let an agent drop
   its own `reward.json` and forge the verdict outright. The gate overwriting it
   last is the only reason that ordering is safe.

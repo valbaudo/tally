@@ -1,5 +1,10 @@
 # dawn/vdh — toy SQL-injection hunt, gated on citations only
 
+> Pasted trial output in this file is literal, from the runs it names, so its
+> paths predate the `/app/outputs` rename. It is evidence, not the contract —
+> for that, see `outputDir` in `harbor.go`.
+
+
 Wraps `experiments/targets/vdh` (five-file Python repo, one bug class seeded
 four times by four different splicing mechanisms, each with a safe
 bound-parameter sibling as a precision decoy) as a Harbor task.
@@ -18,7 +23,7 @@ There is deliberately no sound oracle for this target. The gate has never
 seen `GROUND_TRUTH.md` and cannot tell a true positive from a decoy. It
 checks only that the agent produced findings it can actually point at:
 
-1. `/app/findings.jsonl` exists and has at least one non-empty line —
+1. `/app/outputs/findings.jsonl` exists and has at least one non-empty line —
    **absence is failure**, not "the agent found zero bugs".
 2. Every line is a JSON object with `file`, `line`, `class`, `evidence`.
 3. `file` resolves to one of the five real files in the repo, and `line` is
@@ -65,16 +70,26 @@ No actuator publishes from this target, so the gate writes nothing to
 
 ## Output paths
 
+
 The one path the agent writes and the gate reads is a constant duplicated
-between `instruction.md`, `task.toml`'s `artifacts`, and `gate/check.py`.
-Any protocol targeting this task needs this mapping:
+between `instruction.md`, `task.toml`'s `artifacts`, and `gate/check.py`. The
+`/app/outputs` root itself is not this task's to define -- it is dawn's fixed
+output directory, defined once as `outputDir` in `harbor.go`; what follows
+just restates the mapping under it for readers of this target:
 
 | Logical output | Absolute path (agent container) | Declared in |
 |---|---|---|
-| `findings` | `/app/findings.jsonl` | `task.toml` `artifacts`, `gate/check.py:10` |
+| `findings` | `/app/outputs/findings.jsonl` | `task.toml` `artifacts`, `gate/check.py:10` |
 | `repo` (read-only input, agent's copy) | `/app/repo` | `environment/Dockerfile` |
 | `repo` (gate's own re-derived copy) | `/gate/repo` | `gate/Dockerfile`, `gate/check.py:11` |
 | verdict (gate-written, never agent-visible) | `/logs/verifier/reward.json` | `gate/check.py:83` |
+
+This mapping used to name `/app/findings.jsonl` directly -- the pre-dawn
+generation of the contract. A gate reading a path dawn never delivers an
+artifact to finds nothing, writes `reward: 0`, and dawn classifies that as
+`Rejected`, so the stale path was fabricating rejections rather than
+describing the gate; `gate/selftest.sh` now proves the real path at image
+build time.
 
 `/gate/repo` is the gate's private copy; the agent can neither read nor
 write it, and the gate never trusts `/app/repo`.
@@ -262,11 +277,11 @@ so the agent image is byte-for-byte the one measured above.
 
 ## Transport
 
-`artifacts = ["/app/findings.jsonl"]`. The separate verifier cannot see the
+`artifacts = ["/app/outputs"]`. The separate verifier cannot see the
 agent's filesystem; Harbor re-materialises declared artifacts at their
 original absolute path inside the verifier container before `/tests/test.sh`
-runs. The path is under `/app`, **never** under `/logs/verifier` — that
-would let the agent forge the verdict.
+runs. The path is under `/app/outputs`, **never** under `/logs/verifier` —
+that would let the agent forge the verdict.
 
 The gate re-derives what it can: the repo is baked into the gate image at
 `/gate/repo`, and the agent's jsonl is parsed as data only. Nothing the
