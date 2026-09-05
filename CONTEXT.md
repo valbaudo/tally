@@ -45,11 +45,11 @@ What a protocol's verifier can actually establish — sound-and-cheap, real-but-
 A bounded region of a protocol run with its own budget lease, within the run-wide budget.
 
 **lease**:
-An atomic reservation a scope holds before dispatch, counted in wall clock, attempts, or container concurrency — never in money or tokens. Provider quota is not leasable: it has no published ceiling and its exhaustion may be unobservable, so dawn tracks draw rate, never a balance. Leases live in the scheduler's admission queue; there is no separate ledger.
+An atomic reservation a scope holds before dispatch, counted in wall clock, attempts, or container concurrency — never in money or tokens. Provider quota is not leasable: it has no published ceiling and its exhaustion may be unobservable, so dawn tracks draw rate, never a balance. Leases are booked by Scope.charge(), which is atomic and walks every ancestor scope; there is no separate ledger.
 
-**admission queue**:
-The single gate every attempt passes before dispatch, holding all five scheduling dimensions at once. There is no separate budget ledger; leases live here.
-_Avoid_: scheduler as a second component, budget authority.
+**admission**:
+charge() plus one semaphore per agent name — not a separate component. charge() is the existing, already-atomic ancestor walk; the semaphore caps how many attempts of one agent may be in flight at once, sized memory-aware for an agent that can fan (Scope.Fan) and fixed at one for an agent that cannot (Codex). No ordering, no fairness: a fan returns results in index order regardless of dispatch order, so wait-order never matters.
+_Avoid_: admission queue (an earlier, pre-Fan sketch of a separate component that was never built), scheduler as a second component, budget authority.
 
 **actuator**:
 The trusted component that performs an external effect (push a branch, open a PR, call a scoring endpoint) after verification, so the agent never holds production credentials. Runs in dawn's own process, fires only on `passed`, and publishes only bytes the gate itself wrote.
