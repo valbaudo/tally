@@ -224,17 +224,10 @@ func writeTask(dir string, s Stage, attempt time.Duration) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "schema_version = \"1.4\"\n")
 	fmt.Fprintf(&b, "artifacts = [%q]\n\n", outputDir)
-	// fsSafe on the NAME as well as the path. Stage ids carry slashes — the
-	// Stage.ID doc tells authors to qualify them, and a loop that samples
-	// "pov/0", "pov/1" is doing exactly that — but Harbor refuses a task name
-	// with more than the one slash this prefix adds: measured, "dawn/pov/0" is
-	// rejected with "Either datasets or tasks must be provided" while
-	// "dawn/pov-0" is accepted. dawn already sanitizes the id for the evidence
-	// path and simply did not for the name, so the first protocol to qualify an
-	// id the documented way spent its whole lease on infra_error before any
-	// agent ran. The description keeps the id verbatim: nothing parses it.
+	// The description keeps the id verbatim — nothing parses it — and the name
+	// is built to Harbor's grammar rather than hoped into it (see taskName).
 	fmt.Fprintf(&b, "[task]\nname = %q\nversion = \"1.0.0\"\ndescription = %q\n\n",
-		"dawn/"+fsSafe(s.ID), "dawn stage "+s.ID)
+		taskName(s.ID), "dawn stage "+s.ID)
 
 	// The environment is the task: the input tree is baked into this image, so
 	// there is nothing to build and no Dockerfile to ship. Its baseline is
@@ -523,4 +516,37 @@ func classify(s Stage, t trial) Result {
 		r.State = Rejected
 	}
 	return r
+}
+
+// taskName builds the Harbor task name for a stage. It is NOT identity — the
+// evidence path and attempt_id carry that — so it only has to be valid, and it
+// is built to be valid rather than hoped into it.
+//
+// Harbor validates the name against, verbatim from its own constants.py:
+//
+//	^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$
+//
+// Two ways a stage id breaks that, both found by running cybergym rather than
+// by reading. First the slash: Stage.ID's doc tells authors to qualify ids and
+// fsSafe exists because "Stage ids carry slashes", so a search sampling
+// "pov/0" is the documented case — and "dawn/pov/0" is refused outright, with
+// "Either datasets or tasks must be provided". Second the first character
+// after the slash: fsSafe passes a leading '-', '_' or '.' through untouched,
+// so "dawn/.draft" and "dawn/-x" are refused too. The first fix here caught
+// only the slash, which is why this is a function with the grammar written
+// next to it instead of a call to fsSafe at the format site.
+//
+// Both failures are silent in the worst way: writeTask's refusal becomes an
+// infra_error, which the scope retries with backoff, so a permanently
+// malformed name burns the whole attempt lease before any agent runs.
+//
+// The prefix costs nothing because names need not be distinct: two stages that
+// land on one name are still two evidence directories and two attempt_ids.
+func taskName(id string) string {
+	seg := fsSafe(id)
+	if c := seg[0]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+		// fsSafe never returns empty (it yields "stage"), so seg[0] is safe.
+		seg = "s" + seg
+	}
+	return "dawn/" + seg
 }

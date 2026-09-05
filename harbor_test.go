@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -470,15 +471,32 @@ func TestTaskDirForJoinsTheGeneratedTaskDirName(t *testing.T) {
 	}
 }
 
-// A stage id with a slash is the documented, encouraged case — Stage.ID tells
-// authors to qualify ids by whatever varies, and cybergym's search samples
-// "pov/0", "pov/1". Harbor refuses a task name carrying more than the one
-// slash dawn's own prefix adds: measured, "dawn/pov/0" fails to resolve at all
-// ("Either datasets or tasks must be provided") while "dawn/pov-0" is
-// accepted. dawn sanitised the id for the evidence path and not for the name,
-// so the first protocol to qualify an id spent its entire lease on
-// infra_error before an agent ever ran.
-func TestWriteTaskSanitisesASlashedStageIDIntoTheTaskName(t *testing.T) {
+// Every stage id must produce a task name Harbor accepts. Its grammar, verbatim
+// from its own constants.py, is
+//
+//	^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$
+//
+// and cybergym broke it twice. The slash first — Stage.ID's doc tells authors
+// to qualify ids, so "pov/0" is the documented case, and "dawn/pov/0" is
+// refused outright. Then the leading character: the first fix used fsSafe,
+// which passes '-', '_' and '.' through untouched, so ".draft" and "-x" were
+// still refused. Both burn the whole attempt lease before an agent runs,
+// because writeTask's refusal becomes an infra_error the scope retries.
+func TestTaskNameAlwaysSatisfiesHarborsGrammar(t *testing.T) {
+	harborName := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+	for _, id := range []string{
+		"fix", "pov/0", "hunt/sql-injection", "prove_2", "a.b",
+		".draft", "-x", "_scratch/1", "a b", "\u00e9t\u00e9", "s/t/u/v",
+	} {
+		if got := taskName(id); !harborName.MatchString(got) {
+			t.Errorf("taskName(%q) = %q, which Harbor refuses", id, got)
+		}
+	}
+}
+
+// The name is not identity and never has to be distinct — evidence paths and
+// attempt_ids carry that — so the prefix taskName may add is free.
+func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 	dir := t.TempDir()
 	s := Stage{
 		ID:     "pov/0",
@@ -494,15 +512,7 @@ func TestWriteTaskSanitisesASlashedStageIDIntoTheTaskName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(b)
-	if !strings.Contains(got, `name = "dawn/pov-0"`) {
-		t.Errorf("task name did not sanitise the slashed stage id; task.toml:\n%s", got)
-	}
-	// The prefix contributes exactly one slash and the id must contribute none.
-	for _, line := range strings.Split(got, "\n") {
-		if strings.HasPrefix(line, "name = ") && strings.Count(line, "/") != 1 {
-			t.Errorf("task name carries %d slashes, Harbor accepts one: %q",
-				strings.Count(line, "/"), line)
-		}
+	if !strings.Contains(string(b), `name = "dawn/pov-0"`) {
+		t.Errorf("generated task did not carry the sanitised name; task.toml:\n%s", b)
 	}
 }
