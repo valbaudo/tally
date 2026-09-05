@@ -150,6 +150,20 @@ func FormatOnlyGate(img Image) Gate { return Gate{image: img, formatOnly: true} 
 // anything, and it is written into the run record where a reader can see it.
 func NoGate(reason string) Gate { return Gate{reason: reason} }
 
+// kind is the gate's soundness as one word, for the receipt. It reads the
+// same three constructors an author already chose between, so a receipt can
+// never disagree with the source about what a stage established.
+func (g Gate) kind() string {
+	switch {
+	case g.image == "":
+		return "none"
+	case g.formatOnly:
+		return "format_only"
+	default:
+		return "sound"
+	}
+}
+
 // Lease is everything an author may declare about scarcity: three numbers, all
 // time or count. There is no token ceiling and no dollar ceiling — provider
 // quota has no published bound and its exhaustion may be unobservable, so dawn
@@ -327,6 +341,11 @@ type Result struct {
 	// classify only reaches Passed for a gated, rewarded trial (harbor.go's
 	// Rule 5) — so by the time anything reads it, it is always valid.
 	publishDir string
+	// drew is what this attempt drew, for the receipt. Unexported for the
+	// same reason metrics is: consumption is something dawn reports, never
+	// something a protocol branches on. There is no denominator to compare
+	// it against, so there is nothing here for control flow to do.
+	drew *draw
 	// attemptID and run exist so Actuate can find a durable, per-run,
 	// per-attempt dedup record without a caller ever naming one: Scope.Run
 	// is the only writer, right before it hands the Result back.

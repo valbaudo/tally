@@ -259,6 +259,7 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	r.values["state"] = string(state)
 	r.flush()
 	r.mu.Unlock()
+	writeReport(dir)
 	fmt.Printf("dawn: %s %s %s\n", name, state, dir)
 }
 
@@ -463,6 +464,13 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 				r = Result{State: InfraError}
 			}
 		}
+		// The receipt, on both paths, with the same bytes — the resumed
+		// reconstruction is classify() over the same trial, so there is
+		// nothing to branch on. This is also the only place that sees every
+		// DISPATCH rather than every Result: an infra_error that is retried
+		// away never reaches the protocol, and it is exactly the attempt that
+		// burned a draw and produced nothing.
+		writeReceipt(evidence, stage, retry+1, r)
 		if r.State != InfraError || !s.More() {
 			// Set here, on the terminal Result, and nowhere else: this is
 			// the one place both the stage and the settled attempt number

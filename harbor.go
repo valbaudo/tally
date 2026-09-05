@@ -148,9 +148,24 @@ type trial struct {
 	Cancelled bool
 	// Fault is Harbor's exception for the trial, empty when there was none.
 	Fault string
-	// What the attempt drew. Zero for agents that report nothing (oracle, nop).
-	InputTokens, CacheTokens, OutputTokens int
-	CostUSD                                float64
+	// Drew is what the attempt drew. nil for agents that report nothing
+	// (oracle, nop) and for a trial that never got far enough to report.
+	Drew *draw
+}
+
+// draw is what one attempt drew, as Harbor normalized it. A receipt of what
+// was spent, never a forecast of what remains: there is no denominator to
+// forecast against — provider quota is an undocumented dual-cadence pool with
+// no published token counts.
+//
+// A pointer, and nil when Harbor wrote no agent_result, because unknown is
+// not zero. An attempt that died before reporting drew something; printing 0
+// for it would be a claim dawn cannot make.
+type draw struct {
+	InputTokens  int     `json:"input_tokens"`
+	CacheTokens  int     `json:"cache_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
 }
 
 // pinned reports whether an image reference names bytes rather than a moving
@@ -330,8 +345,7 @@ func (t *trial) read(jobsDir string, outputs []string) error {
 		return err
 	}
 	if a := r.AgentResult; a != nil {
-		t.InputTokens, t.CacheTokens, t.OutputTokens, t.CostUSD =
-			a.NInputTokens, a.NCacheTokens, a.NOutputTokens, a.CostUSD
+		t.Drew = &draw{a.NInputTokens, a.NCacheTokens, a.NOutputTokens, a.CostUSD}
 	}
 	if v := r.VerifierResult; v != nil && len(v.Rewards) > 0 {
 		t.Rewards, t.Rewarded = v.Rewards, true
@@ -442,7 +456,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 // agent output. It is a pure function of a Stage and a trial precisely so that
 // the rules can be read in one place and tested without Docker.
 func classify(s Stage, t trial) Result {
-	r := Result{Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir}
+	r := Result{Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir, drew: t.Drew}
 	gated := s.Gate.image != ""
 	switch {
 	// Rule 1: cancelled from outside the run. Checked first, ahead of every

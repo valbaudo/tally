@@ -326,6 +326,31 @@ func TestScopeRunThreadsAttemptIdentityIntoResult(t *testing.T) {
 	}
 }
 
+// dispatchAttempt writes a receipt for every dispatch, not just a passing
+// one: report.go's whole account of a run depends on that file existing
+// before Main ever calls writeReport.
+func TestScopeRunWritesAReceipt(t *testing.T) {
+	f := &fake{script: []State{Passed}}
+	r, _ := testRun(t, f)
+	s := r.root(Dispatching(1, time.Minute))
+	got := s.Run(okStage)
+
+	b, err := os.ReadFile(filepath.Join(r.dir, "attempts", fsSafe(okStage.ID), "1", "receipt.json"))
+	if err != nil {
+		t.Fatalf("receipt.json: %v", err)
+	}
+	var rec receipt
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatalf("receipt.json: %v", err)
+	}
+	if rec.State != got.State {
+		t.Errorf("receipt state = %q, want the Result's own %q", rec.State, got.State)
+	}
+	if rec.Gate != okStage.Gate.kind() {
+		t.Errorf("receipt gate = %q, want the stage's own %q", rec.Gate, okStage.Gate.kind())
+	}
+}
+
 // Decision 5: Actuate calls the closure only on Passed, and says why not
 // otherwise — never silently.
 func TestActuateFiresOnlyOnPassed(t *testing.T) {
