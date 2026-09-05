@@ -169,7 +169,10 @@ func VDH(run *Scope) State {
 		// the last round happened to hold. So an incomplete round changes
 		// nothing, counts as neither dry nor progress, and says so.
 		found := vdhSurviving(hunts)
-		observed = observed || len(found) > 0
+		// Observed asks whether anything was learned, which is not the same as
+		// whether anything SURVIVED: a round whose hunts all voted Rejected
+		// learned something and found nothing.
+		observed = observed || anyDecided(hunts)
 		if len(found) < len(vdhClasses) {
 			run.Record(fmt.Sprintf("round-%d-incomplete", round), fmt.Sprintf("only %d of %d hunt children reached a verdict; corpus unchanged and the round counts as neither dry nor progress", len(found), len(vdhClasses)))
 			continue

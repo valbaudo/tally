@@ -108,6 +108,32 @@ type Gate struct {
 
 // SoundGate is a gate whose passed verdict is a claim about the world. It is
 // the only kind of gate a stage can reach Passed through.
+// Decided reports whether this outcome came from the work rather than from a
+// failure to run it: a gate voted (Passed/Rejected), or a stage that has no
+// sound gate completed (Unverified).
+//
+// It is deliberately the ONLY definition of that question in the package.
+// Every earlier pass of this prototype re-derived it inline at each call site
+// — "v != InfraError" here, "len(found) > 0" there, "State == Unverified"
+// somewhere else — and each pass fixed one site and missed another, because
+// local reasoning at N sites reliably produces N-1 correct sites. Exhausted,
+// InfraError and Cancelled are all "dawn never obtained a verdict", and any
+// site that wants to know whether anything was learned must call this.
+func (s State) Decided() bool {
+	return s == Passed || s == Rejected || s == Unverified
+}
+
+// anyDecided reports whether any child of a fan produced an outcome from the
+// work. Unexported: it is a loop over State.Decided, not surface.
+func anyDecided(rs []Result) bool {
+	for _, r := range rs {
+		if r.State.Decided() {
+			return true
+		}
+	}
+	return false
+}
+
 func SoundGate(img Image) Gate { return Gate{image: img} }
 
 // FormatOnlyGate is a gate that can check shape but establish nothing. dawn

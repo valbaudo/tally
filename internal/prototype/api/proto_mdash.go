@@ -71,6 +71,21 @@ const mdashAudit = 3
 // of clock. One constant, read at both sites.
 const mdashProveClock = 20 * time.Minute
 
+// mdashProveWidth is the prove fan's width, named because the scope clock below
+// is derived from it: the two cannot drift apart if they are the same symbol.
+const mdashProveWidth = 24
+
+// mdashProveScopeClock is the wall clock of a scope that runs one 24-wide
+// prove fan at mdashProveClock each.
+//
+// It is derived, not chosen. dawn admits branches against ITS concurrency, not
+// the author's, so the honest serial floor is every branch running one after
+// another: 24 x 20m = 8h. A 3h scope silently made branch 9 onward
+// unreachable, and those branches return Exhausted — which now feeds the very
+// guards that ask whether the oracle voted. cybergym and vdh both do this
+// arithmetic in source; this is mdash catching up.
+const mdashProveScopeClock = mdashProveWidth * mdashProveClock
+
 // MDASH returns Unverified — the run's product is a rate in the run record and
 // whatever findings the prove fan actuated, never a verdict of its own — but
 // only when at least one gate anywhere ran and wrote something dawn could
@@ -102,7 +117,7 @@ func MDASH(run *Scope) State {
 		// and merely finishes well inside it.
 		scope := run.Scope(string(env), Lease{
 			Attempts:         80,
-			WallClock:        3 * time.Hour,
+			WallClock:        mdashProveScopeClock,
 			AttemptWallClock: mdashProveClock,
 		})
 		branches := scope.Fan(2, func(i int) Stage {
@@ -122,10 +137,13 @@ func MDASH(run *Scope) State {
 		// dawn parses no CLI output, so the router's answer can only travel as
 		// a number its gate wrote. A missing metric means no claim came back;
 		// the oracle then decides instead of the router.
+		// A router that voted counts as observed whether or not it managed to
+		// write a claim: State.Decided is the single definition of "this came
+		// from the work", and a gate that ran but produced no metric still ran.
+		observed = observed || anyDecided(branches)
 		a, aok := branches[0].Metric("exploitable")
 		b, bok := branches[1].Metric("exploitable")
 		if aok && bok {
-			observed = true
 			claimed++
 			if a == b {
 				agreed = append(agreed, agreement{env, a})
@@ -142,7 +160,7 @@ func MDASH(run *Scope) State {
 			return Cancelled
 		}
 		run.Record("oracle-route-"+string(env), v)
-		observed = observed || v != InfraError
+		observed = observed || v.Decided()
 	}
 
 	// A proof is one-sided: it can contradict an agreement that said "not
@@ -169,23 +187,28 @@ func MDASH(run *Scope) State {
 	if len(sample) > mdashAudit {
 		sample = sample[:mdashAudit]
 	}
-	wrong, audited := 0, 0
+	// dispatched counts audits ATTEMPTED; audited counts audits in which the
+	// oracle actually voted. They differ whenever a fan times out, and the
+	// early-stop message must quote the first — saying "0 of 3" after burning
+	// two full prove scopes denies work that happened.
+	wrong, audited, dispatched := 0, 0, 0
 	for _, g := range sample {
 		if !run.More() {
-			run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements", audited, len(sample)))
+			run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements dispatched; %d of those reached a verdict", dispatched, len(sample), audited))
 			break
 		}
 		scope := run.Scope("audit-"+string(g.env), Lease{
 			Attempts:         80,
-			WallClock:        3 * time.Hour,
+			WallClock:        mdashProveScopeClock,
 			AttemptWallClock: mdashProveClock,
 		})
+		dispatched++
 		v := mdashProve(run, scope, g.env, "audit")
 		if v == Cancelled {
 			return Cancelled
 		}
 		run.Record("oracle-audit-"+string(g.env), v)
-		observed = observed || v != InfraError
+		observed = observed || v.Decided()
 		// An agreement the oracle never tested is not an agreement the oracle
 		// failed to contradict. Counting it would publish the strongest
 		// possible claim about the router out of a fan that never voted, so
@@ -250,7 +273,7 @@ func MDASH(run *Scope) State {
 // phases and, worse, across the four instances, whose env digests are the only
 // other thing in that hash and which a run may pin identically.
 func mdashProve(run *Scope, scope *Scope, env Image, phase string) State {
-	branches := scope.Fan(24, func(i int) Stage {
+	branches := scope.Fan(mdashProveWidth, func(i int) Stage {
 		return Stage{
 			ID:     fmt.Sprintf("%s-%s-prove-%d", phase, env, i),
 			Agent:  ClaudeCode,
