@@ -16,7 +16,7 @@ import (
 //
 // Drive it with:
 //
-//	Main("mdash", Lease{Attempts: 560, WallClock: 24 * time.Hour}, MDASH)
+//	Main("mdash", Lease{Attempts: 560, WallClock: mdashRootClock}, MDASH)
 //
 // Root: exactly what the nested scopes can draw — four route scopes and up to
 // three audit scopes, 80 apiece. Nested scopes draw FROM the root, so anything
@@ -86,6 +86,16 @@ const mdashProveWidth = 24
 // arithmetic in source; this is mdash catching up.
 const mdashProveScopeClock = mdashProveWidth * mdashProveClock
 
+// mdashRouteScopeClock covers the SAME scope's 2-wide brief fan as well: a
+// route scope dispatches 2 briefs and then, on disagreement, 24 proves. The
+// audit scope runs the prove fan alone, so it uses mdashProveScopeClock.
+const mdashRouteScopeClock = (2 + mdashProveWidth) * mdashProveClock
+
+// mdashRootClock is what the nested scopes can actually draw, serially: one
+// route scope per instance plus mdashAudit audit scopes. A root clocked below
+// this makes its own later scopes unreachable — the same defect one level up.
+const mdashRootClock = 4*mdashRouteScopeClock + mdashAudit*mdashProveScopeClock
+
 // MDASH returns Unverified — the run's product is a rate in the run record and
 // whatever findings the prove fan actuated, never a verdict of its own — but
 // only when at least one gate anywhere ran and wrote something dawn could
@@ -117,7 +127,7 @@ func MDASH(run *Scope) State {
 		// and merely finishes well inside it.
 		scope := run.Scope(string(env), Lease{
 			Attempts:         80,
-			WallClock:        mdashProveScopeClock,
+			WallClock:        mdashRouteScopeClock,
 			AttemptWallClock: mdashProveClock,
 		})
 		branches := scope.Fan(2, func(i int) Stage {

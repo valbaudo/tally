@@ -16,7 +16,7 @@ import (
 //
 // Drive it with:
 //
-//	Main("vdh", Lease{Attempts: vdhAttempts, WallClock: 14 * time.Hour, AttemptWallClock: 30 * time.Minute}, VDH)
+//	Main("vdh", Lease{Attempts: vdhAttempts, WallClock: vdhRootClock, AttemptWallClock: vdhAttemptClock}, VDH)
 const (
 	vdhEnv  Image = "dawn-vdh-env@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 	vdhGate Image = "dawn-vdh-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -52,6 +52,17 @@ const (
 	// agent, not a bound.) Every incomplete round advances nothing while still
 	// costing a round, so six is that floor plus slack for three.
 	vdhRounds = 6
+
+	// Clocks, on the serial-floor model cybergym and pr-ci already use: a
+	// scope's clock must cover every dispatch running one after another,
+	// because dawn admits against ITS concurrency, not the author's. A scope
+	// clocked below its floor makes its own later attempts unreachable, and
+	// they return Exhausted — which then feeds the guards that ask whether a
+	// gate voted. A 2h round against vdhRoundAttempts x 30m did exactly that.
+	vdhAttemptClock = 30 * time.Minute
+	vdhRoundClock   = time.Duration(vdhRoundAttempts) * vdhAttemptClock
+	vdhReconClock   = vdhAttemptClock
+	vdhRootClock    = vdhReconClock + time.Duration(vdhRounds)*vdhRoundClock
 	// vdhAttempts is the root lease the loop actually needs: recon, one recon
 	// retry, and six fully funded rounds. Nested scopes draw from the root, so
 	// the root has to hold every round's whole lease, headroom included.
@@ -139,8 +150,8 @@ func VDH(run *Scope) State {
 		// validate fan less than its own attempt clock to finish in.
 		rs := run.Scope(fmt.Sprintf("round-%d", round), Lease{
 			Attempts:         vdhRoundAttempts,
-			WallClock:        2 * time.Hour,
-			AttemptWallClock: 30 * time.Minute,
+			WallClock:        vdhRoundClock,
+			AttemptWallClock: vdhAttemptClock,
 		})
 		rounds++
 

@@ -78,11 +78,21 @@ func portMDASH() {
 	// phase, sized for the cheap 2-wide brief fan sharing that scope — let the
 	// PHASE decide whether the fan reached a verdict or ran out of clock.
 	const proveClock = 20 * time.Minute
+	// Serial floor, the same model cybergym and pr-ci already use: a scope's
+	// clock must cover every dispatch running one after another, because dawn
+	// admits against ITS concurrency, not the author's. A scope clocked below
+	// its floor makes its own later attempts unreachable, and they come back
+	// Exhausted — which then feeds the very guards that ask whether a gate
+	// voted.
+	const proveWidth = 24
+	const auditScopeClock = proveWidth * proveClock       // 8h
+	const routeScopeClock = (2 + proveWidth) * proveClock // + the 2-wide brief fan
 
 	// Root: exactly what the nested scopes can draw — two route scopes and up
 	// to two audit scopes, 80 apiece. The root dispatches nothing itself,
 	// hence no AttemptWallClock.
-	Main("mdash", Lease{Attempts: 320, WallClock: 24 * time.Hour}, func(run *Scope) State {
+	// Root clock covers 4 route scopes plus mdashAudit audit scopes, serially.
+	Main("mdash", Lease{Attempts: 320, WallClock: 4*routeScopeClock + 3*auditScopeClock}, func(run *Scope) State {
 		// Returns the oracle's own state: passed (proved), rejected (voted and
 		// found nothing), exhausted (dawn's clock ended the fan before any
 		// branch reached a verdict), cancelled, or infra_error (never voted).
@@ -91,7 +101,7 @@ func portMDASH() {
 		// Stage ids carry phase AND env: attempt_id hashes no scope path, so
 		// "prove-7" is one stage to recovery everywhere it appears.
 		prove := func(scope *Scope, env Image, phase string) State {
-			branches := scope.Fan(24, func(i int) Stage {
+			branches := scope.Fan(proveWidth, func(i int) Stage {
 				return Stage{
 					ID: fmt.Sprintf("%s-%s-prove-%d", phase, env, i), Agent: ClaudeCode, Env: env,
 					Prompt: "Read bob's note as alice.",
@@ -143,7 +153,7 @@ func portMDASH() {
 			}
 			// The prove fan runs in this scope too, so the scope carries the
 			// oracle's clock; the 2-wide brief fan finishes well inside it.
-			scope := run.Scope(string(env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: proveClock})
+			scope := run.Scope(string(env), Lease{Attempts: 80, WallClock: routeScopeClock, AttemptWallClock: proveClock})
 			branches := scope.Fan(2, func(i int) Stage {
 				return Stage{
 					ID: fmt.Sprintf("route-%s-%d", env, i), Agent: ClaudeCode, Env: env,
@@ -156,10 +166,11 @@ func portMDASH() {
 			if cancelled(branches) {
 				return Cancelled
 			}
+			// A router that voted counts whether or not it wrote a claim.
+			observed = observed || anyDecided(branches)
 			a, aok := branches[0].Metric("exploitable")
 			b, bok := branches[1].Metric("exploitable")
 			if aok && bok {
-				observed = true
 				claimed++
 				if a == b {
 					agreed = append(agreed, agreement{env, a})
@@ -171,7 +182,7 @@ func portMDASH() {
 				return Cancelled
 			}
 			run.Record("oracle-route-"+string(env), v)
-			observed = observed || v != InfraError
+			observed = observed || v.Decided()
 		}
 
 		// One-sided oracle: only a "not exploitable" agreement can be shown
@@ -193,19 +204,20 @@ func portMDASH() {
 		if len(sample) > auditCap {
 			sample = sample[:auditCap]
 		}
-		wrong, audited := 0, 0
+		wrong, audited, dispatched := 0, 0, 0
 		for _, g := range sample {
 			if !run.More() {
-				run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements", audited, len(sample)))
+				run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements dispatched; %d of those reached a verdict", dispatched, len(sample), audited))
 				break
 			}
-			scope := run.Scope("audit-"+string(g.env), Lease{Attempts: 80, WallClock: 3 * time.Hour, AttemptWallClock: proveClock})
+			dispatched++
+			scope := run.Scope("audit-"+string(g.env), Lease{Attempts: 80, WallClock: auditScopeClock, AttemptWallClock: proveClock})
 			v := prove(scope, g.env, "audit")
 			if v == Cancelled {
 				return Cancelled
 			}
 			run.Record("oracle-audit-"+string(g.env), v)
-			observed = observed || v != InfraError
+			observed = observed || v.Decided()
 			// An agreement the oracle never tested is not one it failed to
 			// contradict: the denominator is audits performed, and Passed and
 			// Rejected are the only states in which the oracle voted.
@@ -264,7 +276,7 @@ func portVDH() {
 		rounds = 6
 	)
 
-	Main("vdh", Lease{Attempts: 2 + rounds*roundAttempts, WallClock: 14 * time.Hour, AttemptWallClock: 30 * time.Minute}, func(p *Scope) State {
+	Main("vdh", Lease{Attempts: 2 + rounds*roundAttempts, WallClock: 30*time.Minute + time.Duration(rounds*roundAttempts)*30*time.Minute, AttemptWallClock: 30 * time.Minute}, func(p *Scope) State {
 		// One profile drives every hunter and validator, read from the same
 		// variable the caveat quotes.
 		hunter := ClaudeCode
@@ -291,7 +303,7 @@ func portVDH() {
 		// with no gate ever voting are a catastrophe, not a measurement.
 		ran, observed := 0, false
 		for round := 1; round <= rounds && dry < dryStop && p.More(); round++ {
-			rs := p.Scope(fmt.Sprintf("round-%d", round), Lease{Attempts: roundAttempts, WallClock: 2 * time.Hour, AttemptWallClock: 30 * time.Minute})
+			rs := p.Scope(fmt.Sprintf("round-%d", round), Lease{Attempts: roundAttempts, WallClock: time.Duration(roundAttempts) * 30 * time.Minute, AttemptWallClock: 30 * time.Minute})
 			ran++
 			hunts := rs.Fan(len(classes), func(i int) Stage {
 				return Stage{
@@ -310,7 +322,8 @@ func portVDH() {
 			// findings a round earlier, so it would reset dry; total loss
 			// would clobber a real corpus with nothing. Neither is progress.
 			found := surviving(hunts)
-			observed = observed || len(found) > 0
+			// Learned something is not the same as anything survived.
+			observed = observed || anyDecided(hunts)
 			if len(found) < len(classes) {
 				p.Record(fmt.Sprintf("round-%d-incomplete", round), fmt.Sprintf("only %d of %d hunt children reached a verdict; corpus unchanged", len(found), len(classes)))
 				continue
