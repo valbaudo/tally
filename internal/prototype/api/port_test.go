@@ -34,7 +34,7 @@ func portCybergym() {
 	Main("cybergym", Lease{Attempts: 10, WallClock: 3 * time.Hour}, func(run *Scope) State {
 		// Every lease here is work plus headroom: the retry the second attempt
 		// exists to pay for needs a slot AND a clock to run in.
-		study := run.Scope("study", Lease{Attempts: 2, WallClock: 30 * time.Minute, AttemptWallClock: 10 * time.Minute})
+		study := run.Scope("study", Dispatching(2, 10*time.Minute))
 		notes := study.Run(Stage{
 			ID: "study", Agent: ClaudeCode, Env: envImg,
 			Prompt: "Read /app/src/vuln.c and write findings.",
@@ -44,7 +44,7 @@ func portCybergym() {
 			return notes.State
 		}
 
-		pov := run.Scope("pov", Lease{Attempts: 8, WallClock: 2 * time.Hour, AttemptWallClock: 12 * time.Minute})
+		pov := run.Scope("pov", Dispatching(8, 12*time.Minute))
 		stage := Stage{
 			ID: "pov", Agent: ClaudeCode, Env: envImg,
 			Inputs: []Result{notes},
@@ -85,8 +85,9 @@ func portMDASH() {
 	// Exhausted — which then feeds the very guards that ask whether a gate
 	// voted.
 	const proveWidth = 24
-	const auditScopeClock = proveWidth * proveClock       // 8h
-	const routeScopeClock = (2 + proveWidth) * proveClock // + the 2-wide brief fan
+	const scopeAttempts = 2 + proveWidth + 6
+	const auditScopeClock = scopeAttempts * proveClock
+	const routeScopeClock = scopeAttempts * proveClock
 
 	// Root: exactly what the nested scopes can draw — two route scopes and up
 	// to two audit scopes, 80 apiece. The root dispatches nothing itself,
@@ -153,7 +154,7 @@ func portMDASH() {
 			}
 			// The prove fan runs in this scope too, so the scope carries the
 			// oracle's clock; the 2-wide brief fan finishes well inside it.
-			scope := run.Scope(string(env), Lease{Attempts: 80, WallClock: routeScopeClock, AttemptWallClock: proveClock})
+			scope := run.Scope(string(env), Dispatching(scopeAttempts, proveClock))
 			branches := scope.Fan(2, func(i int) Stage {
 				return Stage{
 					ID: fmt.Sprintf("route-%s-%d", env, i), Agent: ClaudeCode, Env: env,
@@ -211,7 +212,7 @@ func portMDASH() {
 				break
 			}
 			dispatched++
-			scope := run.Scope("audit-"+string(g.env), Lease{Attempts: 80, WallClock: auditScopeClock, AttemptWallClock: proveClock})
+			scope := run.Scope("audit-"+string(g.env), Dispatching(scopeAttempts, proveClock))
 			v := prove(scope, g.env, "audit")
 			if v == Cancelled {
 				return Cancelled
@@ -276,7 +277,7 @@ func portVDH() {
 		rounds = 6
 	)
 
-	Main("vdh", Lease{Attempts: 2 + rounds*roundAttempts, WallClock: 30*time.Minute + time.Duration(rounds*roundAttempts)*30*time.Minute, AttemptWallClock: 30 * time.Minute}, func(p *Scope) State {
+	Main("vdh", Dispatching(2+rounds*roundAttempts, 30*time.Minute), func(p *Scope) State {
 		// One profile drives every hunter and validator, read from the same
 		// variable the caveat quotes.
 		hunter := ClaudeCode
@@ -303,7 +304,7 @@ func portVDH() {
 		// with no gate ever voting are a catastrophe, not a measurement.
 		ran, observed := 0, false
 		for round := 1; round <= rounds && dry < dryStop && p.More(); round++ {
-			rs := p.Scope(fmt.Sprintf("round-%d", round), Lease{Attempts: roundAttempts, WallClock: time.Duration(roundAttempts) * 30 * time.Minute, AttemptWallClock: 30 * time.Minute})
+			rs := p.Scope(fmt.Sprintf("round-%d", round), Dispatching(roundAttempts, 30*time.Minute))
 			ran++
 			hunts := rs.Fan(len(classes), func(i int) Stage {
 				return Stage{
@@ -412,7 +413,7 @@ func corpus(rs []Result) string {
 // pr-ci: one agent stage, one sound gate, one actuator that opens the PR from
 // the gate's own bytes.
 func portPRCI() {
-	Main("pr-ci", Lease{Attempts: 2, WallClock: 45 * time.Minute, AttemptWallClock: 20 * time.Minute}, func(run *Scope) State {
+	Main("pr-ci", Dispatching(2, 20*time.Minute), func(run *Scope) State {
 		fix := run.Run(Stage{
 			ID: "fix", Agent: ClaudeCode, Env: envImg,
 			Prompt: "Fix the red CI. Hand back a unified diff and nothing else.",

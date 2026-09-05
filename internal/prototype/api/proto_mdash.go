@@ -75,26 +75,21 @@ const mdashProveClock = 20 * time.Minute
 // is derived from it: the two cannot drift apart if they are the same symbol.
 const mdashProveWidth = 24
 
-// mdashProveScopeClock is the wall clock of a scope that runs one 24-wide
-// prove fan at mdashProveClock each.
-//
-// It is derived, not chosen. dawn admits branches against ITS concurrency, not
-// the author's, so the honest serial floor is every branch running one after
-// another: 24 x 20m = 8h. A 3h scope silently made branch 9 onward
-// unreachable, and those branches return Exhausted — which now feeds the very
-// guards that ask whether the oracle voted. cybergym and vdh both do this
-// arithmetic in source; this is mdash catching up.
-const mdashProveScopeClock = mdashProveWidth * mdashProveClock
+// mdashScopeAttempts: 2 briefs + 24 proves, plus headroom for infra retries,
+// which a lease bounds too.
+const mdashScopeAttempts = 2 + mdashProveWidth + 6
 
-// mdashRouteScopeClock covers the SAME scope's 2-wide brief fan as well: a
-// route scope dispatches 2 briefs and then, on disagreement, 24 proves. The
-// audit scope runs the prove fan alone, so it uses mdashProveScopeClock.
-const mdashRouteScopeClock = (2 + mdashProveWidth) * mdashProveClock
+// mdashScopeClock is the wall clock of either scope. Both the route scope
+// (2 briefs then, on disagreement, the prove fan) and the audit scope (the
+// prove fan alone) lease mdashScopeAttempts at mdashProveClock, so their
+// serial floor is the same number and one name says so. Dispatching derives
+// this per scope; the constant exists only for the root's arithmetic below.
+const mdashScopeClock = mdashScopeAttempts * mdashProveClock
 
 // mdashRootClock is what the nested scopes can actually draw, serially: one
 // route scope per instance plus mdashAudit audit scopes. A root clocked below
 // this makes its own later scopes unreachable — the same defect one level up.
-const mdashRootClock = 4*mdashRouteScopeClock + mdashAudit*mdashProveScopeClock
+var mdashRootClock = time.Duration(len(mdashInstances)+mdashAudit) * mdashScopeClock
 
 // MDASH returns Unverified — the run's product is a rate in the run record and
 // whatever findings the prove fan actuated, never a verdict of its own — but
@@ -125,11 +120,7 @@ func MDASH(run *Scope) State {
 		// The prove fan runs in this scope too, so the scope carries the
 		// oracle's clock; the 2-wide brief fan below is far cheaper than that
 		// and merely finishes well inside it.
-		scope := run.Scope(string(env), Lease{
-			Attempts:         80,
-			WallClock:        mdashRouteScopeClock,
-			AttemptWallClock: mdashProveClock,
-		})
+		scope := run.Scope(string(env), Dispatching(mdashScopeAttempts, mdashProveClock))
 		branches := scope.Fan(2, func(i int) Stage {
 			return Stage{
 				ID:     fmt.Sprintf("route-%s-%d", env, i),
@@ -207,11 +198,7 @@ func MDASH(run *Scope) State {
 			run.Record("audit-stopped-early", fmt.Sprintf("root lease spent after %d of %d sampled agreements dispatched; %d of those reached a verdict", dispatched, len(sample), audited))
 			break
 		}
-		scope := run.Scope("audit-"+string(g.env), Lease{
-			Attempts:         80,
-			WallClock:        mdashProveScopeClock,
-			AttemptWallClock: mdashProveClock,
-		})
+		scope := run.Scope("audit-"+string(g.env), Dispatching(mdashScopeAttempts, mdashProveClock))
 		dispatched++
 		v := mdashProve(run, scope, g.env, "audit")
 		if v == Cancelled {

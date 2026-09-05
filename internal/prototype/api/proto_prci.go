@@ -14,7 +14,7 @@ package api
 //
 // Drive it with:
 //
-//	Main("pr-ci", Lease{Attempts: 2, WallClock: 45 * time.Minute, AttemptWallClock: 20 * time.Minute}, PRCI)
+//	Main("pr-ci", Dispatching(2, 20*time.Minute), PRCI)
 const (
 	prciEnv  Image = "dawn-pr-ci-env@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 	prciGate Image = "dawn-pr-ci-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000"

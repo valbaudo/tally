@@ -123,6 +123,26 @@ func (s State) Decided() bool {
 	return s == Passed || s == Rejected || s == Unverified
 }
 
+// Dispatching builds the lease of a scope that dispatches attempts itself.
+//
+// Its WallClock is DERIVED — exactly attempts x perAttempt, the serial floor —
+// rather than chosen, because dawn admits against ITS concurrency and not the
+// author's. A scope clocked below that floor makes its own later attempts
+// unreachable; they return Exhausted, which then feeds the guards that ask
+// whether a gate voted. Hand-written clocks got this wrong at three levels of
+// two protocols across five passes, so the field is no longer hand-written:
+// the invariant holds by construction instead of by review.
+//
+// A scope that only opens sub-scopes dispatches nothing and declares a plain
+// Lease with no AttemptWallClock.
+func Dispatching(attempts int, perAttempt time.Duration) Lease {
+	return Lease{
+		Attempts:         attempts,
+		WallClock:        time.Duration(attempts) * perAttempt,
+		AttemptWallClock: perAttempt,
+	}
+}
+
 // anyDecided reports whether any child of a fan produced an outcome from the
 // work. Unexported: it is a loop over State.Decided, not surface.
 func anyDecided(rs []Result) bool {

@@ -53,11 +53,7 @@ func CyberGym(run *Scope) State {
 	// One dispatch of work; the second attempt exists only to pay for an
 	// infra_error retry, so the clock has to hold two attempts AND the backoff
 	// between them: 2 x 10m of work under 30m.
-	study := run.Scope("study", Lease{
-		Attempts:         2,
-		WallClock:        30 * time.Minute,
-		AttemptWallClock: 10 * time.Minute,
-	})
+	study := run.Scope("study", Dispatching(2, 10*time.Minute))
 	notes := study.Run(Stage{
 		ID:     "study",
 		Agent:  ClaudeCode,
@@ -77,11 +73,7 @@ func CyberGym(run *Scope) State {
 	// counted. 2h covers all eight plus backoff. The Attempts counter still
 	// funds tries and flakes from one number — the friction TRACE.md names —
 	// so a flake here costs a try, loudly, rather than silently.
-	pov := run.Scope("pov", Lease{
-		Attempts:         8,
-		WallClock:        2 * time.Hour,
-		AttemptWallClock: 12 * time.Minute,
-	})
+	pov := run.Scope("pov", Dispatching(8, 12*time.Minute))
 	stage := Stage{
 		ID:     "pov",
 		Agent:  ClaudeCode,
