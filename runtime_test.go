@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -289,8 +290,13 @@ func TestRecordWritesEachNameOnce(t *testing.T) {
 	if got["caveat"] != "no sound oracle for round 1" || got["round_2/score"] != 0.75 {
 		t.Fatalf("record.json = %v", got)
 	}
+
+	// Re-recording a name with the value it already holds is what a resumed
+	// pass recomputing the same fact looks like: a no-op, not a bug.
+	s.Record("caveat", "no sound oracle for round 1")
+
 	if msg := caughtBug(t, func() { s.Record("caveat", "something else") }); msg == "" {
-		t.Fatal("recording a name twice did not unwind")
+		t.Fatal("recording a name twice with a different value did not unwind")
 	}
 }
 
@@ -753,5 +759,74 @@ func TestResumeDoesNotRefireActuators(t *testing.T) {
 	}
 	if got != "branch-1" {
 		t.Errorf("resume returned %q, want the recorded identifier %q", got, "branch-1")
+	}
+}
+
+// A resumed run's record starts from what the prior invocation wrote, not
+// empty — see loadRecord. A value never re-recorded this pass must still
+// survive the resumed run's own flush, and a value re-recorded with the
+// value it already holds — including a struct, which is what normalisation
+// is for — must not bug.
+func TestResumeKeepsTheRecord(t *testing.T) {
+	dir := t.TempDir()
+
+	first := newRun(dir, context.Background(), nil)
+	s1 := first.root(Lease{Attempts: 1, WallClock: time.Hour})
+	manifest := Manifest{{Name: "out", Digest: "sha256:abc"}}
+	s1.Record("caveat", "x")
+	s1.Record("reward", 1.0)
+	s1.Record("manifest", manifest)
+
+	// Second invocation over the SAME run directory, as DAWN_RESUME does.
+	second := newRun(dir, context.Background(), nil)
+	s2 := second.root(Lease{Attempts: 1, WallClock: time.Hour})
+	s2.Record("caveat", "x")        // identical value: must not bug
+	s2.Record("manifest", manifest) // identical struct, via normalisation: must not bug
+	// reward is deliberately never re-recorded this pass.
+	s2.Record("late", true) // forces a flush of the resumed record
+
+	b, err := os.ReadFile(filepath.Join(dir, "record.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["caveat"] != "x" {
+		t.Errorf("caveat = %v, want %q", got["caveat"], "x")
+	}
+	if got["reward"] != 1.0 {
+		t.Errorf("reward = %v, want 1 — resume dropped a value it never re-recorded", got["reward"])
+	}
+	wantManifest := []any{map[string]any{"Name": "out", "Digest": "sha256:abc"}}
+	if !reflect.DeepEqual(got["manifest"], wantManifest) {
+		t.Errorf("manifest = %#v, want %#v", got["manifest"], wantManifest)
+	}
+	if got["late"] != true {
+		t.Errorf("late = %v, want true", got["late"])
+	}
+}
+
+// state and protocol_bug are the CURRENT invocation's verdict to write, never
+// the previous invocation's to repeat — see loadRecord. Left in the loaded
+// record, a resumed run that crashes before writing its own would flush a
+// stale "passed" or a protocol_bug a later fix already resolved.
+func TestResumeDropsDawnsOwnVerdict(t *testing.T) {
+	dir := t.TempDir()
+
+	first := newRun(dir, context.Background(), nil)
+	first.mu.Lock()
+	first.values["state"] = string(Passed)
+	first.values["protocol_bug"] = "scope root recorded \"x\" twice"
+	first.flush()
+	first.mu.Unlock()
+
+	second := newRun(dir, context.Background(), nil)
+	if _, ok := second.values["state"]; ok {
+		t.Error("resumed run inherited a previous invocation's state")
+	}
+	if _, ok := second.values["protocol_bug"]; ok {
+		t.Error("resumed run inherited a previous invocation's protocol_bug")
 	}
 }

@@ -96,16 +96,26 @@ func protocol(run *dawn.Scope) dawn.State {
 
 // actuate pushes the GATE's own fix.patch — never the agent's raw declared
 // output, which the gate may have filtered — to a branch in a local bare git
-// repo standing in for a real remote. Two ordered sub-steps, each deduped by
-// dawn against this run's own record: a retried Actuate closure within the
-// same run pushes the same branch and tag at most once.
+// repo standing in for a real remote. Three ordered sub-steps, each deduped
+// by dawn against this run's own record: a retried Actuate closure within the
+// same run provisions, pushes and tags at most once each.
+//
+// Provisioning the remote is itself a Step, which a real actuator's never
+// would be: a real remote is a fixed address the actuator is handed, not one
+// it creates. This toy actuator genuinely creates its remote, so skipping the
+// Step here would mean a resumed run creates a SECOND, empty remote and
+// records that one instead of the one Step already pushed the branch to —
+// one Step more than the real thing, and honest about why.
 func actuate(run *dawn.Scope, fix dawn.Result) error {
 	return fix.Actuate(func(a *dawn.Actuation) error {
-		remote, err := os.MkdirTemp("", "dawn-prci-remote-")
+		remote, err := a.Step("remote", func() (string, error) {
+			d, err := os.MkdirTemp("", "dawn-prci-remote-")
+			if err != nil {
+				return "", err
+			}
+			return d, runGit("", "init", "--bare", "-q", d)
+		})
 		if err != nil {
-			return err
-		}
-		if err := runGit("", "init", "--bare", "-q", remote); err != nil {
 			return err
 		}
 		run.Record("remote", remote)
@@ -134,11 +144,14 @@ func actuate(run *dawn.Scope, fix dawn.Result) error {
 			return err
 		}
 
-		if _, err := a.Step("push", func() (string, error) {
+		pushed, err := a.Step("push", func() (string, error) {
 			return branch, runGit(work, "push", "-q", remote, branch)
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
+		run.Record("branch", pushed)
+
 		tag := "verified/" + a.Key
 		_, err = a.Step("tag", func() (string, error) {
 			if err := runGit(work, "tag", tag); err != nil {

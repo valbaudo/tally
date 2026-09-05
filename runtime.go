@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -42,6 +43,14 @@ func (r Result) Metric(name string) (value float64, ok bool) {
 // nothing and reports why, and it never calls fn at all. An error fn returns
 // (or a Published lookup that found nothing) fails the actuation but never
 // touches r.State: the verdict already stands, only the effect failed.
+//
+// fn may run more than once per run — a retry, a resume — so everything it
+// builds is scratch except a.Key, Published, and what Step returns; record
+// only those, and record them AFTER Step returns, not inside fn. Recording
+// inside fn is the trap: a crash between the effect landing and Step's own
+// flush re-runs fn on resume, the remote hands back a second identifier for
+// the same effect, and the loaded record still holds the first — a bug() on
+// resume for a pattern that looked fine every time it was actually tested.
 //
 // dawn deduplicates its own retries against its own durable record, keyed by
 // the attempt_id — see Actuation.Step. That record is PER-RUN, held in the
@@ -747,21 +756,55 @@ func (s *Scope) Fan(n int, mk func(i int) Stage) []Result {
 // caveats a protocol with no sound oracle is obliged to state, and the external
 // effects that failed after a gate had already voted yes.
 //
-// A name is written ONCE per run. Writing the same name twice is a protocol
-// bug: the second write is not a second value, and a reader of the run cannot
-// tell one caveat from two. Qualify every name by whatever varies around the
-// call — round, phase, instance, branch.
+// A name is written once per run — recording it again with an identical
+// value is a no-op, not a second write, because that is exactly what a
+// resumed pass looks like when it recomputes a fact it already recorded
+// before crashing: newRun loaded the same record, and the pass is not
+// wrong to reach the same answer twice. "Identical" compares values after a
+// JSON round-trip, since a Go struct and the loaded map[string]any it
+// decodes into on the next resume are never DeepEqual as raw values even
+// when they carry the same data.
+//
+// Recording a name again with a DIFFERENT value is a protocol bug, whether
+// that is the same pass writing it twice or a resume recording something
+// the pass it resumed did not: a reader of the run cannot tell which of two
+// answers is true. Qualify every name by whatever varies around the call —
+// round, phase, instance, branch.
 //
 // For a protocol whose stages cannot reach Passed there is no actuator at all,
 // so the run record is not one product among several: it is the whole of it.
 func (s *Scope) Record(name string, value any) {
+	norm := normalizeJSON(value)
 	s.run.mu.Lock()
 	defer s.run.mu.Unlock()
-	if _, dup := s.run.values[name]; dup {
-		bug("scope %s recorded %q twice: qualify the name by whatever varies around the call", s.id, name)
+	if prior, dup := s.run.values[name]; dup {
+		if reflect.DeepEqual(prior, norm) {
+			return
+		}
+		bug("scope %s recorded %q twice with different values: qualify the name by whatever varies around the call, or a resume recorded something the pass it resumed did not", s.id, name)
 	}
-	s.run.values[name] = value
+	s.run.values[name] = norm
 	s.run.flush()
+}
+
+// normalizeJSON round-trips value through JSON so two representations of the
+// same data — a freshly-built struct and the map[string]any that decoding
+// record.json produced from an earlier flush of that same struct — compare
+// and store identically. Without this, Record's identical-value check never
+// fires for anything but primitives: a Manifest built this pass and the
+// []any{map[string]any{...}} form loaded from a previous pass's record.json
+// are never reflect.DeepEqual as raw values, so every resumed run would bug
+// on its first re-recorded struct.
+func normalizeJSON(value any) any {
+	b, err := json.Marshal(value)
+	if err != nil {
+		panic(fmt.Sprintf("dawn: run record: %v", err))
+	}
+	var norm any
+	if err := json.Unmarshal(b, &norm); err != nil {
+		panic(fmt.Sprintf("dawn: run record: %v", err))
+	}
+	return norm
 }
 
 // flush rewrites the run record. Held under run.mu. A run record dawn cannot
@@ -807,6 +850,7 @@ func newRun(dir string, ctx context.Context, d runner) *run {
 	r := &run{dir: dir, ctx: ctx, dispatch: d, sleep: time.Sleep,
 		values: map[string]any{}, actuations: map[string]string{}}
 	r.loadActuations()
+	r.loadRecord()
 	return r
 }
 
@@ -821,6 +865,40 @@ func (r *run) loadActuations() {
 	if err := json.Unmarshal(b, &r.actuations); err != nil {
 		panic(fmt.Sprintf("dawn: actuation record corrupt at %s: %v — refusing to resume, because an empty record re-fires effects that already happened", r.dir, err))
 	}
+}
+
+// loadRecord reads back record.json a previous invocation of this same run
+// directory wrote — same reason as loadActuations, same shape of bug without
+// it. newRun used to start r.values empty on every invocation, so a resumed
+// run's first flush rewrote record.json from only what THAT invocation had
+// recorded so far, discarding everything an earlier invocation wrote before
+// it crashed or was resumed. Measured: pr-ci's actuator re-provisioned a
+// remote on resume (a bug of its own, fixed alongside this one) and recorded
+// its fresh path; with r.values loaded here, that becomes a bug() — Record
+// sees a name already holding a DIFFERENT value — instead of a silent lie.
+// Without the load, it was a silent lie: the resumed record.json and
+// report.md named a remote with 0 branches and 0 tags, because dawn had no
+// memory of the one Step had actually pushed to.
+//
+// state and protocol_bug are deleted immediately after loading: they are
+// THIS invocation's verdict to write, never the previous invocation's to
+// repeat. Left in, a resumed run that crashes before reaching Main's own
+// write would flush "state": "passed" from the attempt before on every
+// intermediate Record, and a protocol bug fixed and then resumed would carry
+// a stale protocol_bug forever.
+//
+// A missing file is the normal case for a fresh run, not an error. A corrupt
+// one panics, mirroring loadActuations and for the same reason: rewriting
+// record.json from an empty map is exactly the truncation this fixes.
+func (r *run) loadRecord() {
+	switch err := readJSON(filepath.Join(r.dir, "record.json"), &r.values); {
+	case errors.Is(err, os.ErrNotExist):
+		return
+	case err != nil:
+		panic(fmt.Sprintf("dawn: run record unreadable at %s: %v", r.dir, err))
+	}
+	delete(r.values, "state")
+	delete(r.values, "protocol_bug")
 }
 
 func (r *run) flushActuations() {
