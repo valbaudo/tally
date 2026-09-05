@@ -652,6 +652,50 @@ func TestResumeRefusesEvidenceThatIsNotThisAttempts(t *testing.T) {
 	}
 }
 
+// Model and effort are deliberately NOT part of contentDigest (dawn.go's own
+// comment says why), so two stages that differ ONLY in Agent.model land on
+// the identical attemptID — the rec.ID check above cannot catch a profile
+// that changed since the evidence was produced. resumeResult's model/effort
+// case is the guard that does, mirroring
+// TestResumeRefusesEvidenceThatIsNotThisAttempts's stage-changed case.
+func TestResumeRefusesEvidenceFromADifferentModel(t *testing.T) {
+	a := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Gate: NoGate("test"), Prompt: "do it"}
+	b := a
+	b.Agent = Agent{name: ClaudeCode.name, image: ClaudeCode.image, model: "some-other-model"}
+	if attemptID(a, 1) != attemptID(b, 1) {
+		t.Fatal("test setup broken: a and b must share an attemptID for this to exercise the model/effort guard")
+	}
+
+	f := &fake{script: []State{Passed}} // wrong on purpose: must never be reached
+	r, _ := testRun(t, f)
+	s := r.root(Dispatching(1, time.Minute))
+
+	evidence := filepath.Join(r.dir, "attempts", "s", "1")
+	writeCompletedTrial(t, evidence)
+	writeReceipt(evidence, a, 1, Result{State: Unverified})
+	before, err := os.ReadFile(filepath.Join(evidence, "receipt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if msg := caughtBug(t, func() { s.Run(b) }); msg == "" {
+		t.Fatal("resuming stage b (different model) over stage a's receipted evidence did not unwind")
+	}
+	if f.calls != 0 {
+		t.Fatalf("dispatcher called %d times, want 0", f.calls)
+	}
+	if s.used != 0 {
+		t.Fatalf("scope.used = %d, want 0: a refused resume must not spend the lease", s.used)
+	}
+	after, err := os.ReadFile(filepath.Join(evidence, "receipt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("receipt.json changed: a refused resume must never overwrite the evidence that shows why")
+	}
+}
+
 // Stage.ID has one grammar, enforced once, at dispatch (stageID, runtime.go).
 // Each of these breaks it differently: a slash (the hazard fsSafe used to
 // paper over by colliding it with a dash), a leading '.' or '-' (fsSafe let

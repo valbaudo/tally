@@ -94,27 +94,45 @@ func (s State) Decided() bool {
 // which bytes are in which image.
 type Image string
 
-// Agent is an agent profile: dawn's knowledge of how to drive one CLI, over a
-// digest-pinned image. It is a fact about that image, never a knob — an author
-// picks a profile and declares nothing else about it, least of all its
-// concurrency, which is a correctness property dawn fixes.
+// Agent is an agent profile: dawn's knowledge of how to drive one CLI — its
+// name, its model and effort, over a digest-pinned image. It is a fact about
+// that image, never a knob — an author picks a profile and declares nothing
+// else about it, least of all its concurrency, which is a correctness
+// property dawn fixes.
 //
-// The name and the CLI image are dawn's own knowledge, so they are unexported:
-// a protocol selects a profile, it never reads one apart. FanOut is the single
-// exception, and only because the per-agent cap is a correctness fact a
-// protocol is obliged to state in its caveats.
+// model and effort are facts for the same reason the image is: leaving
+// either unpinned does not mean the CLI runs with none. Harbor's adapter
+// finds ANTHROPIC_MODEL (or --effort) unset and the CLI resolves it from
+// ambient account state instead, so the identical protocol can silently run
+// a different model tomorrow, on a host whose account state changed under
+// it, with nothing in dawn's own receipt to say so. Pinning both here is
+// what lets the receipt record what dawn told Harbor to run rather than
+// nothing at all — see harborArgs.
+//
+// The name, image, model and effort are dawn's own knowledge, so they are
+// unexported: a protocol selects a profile, it never reads one apart. FanOut
+// is the single exception, and only because the per-agent cap is a
+// correctness fact a protocol is obliged to state in its caveats.
 type Agent struct {
-	name  string
-	image Image
+	name   string
+	image  Image
+	model  string // verbatim to `harbor -m`; "" means dawn pins nothing (oracle, nop)
+	effort string // verbatim to `--ak reasoning_effort=`; same rule
 	// FanOut reports whether this profile may run more than one attempt at a
 	// time. Readable so a protocol can say in source that a fan is
 	// single-vendor and its blind spots are therefore correlated.
 	FanOut bool
 }
 
-// The profiles dawn ships. Only ClaudeCode may fan out.
+// The profiles dawn ships. Only ClaudeCode may fan out. ClaudeCode's model is
+// pinned to what every run has actually been doing — measured off Harbor's
+// raw agent logs, since nothing before this recorded it — so the pin is
+// behaviour-neutral. Codex's model stays "": the CLI prints no effective
+// default anywhere dawn can read, and guessing one would be inventing a fact
+// dawn has not measured; dawn will honestly record that it pinned nothing.
+// Neither profile pins an effort yet, for the identical reason.
 var (
-	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: true}
+	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", model: "claude-sonnet-5", FanOut: true}
 	Codex      = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false}
 )
 
@@ -412,7 +430,10 @@ func attemptID(s Stage, attemptNumber int) string {
 // becomes "GateHosts":null — which would silently re-key every dedup and
 // resume record keyed on attemptID, exactly what attemptID's LOUD COMMENT
 // forbids. A LiveGate's hosts are therefore not attempt identity; see
-// LiveGate's own comment for what that means for Stage.ID.
+// LiveGate's own comment for what that means for Stage.ID. Also deliberately
+// NOT Agent.model or Agent.effort, for the same reason: resumeResult enforces
+// both instead, as the sixth field alongside the hash that attemptID's LOUD
+// COMMENT prescribes rather than folding a new ingredient into it.
 func contentDigest(s Stage) string {
 	type content struct {
 		Agent   string

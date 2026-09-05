@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -534,6 +535,27 @@ func TestTaskDirForJoinsTheGeneratedTaskDirName(t *testing.T) {
 	want := "/run/attempts/x/1/dawn"
 	if got != want {
 		t.Fatalf("taskDirFor(%q) = %q, want %q", "/run/attempts/x/1", got, want)
+	}
+}
+
+// harborArgs is the one place dawn tells Harbor what to pin. ClaudeCode's
+// profile carries a model, so its argv must carry -m; a profile with neither
+// model nor effort set (the "nop" test agent, same as Codex today) must carry
+// neither flag — dawn records that it pinned nothing rather than guess.
+func TestHarborArgsSetsModelAndEffortAsFlags(t *testing.T) {
+	pinned := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Gate: NoGate("test")}
+	got := harborArgs(pinned, "/task", "/jobs")
+	if !slices.Contains(got, "-m") || !slices.Contains(got, "claude-sonnet-5") {
+		t.Errorf("harborArgs(ClaudeCode) = %v, want -m claude-sonnet-5", got)
+	}
+
+	unpinned := Stage{ID: "s", Agent: Agent{name: "nop"}, Env: "e@sha256:0", Gate: NoGate("test")}
+	got = harborArgs(unpinned, "/task", "/jobs")
+	if slices.Contains(got, "-m") {
+		t.Errorf("harborArgs(nop) = %v, contains -m: an unpinned profile must set neither flag", got)
+	}
+	if slices.Contains(got, "--ak") {
+		t.Errorf("harborArgs(nop) = %v, contains --ak: an unpinned profile must set neither flag", got)
 	}
 }
 

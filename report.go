@@ -26,6 +26,8 @@ type receipt struct {
 	Attempt int                `json:"attempt"`
 	ID      string             `json:"id"` // attemptID: joins actuations.json
 	Agent   string             `json:"agent"`
+	Model   string             `json:"model,omitempty"`  // verbatim to `harbor -m`; absent means dawn pinned nothing
+	Effort  string             `json:"effort,omitempty"` // verbatim to `--ak reasoning_effort=`; same rule
 	Gate    string             `json:"gate"`             // sound | live | format_only | none
 	Image   Image              `json:"image,omitempty"`  // the gate's image; absent when there is none
 	Reason  string             `json:"reason,omitempty"` // NoGate's mandatory reason, verbatim
@@ -53,6 +55,8 @@ func writeReceipt(evidence string, s Stage, attempt int, r Result) {
 		Attempt: attempt,
 		ID:      attemptID(s, attempt),
 		Agent:   s.Agent.name,
+		Model:   s.Agent.model,
+		Effort:  s.Agent.effort,
 		Gate:    s.Gate.kind(),
 		Image:   s.Gate.image,
 		Reason:  s.Gate.reason,
@@ -171,11 +175,11 @@ func renderStage(b *strings.Builder, rs []receipt) {
 		fmt.Fprintf(b, "## %s — no gate\nreason: %s\n\n", head.Stage, head.Reason)
 	}
 
-	b.WriteString("| attempt | state | metrics | agent | input | cache | output | cost_usd (est.) |\n")
-	b.WriteString("|--:|---|---|---|--:|--:|--:|--:|\n")
+	b.WriteString("| attempt | state | metrics | agent | model | input | cache | output | cost_usd (est.) |\n")
+	b.WriteString("|--:|---|---|---|---|--:|--:|--:|--:|\n")
 	for _, r := range rs {
-		fmt.Fprintf(b, "| %d | %s | %s | %s | %s | %s | %s | %s |\n",
-			r.Attempt, r.State, renderMetrics(r.Metrics), r.Agent,
+		fmt.Fprintf(b, "| %d | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+			r.Attempt, r.State, renderMetrics(r.Metrics), r.Agent, renderModelCell(r.Model, r.Effort),
 			drawCell(r.Drew, func(d *draw) string { return strconv.Itoa(d.InputTokens) }),
 			drawCell(r.Drew, func(d *draw) string { return strconv.Itoa(d.CacheTokens) }),
 			drawCell(r.Drew, func(d *draw) string { return strconv.Itoa(d.OutputTokens) }),
@@ -183,6 +187,22 @@ func renderStage(b *strings.Builder, rs []receipt) {
 		)
 	}
 	b.WriteString("\n")
+}
+
+// renderModelCell renders what dawn told Harbor to run. An empty model
+// renders as "unpinned" — a claim dawn is entitled to make ("I set
+// nothing"), deliberately distinct from drawCell's "unknown" ("nothing was
+// reported to me"). Effort rides in the same cell rather than a column of
+// its own: no shipped profile sets one yet, and a column that would read "—"
+// on every row earns no place in a table this size.
+func renderModelCell(model, effort string) string {
+	if model == "" {
+		return "unpinned"
+	}
+	if effort == "" {
+		return model
+	}
+	return model + " (effort: " + effort + ")"
 }
 
 // drawCell renders one numeric column of a nil Drew as "unknown" — never as
@@ -253,4 +273,9 @@ const notKnown = "## not known\n\n" +
 	"- A live gate's pass also asserts the target was exploitable at that moment:\n" +
 	"  the verdict is not a function of pinned bytes alone and may not reproduce.\n" +
 	"  The hosts listed are where the gate COULD reach, enforced by the container's\n" +
-	"  egress policy — never where it did; dawn observes no traffic.\n"
+	"  egress policy — never where it did; dawn observes no traffic.\n" +
+	"- `model` and `effort` are what dawn told Harbor to run (`harbor run -m`,\n" +
+	"  `--ak reasoning_effort=`), which Harbor exports into the container as\n" +
+	"  `ANTHROPIC_MODEL` / `--effort`. dawn reads no agent output, so it does not\n" +
+	"  verify the CLI obeyed; the CLI's own claim lives in Harbor's own\n" +
+	"  `agent/trajectory.json` (`agent.model_name`) beside each attempt.\n"

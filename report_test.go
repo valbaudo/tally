@@ -119,6 +119,33 @@ func TestReportRendersLiveGateHostsAndCaveat(t *testing.T) {
 	}
 }
 
+// A receipt carrying a model renders it; one carrying none renders
+// "unpinned" — a claim dawn is entitled to make ("I set nothing"), not
+// drawCell's "unknown" ("nothing was reported to me").
+func TestReportRendersModelOrUnpinned(t *testing.T) {
+	dir := t.TempDir()
+	withModel := Stage{ID: "a", Agent: ClaudeCode, Gate: NoGate("test")}
+	withoutModel := Stage{ID: "b", Agent: Codex, Gate: NoGate("test")}
+	for _, s := range []Stage{withModel, withoutModel} {
+		evidence := filepath.Join(dir, "attempts", s.ID, "1")
+		if err := os.MkdirAll(evidence, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeReceipt(evidence, s, 1, Result{State: Unverified})
+	}
+
+	got, err := report(dir)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if !strings.Contains(got, "claude-sonnet-5") {
+		t.Errorf("report does not render the pinned model:\n%s", got)
+	}
+	if !strings.Contains(got, "unpinned") {
+		t.Errorf("report does not render an unset model as unpinned:\n%s", got)
+	}
+}
+
 // Metrics render sorted by name, so the same evidence always renders the same
 // bytes regardless of map iteration order.
 func TestReportMetricsAreSortedAndDeterministic(t *testing.T) {

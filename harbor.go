@@ -71,6 +71,32 @@ const generatedTaskDirName = "dawn"
 // the naming decision itself is testable without invoking Harbor.
 func taskDirFor(evidence string) string { return filepath.Join(evidence, generatedTaskDirName) }
 
+// harborArgs builds runTrial's argv — pulled out to a named function, the
+// same move taskDirFor already makes, so the exact flags dawn passes are
+// testable without invoking Harbor.
+//
+// model and effort are set as CLI flags (-m, --ak reasoning_effort=), never
+// as cmd.Env: exec.Cmd.Env non-nil means ONLY that environment, which would
+// strip PATH, HOME, DOCKER_HOST and — the real trap — CLAUDE_CODE_OAUTH_TOKEN
+// and CLAUDE_FORCE_OAUTH, which dawn relies on inheriting from its own
+// process environment. Harbor's -m flag also makes Harbor record the model in
+// its own result.json (config.agent.model_name), which an env var handed to
+// the child process would not. Do not "improve" this into cmd.Env.
+func harborArgs(s Stage, taskDir, jobsDir string) []string {
+	args := []string{"run", "-p", taskDir, "-a", s.Agent.name, "-o", jobsDir,
+		"--job-name", "trial", "-n", "1", "-q", "-y"}
+	if s.Gate.image == "" {
+		args = append(args, "--disable-verification")
+	}
+	if s.Agent.model != "" {
+		args = append(args, "-m", s.Agent.model)
+	}
+	if s.Agent.effort != "" {
+		args = append(args, "--ak", "reasoning_effort="+s.Agent.effort)
+	}
+	return args
+}
+
 // The agent phase reaches these two hosts and no others. Verified by grepping
 // the pinned CLI binary: everything else it contacts degrades quietly.
 var agentAllowedHosts = []string{"api.anthropic.com", "platform.claude.com"}
@@ -306,11 +332,7 @@ func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (
 		return t, err
 	}
 
-	args := []string{"run", "-p", taskDir, "-a", s.Agent.name, "-o", filepath.Join(dir, "jobs"),
-		"--job-name", "trial", "-n", "1", "-q", "-y"}
-	if s.Gate.image == "" {
-		args = append(args, "--disable-verification")
-	}
+	args := harborArgs(s, taskDir, filepath.Join(dir, "jobs"))
 
 	ctx, cancel := context.WithTimeout(ctx, attempt)
 	defer cancel()

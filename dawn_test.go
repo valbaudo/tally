@@ -77,6 +77,18 @@ func TestContentDigestIgnoresGateHosts(t *testing.T) {
 	}
 }
 
+// contentDigest must NOT move when only Agent.model or Agent.effort differs
+// — contentDigest's own comment says why: they are enforced by resumeResult
+// instead, as the sixth field alongside the hash rather than folded into it.
+func TestContentDigestIgnoresModelAndEffort(t *testing.T) {
+	base := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Prompt: "do it"}
+	pinnedDifferently := base
+	pinnedDifferently.Agent = Agent{name: ClaudeCode.name, image: ClaudeCode.image, model: "some-other-model", effort: "high"}
+	if contentDigest(base) != contentDigest(pinnedDifferently) {
+		t.Error("contentDigest moved when only Agent.model/effort changed: they must not be folded into attempt identity")
+	}
+}
+
 // attempt_id is stable for the same attempt and moves when any of its three
 // stated ingredients does — stage content, resolved inputs, or attempt
 // number — because a later ticket silently changing what feeds it is exactly

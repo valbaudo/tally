@@ -547,6 +547,17 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	case rec.ID != attemptID(s, attempt):
 		bug("evidence %s belongs to attempt %s (stage %q), not to stage %q's attempt %s: the stage changed since it ran, or two stages share one id",
 			evidence, rec.ID, rec.Stage, s.ID, attemptID(s, attempt))
+	// Model and effort are deliberately NOT folded into contentDigest
+	// (dawn.go's own comment on it says why), so the rec.ID check above
+	// cannot see a profile that changed between the run that left this
+	// evidence and the one resuming over it: the hash is identical either
+	// way. This case is the sixth field attemptID's LOUD COMMENT prescribes
+	// appending alongside the hash rather than into it — it is what makes
+	// the model and effort part of resume identity without touching
+	// attemptID at all.
+	case rec.Model != s.Agent.model || rec.Effort != s.Agent.effort:
+		bug("evidence %s ran on model %q effort %q, this stage pins %q %q: the profile changed since it ran",
+			evidence, rec.Model, rec.Effort, s.Agent.model, s.Agent.effort)
 	}
 	var t trial
 	if err := t.read(filepath.Join(evidence, "jobs"), s.Outputs); err != nil {
