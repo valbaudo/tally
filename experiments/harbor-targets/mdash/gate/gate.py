@@ -69,34 +69,29 @@ def main():
         deadline = time.time() + 10
         while time.time() < deadline:
             if proc.poll() is not None:
-                print("gate's own app.py exited before it came up")
-                return 0
+                sys.exit("no verdict: gate's own app.py exited before it came up")
             try:
                 req("GET", "/notes/1")
                 break
             except Exception:
                 time.sleep(0.05)
         else:
-            print("gate's own app.py never came up (loopback blocked?)")
-            return 0
+            sys.exit("no verdict: gate's own app.py never came up (loopback blocked?)")
 
         # Negative control: without a token the endpoint must refuse. If it
         # does not, a later 200 would prove nothing about authorization.
         status, _ = req("GET", f"/notes/{NOTE_ID}")
         print(f"negative control (no token -> 401): status={status}")
         if status != 401:
-            print("VERDICT: negative control broken, environment is not trustworthy -> 0")
-            return 0
+            sys.exit(f"no verdict: negative control broken (status={status}), environment is not trustworthy")
 
         # Ground truth, derived honestly: bob reading bob's own note.
         status, resp = req("POST", "/login", {"username": "bob", "password": "bob-pw"})
         if status != 200 or "token" not in resp:
-            print(f"VERDICT: gate could not log in as bob ({status} {resp}) -> 0")
-            return 0
+            sys.exit(f"no verdict: gate could not log in as bob ({status} {resp})")
         status, resp = req("GET", f"/notes/{NOTE_ID}", token=resp["token"])
         if status != 200 or "note" not in resp:
-            print(f"VERDICT: gate could not read bob's own note ({status} {resp}) -> 0")
-            return 0
+            sys.exit(f"no verdict: gate could not read bob's own note ({status} {resp})")
         truth = resp["note"]
         print(f"ground truth re-derived: {truth!r}")
     finally:
@@ -123,8 +118,8 @@ def main():
 
 if __name__ == "__main__":
     reward = main()
-    # Last act, unconditional, numbers only. If the gate dies before this line
-    # there is no verdict at all -- which is infra_error, not a score.
+    # If the gate dies before this line — or exits on purpose because its own
+    # environment failed — there is no verdict at all, which is infra_error, not a score.
     os.makedirs(LOGS, exist_ok=True)
     with open(REWARD, "w") as f:
         json.dump({"reward": reward}, f)

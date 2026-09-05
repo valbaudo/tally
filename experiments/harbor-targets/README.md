@@ -149,15 +149,18 @@ docker inspect dawn-<task>-gate:2 --format '{{index .RepoDigests 0}}'
 
 | Task | `[verifier.environment] docker_image` |
 |---|---|
-| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:96fe2c7750be4d3a67fd8b04248e7a3da2e68856167c8c516cd626d25209080d` |
-| `mdash` | `dawn-mdash-gate@sha256:180029436fc1818bd9c9b57fbbfffffe3d3c28b62cfdd9f3ee53f3d5ef07e754` |
-| `pr-ci` | `dawn-pr-ci-gate@sha256:6d995127e36488de43b2f6a10e600b6ce871228e3276a5c26c2e1348ea4477ac` |
-| `vdh` | `dawn-vdh-gate@sha256:886306f18c3fbfbf53b51c5eaec571e2a3319403db3188386b2cdd063f90cffe` |
+| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:f2cc298cce0b0cc9d892703d95e94e24327c44de855f77b6611ed69180e1b7c8` |
+| `mdash` | `dawn-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411` |
+| `pr-ci` | `dawn-pr-ci-gate@sha256:92b3e3998583779e3b666b5e8ee959f2ce510d046d43229a2b86d04c942a0025` |
+| `vdh` | `dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756` |
 
 `:2` is the generation that reads the agent's output at `/app/outputs/<name>`
 (dawn's `outputDir`) and self-tests that contract at build time; `:1` is the
 pre-dawn generation, left in place and not deleted, and is what the ten trials
-below (`tcv-*`, 2026-09-04) actually ran against. All four `:2` digests were
+below (`tcv-*`, 2026-09-04) actually ran against. This second `:2` build adds
+the abstention tripwire (harbor.go's `outputDir` doc, and each gate's
+`selftest.sh`): a gate whose own environment is sabotaged now writes no
+reward.json instead of fabricating a `0`. All four `:2` digests were
 confirmed live on 2026-09-05: the pinned string equals
 `docker inspect --format '{{index .RepoDigests 0}}'` on the tag.
 

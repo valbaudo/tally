@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-mdash-gate@sha256:180029436fc1818bd9c9b57fbbfffffe3d3c28b62cfdd9f3ee53f3d5ef07e754"
+docker_image = "dawn-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411"
 network_mode = "no-network"
 
 [verifier.env]

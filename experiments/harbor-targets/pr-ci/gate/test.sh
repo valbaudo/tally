@@ -8,7 +8,8 @@
 # container BEFORE the gate runs, so writing the highest-precedence reward file
 # last is what makes the verdict unforgeable. If the gate dies before that
 # line there is no reward.json at all, and the trial is an infra_error rather
-# than a verdict.
+# than a verdict, and the gate exits the same way, on purpose, when its own
+# environment fails before the artifact is judged.
 set -uo pipefail
 mkdir -p /logs/verifier/publish
 
@@ -23,7 +24,7 @@ gate() {
   echo "=== agent patch ($(wc -c < "$PATCH") bytes) ==="
   cat "$PATCH"
 
-  cd /gate/repo || { echo "VERDICT: baked repo missing -> reward 0"; return; }
+  cd /gate/repo || { echo "no verdict: baked repo missing"; exit 1; }
 
   # --include=calc.py is the whole integrity story: hunks against test_calc.py,
   # ci.sh, or any file the agent invented are dropped, so the suite and the CI
@@ -40,7 +41,11 @@ gate() {
   ./ci.sh
   rc=$?
   echo "ci.sh exit=$rc"
-  [ "$rc" -eq 0 ] || { echo "VERDICT: CI still red -> reward 0"; return; }
+  case $rc in
+    0) ;;
+    1) echo "VERDICT: CI still red -> reward 0"; return ;;
+    *) echo "no verdict: ci.sh did not run to a result (rc=$rc)"; exit 1 ;;
+  esac
 
   # The only bytes an actuator may push: the POST-FILTER diff, re-derived from
   # the gate's own pristine repo. NOT the agent's raw /app/outputs/fix.patch, which can

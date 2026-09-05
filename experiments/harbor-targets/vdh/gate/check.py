@@ -10,6 +10,8 @@ import pathlib
 FINDINGS = pathlib.Path("/app/outputs/findings.jsonl")
 REPO = pathlib.Path("/gate/repo")
 FILES = ["src/db.py", "src/users.py", "src/orders.py", "src/search.py", "src/reports.py"]
+# Loaded at import, outside any try, on purpose: if this image's own source is
+# missing the gate dies here and writes no reward -- infra_error, not a 0.
 SOURCE = {f: (REPO / f).read_text().splitlines() for f in FILES}
 
 

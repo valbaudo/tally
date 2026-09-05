@@ -33,12 +33,24 @@ import (
 // It is also the gate's side of the contract, and the one place it is written:
 // a gate finds each declared output at outputDir/<name>, exactly where the
 // agent was told to write it; it runs as /tests/test.sh, no-network, with
-// nothing else of the agent's; it writes {"reward": n} to
-// /logs/verifier/reward.json as its unconditional last act, and anything it
-// publishes to /logs/verifier/publish/<name>. Nothing hands a gate this path
-// at runtime — it is baked in like the other three — so every gate image
-// proves it at build time by running its own test.sh against a planted oracle
-// artifact and against nothing (experiments/harbor-targets/*/gate).
+// nothing else of the agent's; it publishes to /logs/verifier/publish/<name>;
+// and it writes {"reward": n} to /logs/verifier/reward.json as its LAST act,
+// never skipping the write because a file is already there (Harbor restores
+// the agent's artifacts before the gate runs; the last writer wins).
+//
+// That number is a claim about the artifact and about nothing else. A gate
+// that cannot make the claim — its own baked app will not start, its own
+// binaries or repo are missing, its own control run fails — writes no
+// reward.json and exits. The missing file is the whole of "could not check":
+// classify reads it as infra_error and the scope retries. It is never a 0,
+// which is a rejection of an agent nobody checked. So a gate does not catch
+// its own failures to score them; a crash and a deliberate exit mean the same
+// thing, and dawn reads neither an exit code nor a line of output to know it.
+//
+// None of this reaches a gate at runtime — it is baked in — so every gate
+// image proves it at build time by running its own test.sh three ways:
+// against nothing (0), against a planted oracle artifact (1), and with its
+// own environment sabotaged (no reward.json) (experiments/harbor-targets/*/gate).
 const outputDir = "/app/outputs"
 
 // generatedTaskDirName is the basename runTrial gives the task directory it

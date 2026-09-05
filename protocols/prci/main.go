@@ -39,7 +39,7 @@ import (
 // /gate/repo and dawn's verdict script at /tests/test.sh.
 const (
 	env  dawn.Image = "dawn-pr-ci-env@sha256:b75eb2a91c251a49b58d0ff902ee60336748161d6dabe970b54496d7db509aa2"
-	gate dawn.Image = "dawn-pr-ci-gate@sha256:6d995127e36488de43b2f6a10e600b6ce871228e3276a5c26c2e1348ea4477ac"
+	gate dawn.Image = "dawn-pr-ci-gate@sha256:92b3e3998583779e3b666b5e8ee959f2ce510d046d43229a2b86d04c942a0025"
 )
 
 // The prompt is part of the integrity argument: it is the only thing that tells

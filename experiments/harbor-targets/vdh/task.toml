@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-vdh-gate@sha256:886306f18c3fbfbf53b51c5eaec571e2a3319403db3188386b2cdd063f90cffe"
+docker_image = "dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756"
 network_mode = "no-network"
 
 [verifier.env]
