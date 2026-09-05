@@ -145,9 +145,13 @@ at, and nothing outside it crosses the boundary.
 
 // runTrial generates the task, runs exactly one Harbor trial against it, and
 // reads back what happened. attempt is dawn's own per-attempt clock.
-func runTrial(ctx context.Context, s Stage, attempt time.Duration) (trial, error) {
-	dir, err := os.MkdirTemp("", "dawn-"+strings.NewReplacer("/", "-", " ", "-").Replace(s.ID)+"-")
-	if err != nil {
+func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (trial, error) {
+	// dir is the run's own evidence directory for this attempt. It is NOT a
+	// temp dir: a trial that vanishes with the process cannot be inspected
+	// afterwards, and "result.json present, trust it, never re-run" is exactly
+	// an inspection. Everything this attempt produced stays here — the task
+	// dawn generated, harbor's log, and the trial Harbor wrote.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return trial{}, err
 	}
 	t := trial{Dir: dir}
@@ -296,12 +300,12 @@ func init() { dispatcher = harborRunner{} }
 // Dispatch runs one trial and classifies it. The attempt clock arrives on the
 // ctx — the scope decided it — and is also what the task's [agent] timeout_sec
 // is written from, so Harbor stops the agent at the same instant dawn would.
-func (harborRunner) Dispatch(ctx context.Context, s Stage) (Result, error) {
+func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Result, error) {
 	d, ok := ctx.Deadline()
 	if !ok {
 		return Result{}, fmt.Errorf("dawn: stage %s dispatched with no attempt clock", s.ID)
 	}
-	t, err := runTrial(ctx, s, time.Until(d))
+	t, err := runTrial(ctx, s, time.Until(d), evidence)
 	if err != nil {
 		// dawn failed to obtain a verdict at all. The scope turns this into
 		// InfraError and retries it against its own counter; saying so here

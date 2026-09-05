@@ -93,7 +93,7 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 		Env:    Image(os.Getenv("DAWN_E2E_ENV")),
 		Prompt: "Fix calc.py in /app/repo and write the diff as fix.patch.",
 		Gate:   SoundGate(Image(os.Getenv("DAWN_E2E_GATE"))),
-	}, 10*time.Minute)
+	}, 10*time.Minute, t.TempDir())
 	if err != nil {
 		t.Fatalf("%v (see %s/harbor.log)", err, got.Dir)
 	}

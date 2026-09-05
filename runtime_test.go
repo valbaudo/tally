@@ -18,7 +18,7 @@ type fake struct {
 	calls  int
 }
 
-func (f *fake) Dispatch(ctx context.Context, stage Stage) (Result, error) {
+func (f *fake) Dispatch(ctx context.Context, stage Stage, evidence string) (Result, error) {
 	f.calls++
 	if f.err != nil {
 		return Result{}, f.err

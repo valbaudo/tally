@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,7 +70,11 @@ func (a *Actuation) Published(name string) string {
 // included, since only the runner knows whether the declared output was there
 // when the clock ran out) belongs to the runner and rides back in the Result.
 type runner interface {
-	Dispatch(ctx context.Context, stage Stage) (Result, error)
+	// evidence is the directory the runner must write everything it produced
+	// into: the generated task, harbor's log, and the trial itself. It is
+	// durable and deterministic, because recovery reads it — "result.json
+	// present, trust it, never re-run" needs a path that survives the process.
+	Dispatch(ctx context.Context, stage Stage, evidence string) (Result, error)
 }
 
 // dispatcher is the runner every run uses. harbor.go registers the Harbor
@@ -260,8 +266,12 @@ func (s *Scope) Run(stage Stage) Result {
 			}
 			return Result{State: InfraError}
 		}
+		evidence := filepath.Join(s.run.dir, "attempts", fsSafe(stage.ID), strconv.Itoa(retry+1))
+		if err := os.MkdirAll(evidence, 0o755); err != nil {
+			bug("cannot create the evidence directory %s: %v", evidence, err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.attemptClock())
-		r, err := s.run.dispatch.Dispatch(ctx, stage)
+		r, err := s.run.dispatch.Dispatch(ctx, stage, evidence)
 		cancel()
 		if err != nil {
 			r = Result{State: InfraError}
@@ -332,4 +342,23 @@ func (r *run) flush() {
 	if err := os.WriteFile(filepath.Join(r.dir, "record.json"), append(b, '\n'), 0o644); err != nil {
 		panic(fmt.Sprintf("dawn: run record: %v", err))
 	}
+}
+
+// fsSafe turns a stage id into one path segment. Stage ids carry slashes —
+// "hunt/sql-injection" — and an id is only unique run-wide, so the segment has
+// to preserve the whole id rather than its tail.
+func fsSafe(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "stage"
+	}
+	return b.String()
 }
