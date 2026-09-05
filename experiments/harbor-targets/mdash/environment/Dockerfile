@@ -17,3 +17,4 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 COPY app/ /srv/mdash/
 
 WORKDIR /app
+RUN mkdir -p /app/outputs && chmod 0777 /app/outputs

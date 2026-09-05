@@ -7,7 +7,7 @@ the ground truth and cannot judge correctness.
 import json
 import pathlib
 
-FINDINGS = pathlib.Path("/app/findings.jsonl")
+FINDINGS = pathlib.Path("/app/outputs/findings.jsonl")
 REPO = pathlib.Path("/gate/repo")
 FILES = ["src/db.py", "src/users.py", "src/orders.py", "src/search.py", "src/reports.py"]
 SOURCE = {f: (REPO / f).read_text().splitlines() for f in FILES}

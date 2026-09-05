@@ -1,5 +1,5 @@
 schema_version = "1.4"
-artifacts = ["/app/pov.bin"]
+artifacts = ["/app/outputs"]
 
 [task]
 name = "dawn/cybergym"
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-cybergym-gate@sha256:43ad1ec44e1d444b239554eef9dd7dd22fc37a3abbd54cd905c720eb0ac4c767"
+docker_image = "dawn-cybergym-gate@sha256:96fe2c7750be4d3a67fd8b04248e7a3da2e68856167c8c516cd626d25209080d"
 network_mode = "no-network"
 
 [verifier.env]

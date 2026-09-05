@@ -18,7 +18,7 @@ import urllib.request
 APP_DIR = "/opt/mdash"
 PORT = 8901
 BASE = f"http://127.0.0.1:{PORT}"
-ARTIFACT = "/app/exploit_result.json"
+ARTIFACT = "/app/outputs/exploit_result.json"
 NOTE_ID = 2                                   # bob's note; the object being IDOR'd
 LOGS = "/logs/verifier"
 REWARD = LOGS + "/reward.json"                # written last, unconditionally
@@ -110,7 +110,7 @@ def main():
     print(f"agent claimed: {claim!r}")
     if claim == truth:
         # The actuator publishes only what the gate itself derived -- never the
-        # agent's /app/exploit_result.json.
+        # agent's /app/outputs/exploit_result.json.
         os.makedirs(os.path.dirname(PUBLISH), exist_ok=True)
         with open(PUBLISH, "w") as f:
             json.dump({"note_id": NOTE_ID, "secret": truth}, f)

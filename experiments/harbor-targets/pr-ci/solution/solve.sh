@@ -8,6 +8,6 @@ cat calc.py
 
 ./ci.sh
 
-git diff > /app/fix.patch
-echo "=== /app/fix.patch ==="
-cat /app/fix.patch
+git diff > /app/outputs/fix.patch
+echo "=== /app/outputs/fix.patch ==="
+cat /app/outputs/fix.patch

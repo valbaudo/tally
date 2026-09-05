@@ -7,4 +7,7 @@ FROM python:3.13-slim
 COPY src /gate/repo/src
 COPY test.sh /tests/test.sh
 COPY check.py /gate/check.py
-RUN chmod +x /tests/test.sh
+COPY oracle.jsonl /gate/oracle.jsonl
+COPY selftest.sh /gate/selftest.sh
+RUN mkdir -p /app/outputs
+RUN chmod +x /tests/test.sh /gate/selftest.sh && /gate/selftest.sh

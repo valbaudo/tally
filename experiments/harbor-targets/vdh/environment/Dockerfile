@@ -20,3 +20,4 @@ RUN claude --version
 WORKDIR /app
 COPY src /app/repo/src
 COPY demo_exploits.py /app/repo/demo_exploits.py
+RUN mkdir -p /app/outputs && chmod 0777 /app/outputs

@@ -5,7 +5,7 @@ Audit it for the class of bug where **untrusted input is spliced into SQL
 text instead of being passed as a bound `?` parameter**. Read the source;
 you may run it (`python3 /app/repo/demo_exploits.py`) if that helps.
 
-Write your findings to `/app/findings.jsonl`: **one JSON object per line**,
+Write your findings to `/app/outputs/findings.jsonl`: **one JSON object per line**,
 each with exactly these keys:
 
 ```json

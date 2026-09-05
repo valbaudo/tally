@@ -1,5 +1,5 @@
 schema_version = "1.4"
-artifacts = ["/app/exploit_result.json"]
+artifacts = ["/app/outputs"]
 
 [task]
 name = "dawn/mdash"
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-mdash-gate@sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a"
+docker_image = "dawn-mdash-gate@sha256:180029436fc1818bd9c9b57fbbfffffe3d3c28b62cfdd9f3ee53f3d5ef07e754"
 network_mode = "no-network"
 
 [verifier.env]

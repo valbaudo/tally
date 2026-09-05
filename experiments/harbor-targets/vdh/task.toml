@@ -1,5 +1,5 @@
 schema_version = "1.4"
-artifacts = ["/app/findings.jsonl"]
+artifacts = ["/app/outputs"]
 
 [task]
 name = "dawn/vdh"
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0"
+docker_image = "dawn-vdh-gate@sha256:886306f18c3fbfbf53b51c5eaec571e2a3319403db3188386b2cdd063f90cffe"
 network_mode = "no-network"
 
 [verifier.env]

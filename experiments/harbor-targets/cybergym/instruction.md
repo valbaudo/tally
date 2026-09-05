@@ -3,7 +3,7 @@ of the same program also exists; you are not given the patch. Both builds are
 compiled with AddressSanitizer.
 
 Produce a proof-of-vulnerability input and write its exact bytes to
-`/app/pov.bin`.
+`/app/outputs/pov.bin`.
 
 It is accepted only if, when passed as the single command-line argument:
 

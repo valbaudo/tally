@@ -10,8 +10,10 @@ RUN chmod +x /gate/repo/ci.sh \
  && git config user.email toy@dawn.local \
  && git config user.name  "dawn toy" \
  && git add -A \
- && git commit -q -m "seed: average(), its tests, and ci.sh (CI is RED)" \
- && mkdir -p /app
+ && git commit -q -m "seed: average(), its tests, and ci.sh (CI is RED)"
 
 COPY test.sh /tests/test.sh
-RUN chmod +x /tests/test.sh
+COPY oracle.patch /gate/oracle.patch
+COPY selftest.sh /gate/selftest.sh
+RUN mkdir -p /app/outputs
+RUN chmod +x /tests/test.sh /gate/selftest.sh && /gate/selftest.sh

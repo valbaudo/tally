@@ -12,7 +12,7 @@
 set -uo pipefail
 mkdir -p /logs/verifier/publish
 
-PATCH=/app/fix.patch
+PATCH=/app/outputs/fix.patch
 PUBLISH=/logs/verifier/publish/fix.patch
 reward=0
 
@@ -43,7 +43,7 @@ gate() {
   [ "$rc" -eq 0 ] || { echo "VERDICT: CI still red -> reward 0"; return; }
 
   # The only bytes an actuator may push: the POST-FILTER diff, re-derived from
-  # the gate's own pristine repo. NOT the agent's raw /app/fix.patch, which can
+  # the gate's own pristine repo. NOT the agent's raw /app/outputs/fix.patch, which can
   # carry the hunks --include dropped (a neutered test_calc.py, an `exit 0`
   # appended to ci.sh). Publishing the raw patch would restore exactly the
   # attack the filter just defeated.

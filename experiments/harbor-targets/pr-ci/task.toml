@@ -1,5 +1,5 @@
 schema_version = "1.4"
-artifacts = ["/app/fix.patch"]
+artifacts = ["/app/outputs"]
 
 [task]
 name = "dawn/pr-ci"
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-pr-ci-gate@sha256:a88d5f200ced9d342760bf58626578a3e4e35d470e1f30e8ba0810796ce469b1"
+docker_image = "dawn-pr-ci-gate@sha256:6d995127e36488de43b2f6a10e600b6ce871228e3276a5c26c2e1348ea4477ac"
 network_mode = "no-network"
 
 [verifier.env]

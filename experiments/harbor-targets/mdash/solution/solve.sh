@@ -43,9 +43,9 @@ status, resp = req("GET", "/notes/2", token=token)
 print("GET /notes/2 with alice's token ->", status, resp)
 assert status == 200 and "note" in resp, (status, resp)
 
-with open("/app/exploit_result.json", "w") as f:
+with open("/app/outputs/exploit_result.json", "w") as f:
     json.dump({"secret": resp["note"]}, f)
-print("wrote /app/exploit_result.json")
+print("wrote /app/outputs/exploit_result.json")
 PY
 
-cat /app/exploit_result.json
+cat /app/outputs/exploit_result.json

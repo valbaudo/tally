@@ -12,4 +12,15 @@ for spec in "povs/crash.pov:PASS" "povs/both.pov:FAIL" "povs/neither.pov:FAIL"; 
   [ "$got" = "$want" ] || bad=1
 done
 [ "$bad" -eq 0 ] || { echo "SELFTEST FAILED"; exit 1; }
-echo "SELFTEST OK"
+echo "SELFTEST OK (oracle discrimination)"
+
+# Build-time contract check: prove /tests/test.sh reads its declared output at
+# outputDir/<name> (harbor.go), not a stale hardcoded path.
+want() { /tests/test.sh >/dev/null 2>&1; r=$(cat /logs/verifier/reward.json 2>/dev/null); rm -rf /logs
+         [ "$r" = "{\"reward\": $1}" ] || { echo "SELFTEST FAILED: $2 -> ${r:-no reward.json}"; exit 1; }; }
+mkdir -p /app/outputs
+want 0 "nothing at /app/outputs/pov.bin"
+cp /gate/povs/crash.pov /app/outputs/pov.bin
+want 1 "oracle at /app/outputs/pov.bin"
+rm -f /app/outputs/pov.bin
+echo "SELFTEST OK (contract)"

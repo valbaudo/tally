@@ -38,8 +38,8 @@ import (
 // phase is not allowed to reach. The gate carries the pristine repo at
 // /gate/repo and dawn's verdict script at /tests/test.sh.
 const (
-	env  dawn.Image = "rc-pr-ci-env@sha256:1af66f7b408d82f983a10f262322cafe99e6408d8c33e632fc4f83bb1486dbd4"
-	gate dawn.Image = "rc-pr-ci-gate@sha256:c42675a9a12badc77d667607b3704166a4a424eea9096cf34cb8346d4e874a31"
+	env  dawn.Image = "dawn-pr-ci-env@sha256:b75eb2a91c251a49b58d0ff902ee60336748161d6dabe970b54496d7db509aa2"
+	gate dawn.Image = "dawn-pr-ci-gate@sha256:6d995127e36488de43b2f6a10e600b6ce871228e3276a5c26c2e1348ea4477ac"
 )
 
 // The prompt is part of the integrity argument: it is the only thing that tells

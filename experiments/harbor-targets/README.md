@@ -81,51 +81,28 @@ RAW patch: 903 bytes, 3 files   ->   reward 1
 published: 276 bytes, 1 file    (calc.py hunk only)
 ```
 
-Publishing `/app/fix.patch` raw would have pushed the neutered test suite under
-a green verdict. `cybergym` and `vdh` publish nothing: no actuator consumes them.
+Publishing `/app/outputs/fix.patch` raw would have pushed the neutered test
+suite under a green verdict. `cybergym` and `vdh` publish nothing: no actuator
+consumes them.
 
-## Logical name -> absolute path
+## The output path is part of the gate contract
 
-These paths are constants duplicated between each gate image and any protocol
-that targets it, so they are written down once here.
+Every declared output lands at `/app/outputs/<name>` — dawn's `outputDir`,
+documented once at its definition in `harbor.go`. Nothing hands a gate this
+path at runtime; it is baked in like the other three absolute paths every
+gate already depends on without being told (`/tests/test.sh`,
+`/logs/verifier/reward.json`, `/logs/verifier/publish/`). Every gate image
+proves it honours the contract at build time: `gate/selftest.sh` plants an
+oracle artifact at that path and runs the gate's own `/tests/test.sh` against
+it and against nothing, and the image fails to build if either check comes
+back wrong (see `experiments/harbor-targets/*/gate`).
 
-**cybergym** (and both decoys)
-
-| logical name | absolute path | written by | read by |
-|---|---|---|---|
-| `pov` | `/app/pov.bin` | agent | gate, as `argv[1]` to both builds |
-| `source` | `/app/src/vuln.c` | agent image | agent (vulnerable variant only) |
-| `truth` | `/gate/vuln.c` | gate image | gate only |
-| `reward` | `/logs/verifier/reward.json` | gate, last, unconditional | Harbor |
-
-**mdash**
-
-| logical name | absolute path | written by | read by |
-|---|---|---|---|
-| `exploit_result` | `/app/exploit_result.json` | agent | gate, as untrusted data |
-| `app source, agent side` | `/srv/mdash` | agent image | agent |
-| `app source, gate side` | `/opt/mdash` | gate image | gate only |
-| `finding` | `/logs/verifier/publish/finding.json` | gate, on a `1` only | actuator |
-| `reward` | `/logs/verifier/reward.json` | gate, last, unconditional | Harbor |
-
-**pr-ci**
-
-| logical name | absolute path | written by | read by |
-|---|---|---|---|
-| `patch` | `/app/fix.patch` | agent | gate, as data (never executed) |
-| `repo` | `/app/repo` | agent image | agent |
-| `pristine_repo` | `/gate/repo` | gate image | gate only |
-| `published_patch` | `/logs/verifier/publish/fix.patch` | gate, on a `1` only | actuator |
-| `reward` | `/logs/verifier/reward.json` | gate, last, unconditional | Harbor |
-
-**vdh**
-
-| logical name | absolute path | written by | read by |
-|---|---|---|---|
-| `findings` | `/app/findings.jsonl` | agent | gate |
-| `repo`, agent copy | `/app/repo` | agent image | agent |
-| `repo`, gate copy | `/gate/repo` | gate image | gate only |
-| `reward` | `/logs/verifier/reward.json` | gate, last, unconditional | Harbor |
+| Task | output |
+|---|---|
+| `cybergym` (and both decoys) | `/app/outputs/pov.bin` |
+| `mdash` | `/app/outputs/exploit_result.json` |
+| `pr-ci` | `/app/outputs/fix.patch` |
+| `vdh` | `/app/outputs/findings.jsonl` |
 
 The gate entrypoint is `/tests/test.sh` inside every gate image.
 
@@ -167,19 +144,22 @@ Harbor hands the string straight to `docker compose`, which resolves
 the gate changes the digest — that is what pinning means. Re-pin from:
 
 ```bash
-docker inspect dawn-<task>-gate:1 --format '{{index .RepoDigests 0}}'
+docker inspect dawn-<task>-gate:2 --format '{{index .RepoDigests 0}}'
 ```
 
 | Task | `[verifier.environment] docker_image` |
 |---|---|
-| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:43ad1ec44e1d444b239554eef9dd7dd22fc37a3abbd54cd905c720eb0ac4c767` |
-| `mdash` | `dawn-mdash-gate@sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a` |
-| `pr-ci` | `dawn-pr-ci-gate@sha256:a88d5f200ced9d342760bf58626578a3e4e35d470e1f30e8ba0810796ce469b1` |
-| `vdh` | `dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0` |
+| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:96fe2c7750be4d3a67fd8b04248e7a3da2e68856167c8c516cd626d25209080d` |
+| `mdash` | `dawn-mdash-gate@sha256:180029436fc1818bd9c9b57fbbfffffe3d3c28b62cfdd9f3ee53f3d5ef07e754` |
+| `pr-ci` | `dawn-pr-ci-gate@sha256:6d995127e36488de43b2f6a10e600b6ce871228e3276a5c26c2e1348ea4477ac` |
+| `vdh` | `dawn-vdh-gate@sha256:886306f18c3fbfbf53b51c5eaec571e2a3319403db3188386b2cdd063f90cffe` |
 
-All four were confirmed live on 2026-09-04: the pinned string equals
-`docker inspect --format '{{index .RepoDigests 0}}'` on the tag, and all ten
-trials below ran against the pinned reference.
+`:2` is the generation that reads the agent's output at `/app/outputs/<name>`
+(dawn's `outputDir`) and self-tests that contract at build time; `:1` is the
+pre-dawn generation, left in place and not deleted, and is what the ten trials
+below (`tcv-*`, 2026-09-04) actually ran against. All four `:2` digests were
+confirmed live on 2026-09-05: the pinned string equals
+`docker inspect --format '{{index .RepoDigests 0}}'` on the tag.
 
 The **agent** environment images are deliberately not pinned — Harbor rebuilds
 them from `environment/` on every run and leaves no stable tag. Only the gate,

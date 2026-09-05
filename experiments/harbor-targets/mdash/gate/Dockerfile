@@ -5,4 +5,7 @@ FROM python:3.13-slim
 COPY app/ /opt/mdash/
 COPY gate.py /opt/gate/gate.py
 COPY test.sh /tests/test.sh
-RUN chmod +x /tests/test.sh && mkdir -p /app
+COPY oracle.json /gate/oracle.json
+COPY selftest.sh /gate/selftest.sh
+RUN mkdir -p /app/outputs
+RUN chmod +x /tests/test.sh /gate/selftest.sh && /gate/selftest.sh

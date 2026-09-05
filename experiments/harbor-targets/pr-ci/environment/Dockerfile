@@ -22,3 +22,5 @@ RUN chmod +x /app/repo/ci.sh \
  && git config user.name  "dawn toy" \
  && git add -A \
  && git commit -q -m "seed: average(), its tests, and ci.sh (CI is RED)"
+
+RUN mkdir -p /app/outputs && chmod 0777 /app/outputs

@@ -12,3 +12,4 @@ COPY --from=cli /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude
 ENV DISABLE_AUTOUPDATER=1
 WORKDIR /app
 COPY vuln.c /app/src/vuln.c
+RUN mkdir -p /app/outputs && chmod 0777 /app/outputs

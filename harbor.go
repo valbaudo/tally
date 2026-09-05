@@ -30,6 +30,15 @@ import (
 // artifacts into the verifier container BEFORE the gate runs, so an artifact
 // declared there would let the agent drop its own reward.json and forge the
 // verdict outright. Nothing dawn emits may name a path under that tree.
+// It is also the gate's side of the contract, and the one place it is written:
+// a gate finds each declared output at outputDir/<name>, exactly where the
+// agent was told to write it; it runs as /tests/test.sh, no-network, with
+// nothing else of the agent's; it writes {"reward": n} to
+// /logs/verifier/reward.json as its unconditional last act, and anything it
+// publishes to /logs/verifier/publish/<name>. Nothing hands a gate this path
+// at runtime — it is baked in like the other three — so every gate image
+// proves it at build time by running its own test.sh against a planted oracle
+// artifact and against nothing (experiments/harbor-targets/*/gate).
 const outputDir = "/app/outputs"
 
 // generatedTaskDirName is the basename runTrial gives the task directory it
