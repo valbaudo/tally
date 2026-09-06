@@ -1,0 +1,15 @@
+# Verifier image for the report stage. Both gates are baked into both images and
+# only /tests/test.sh differs, so one selftest proves both and the two images
+# cannot drift apart in what they check.
+FROM python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
+
+# The gate's OWN copy of the target: the hunt gate imports these modules and
+# calls them itself, so a finding is judged against bytes the agent could not
+# edit.
+COPY src/ /gate/src/
+COPY gate/oracle.py gate/hunt_check.py gate/report_check.py gate/ground_truth.json /gate/
+COPY gate/selftest.sh /gate/selftest.sh
+COPY gate/report.sh /tests/test.sh
+RUN mkdir -p /app/outputs \
+ && chmod +x /tests/test.sh /gate/selftest.sh \
+ && /gate/selftest.sh

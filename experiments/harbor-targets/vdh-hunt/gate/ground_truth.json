@@ -1,0 +1,14 @@
+{
+  "vulnerable": [
+    {"file": "src/users.py",   "function": "get_user_by_name"},
+    {"file": "src/orders.py",  "function": "search_orders_by_status"},
+    {"file": "src/search.py",  "function": "search_products"},
+    {"file": "src/reports.py", "function": "monthly_summary"}
+  ],
+  "safe": [
+    {"file": "src/users.py",   "function": "get_user_by_id"},
+    {"file": "src/orders.py",  "function": "get_orders_for_customer"},
+    {"file": "src/search.py",  "function": "list_categories"},
+    {"file": "src/reports.py", "function": "yearly_summary"}
+  ]
+}

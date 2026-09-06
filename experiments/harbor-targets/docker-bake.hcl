@@ -87,3 +87,28 @@ target "mdash-gate" {
 group "mdash" {
   targets = ["mdash-env", "mdash-gate"]
 }
+
+target "vdh-hunt-env" {
+  inherits = ["reproducible"]
+  context  = "vdh-hunt"
+  dockerfile = "environment/Dockerfile"
+  tags     = ["dawn-vdh-hunt-env"]
+}
+
+target "vdh-hunt-gate" {
+  inherits   = ["reproducible"]
+  context    = "vdh-hunt"
+  dockerfile = "gate/Dockerfile.hunt"
+  tags       = ["dawn-vdh-hunt-gate"]
+}
+
+target "vdh-report-gate" {
+  inherits   = ["reproducible"]
+  context    = "vdh-hunt"
+  dockerfile = "gate/Dockerfile.report"
+  tags       = ["dawn-vdh-report-gate"]
+}
+
+group "vdh-hunt" {
+  targets = ["vdh-hunt-env", "vdh-hunt-gate", "vdh-report-gate"]
+}
