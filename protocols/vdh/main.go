@@ -31,6 +31,27 @@
 // to come back — and requires that the same function with a benign payload
 // does not return it. A correctly scoped query cannot reach a row whose key
 // the caller never named. Reading the source proves nothing.
+// TWO THINGS THE FIRST REAL RUN EXPOSED, recorded here because a protocol is
+// the place its own caveats belong:
+//
+// The fan DUPLICATES. Hunters 0 and 1 both returned
+// orders.py:search_orders_by_status — two of four hunters on one function,
+// while users.py went unhunted. That is precisely the work VDH's Dedup stage
+// does and this reduction drops, and it is now a measured argument for it
+// rather than a guess. Splitting the queue by index is weaker than VDH's real
+// task queue, where a claimed task is not handed out twice.
+//
+// The hunt gate has a FALSE NEGATIVE, and it is worth naming exactly. Hunter 2
+// found reports.py:monthly_summary — a genuinely seeded bug — with a genuine
+// injection: "nonexistent' UNION SELECT is_admin FROM users WHERE name='root' --".
+// The gate rejected it, correctly by its own rule and wrongly about the world:
+// the UNION selects from users, so no canary SALE row came back. The oracle
+// proves "this payload reached a row it had no right to"; a payload that
+// deliberately exfiltrates a KNOWN row instead of the canary is invisible to
+// it. That failure is conservative — it rejects real findings, it never passes
+// fake ones — which is the direction a gate should fail in. The report stage
+// recovered it and recall stayed 1.0, which is the multi-stage shape doing the
+// job it exists for.
 package main
 
 import (
