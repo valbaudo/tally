@@ -113,7 +113,7 @@ Write one JSON object:
 		// 3. VALIDATE — one adversary per finding, fanned. Its job is to
 		// disprove, and dawn scores whether it was RIGHT, not whether it
 		// agreed.
-		kept, ok := validate(run, round, hunted)
+		kept, verdicts, ok := validate(run, round, hunted)
 		agreed += ok
 		confirmed = append(confirmed, kept...)
 
@@ -122,10 +122,20 @@ Write one JSON object:
 		}
 		// 4. GAPFILL — the cost-to-coverage lever: what did the round touch
 		// but not cover? Its answer becomes the next queue.
+		//
+		// It reads the ADVERSARIES' verdicts, not the hunters' raw findings,
+		// which is the edge Cloudflare's own diagram draws: Validate → Gapfill.
+		// The difference is not cosmetic. Coverage means what SURVIVED
+		// adjudication, so a hunter that produced something an adversary threw
+		// out has left a gap, not filled one — and gapfill reading the raw
+		// findings would see that area as covered and never come back to it.
 		queue = run.Run(dawn.Stage{
 			ID: fmt.Sprintf("gapfill-r%d", round), Agent: dawn.ClaudeCode, Env: env,
 			Prompt: `Your inputs are the hunting queue a round of hunters worked from, followed by
-what each hunter handed back. Read /app/src as well.
+the adversaries' verdicts on what those hunters found. Read /app/src as well.
+
+A finding an adversary REFUTED leaves its area still uncovered — treat it as a
+gap, not as ground already walked.
 
 Find the GAP: functions or modules the round touched but did not cover, and
 anything no hunter looked at. Emit the queue for the next round, aimed only at
@@ -133,7 +143,7 @@ what is still unexamined.
 
 Write one JSON object:
   {"queue": [{"file": "src/....py", "functions": ["..."], "note": "why this is still open"}]}`,
-			Inputs:  append([]dawn.Result{queue}, withArtifacts(hunted)...),
+			Inputs:  append([]dawn.Result{queue}, withArtifacts(verdicts)...),
 			Outputs: []string{"map.json"},
 			Gate:    dawn.NoGate("a gap queue is a plan; whether it was a good one shows up as the next round's findings"),
 		})
@@ -208,7 +218,7 @@ Write one JSON object:
 	if feedback.State.Decided() || len(feedback.Manifest) > 0 {
 		if run.More() {
 			extra := hunt(run, rounds, feedback)
-			kept, ok := validate(run, rounds, extra)
+			kept, _, ok := validate(run, rounds, extra)
 			agreed += ok
 			run.Record("feedback_round_findings", len(kept))
 			run.Record("adversaries_correct_total", agreed)
@@ -280,12 +290,12 @@ Write one JSON object:
 // DISPROVE. dawn scores whether the adversary was right — the gate replays the
 // payload itself — so neither rubber-stamping nor blanket refusal survives.
 // Returns the findings whose adversary was correct AND confirmed them.
-func validate(run *dawn.Scope, round int, hunted []dawn.Result) (kept []dawn.Result, correct int) {
+func validate(run *dawn.Scope, round int, hunted []dawn.Result) (kept, verdicts []dawn.Result, correct int) {
 	live := withArtifacts(hunted)
 	if len(live) == 0 {
-		return nil, 0
+		return nil, nil, 0
 	}
-	verdicts := run.Fan(len(live), func(i int) dawn.Stage {
+	verdicts = run.Fan(len(live), func(i int) dawn.Stage {
 		return dawn.Stage{
 			ID: fmt.Sprintf("validate-r%d-%d", round, i), Agent: dawn.ClaudeCode, Env: env,
 			Prompt: `Your input is ONE hunter's finding. Your job is to DISPROVE it.
@@ -315,7 +325,7 @@ Write one JSON object, echoing the file and function you were given:
 			}
 		}
 	}
-	return kept, correct
+	return kept, verdicts, correct
 }
 
 // withArtifacts keeps the results that actually handed bytes back. A stage
