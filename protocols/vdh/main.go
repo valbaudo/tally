@@ -41,11 +41,11 @@ import (
 
 const (
 	env          dawn.Image = "dawn-vdh-hunt-env@sha256:4a0b273153cac34a551d282e6a58d0a15463c20ea2f2e8a457d5f5090650fbea"
-	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:84d9d0ee961e6bd402fa4908c8681fbbacbe98726386cc2856670740353eff23"
-	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:66d0b01102f27779380a1d380ef058f6e1c34a3560118041a6ffa5d330e3032f"
-	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:0546ab2fa538211b86a4172a613afcc84a80482f385f883ce90b50b8829d656f"
-	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:1eb14a298aabba692638487d2e4a82eeba7b5707e77959196766e22b90357005"
-	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:88f236cb918a3092483fa78908343632fc1783b802e80ef8322c0336f96f760f"
+	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:369dd5290d48cb9d9e92cc9c5bef4b38e0d04aa807ac1529683c12784d394aca"
+	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:eaa3625b77c8a741116bab074a5aa6f791bfae688a2c4e230d04921defe8b63a"
+	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:13c17c6405382f57085b9be2bffd9de967769814a2b326370c02642e9ba8b2e8"
+	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:c322e1755eb95aef68bd0b8ccaa6673f6f61552cd64aa94329ece59e1248c50f"
+	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:9d3d480971fa7cf3000064b325f223afbdd04b8029e42941e0d46dcbeadbb2e5"
 )
 
 // The fan width and the number of gapfill rounds. Both are spend policy, not

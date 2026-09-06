@@ -65,10 +65,19 @@ def database(mark):
         INSERT INTO sales VALUES (1, '2026-01', 100), (2, '2026-02', 200);
         """
     )
-    conn.execute("INSERT INTO users VALUES (?,?,?)", (mark, "zz-canary", 1))
-    conn.execute("INSERT INTO orders VALUES (?,?,?)", (mark, mark, "zz-canary"))
-    conn.execute("INSERT INTO products VALUES (?,?)", (mark, "zz-canary"))
-    conn.execute("INSERT INTO sales VALUES (?,?,?)", (mark, "zz-canary", mark))
+    # The mark goes into the TEXT columns too, not just the keys. Measured, and
+    # this is why: six hunters in one run were refused for payloads like
+    # "x' UNION SELECT name FROM users WHERE is_admin=1 --" against a report
+    # query. That is cross-table exfiltration -- a WORSE bug than scope escape
+    # within one table -- and an integer planted only in ids and totals is
+    # invisible to it, because the UNION selects a name. Carrying the same
+    # digits inside every canary string means any column the payload drags back
+    # betrays it.
+    text = f"zz-canary-{mark}"
+    conn.execute("INSERT INTO users VALUES (?,?,?)", (mark, text, 1))
+    conn.execute("INSERT INTO orders VALUES (?,?,?)", (mark, mark, text))
+    conn.execute("INSERT INTO products VALUES (?,?)", (mark, text))
+    conn.execute("INSERT INTO sales VALUES (?,?,?)", (mark, text, mark))
     conn.commit()
     return conn
 
