@@ -83,7 +83,7 @@ func TestContentDigestIgnoresGateHosts(t *testing.T) {
 func TestContentDigestIgnoresModelAndEffort(t *testing.T) {
 	base := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Prompt: "do it"}
 	pinnedDifferently := base
-	pinnedDifferently.Agent = Agent{name: ClaudeCode.name, image: ClaudeCode.image, model: "some-other-model", effort: "high"}
+	pinnedDifferently.Agent = Agent{name: ClaudeCode.name, model: "some-other-model", effort: "high"}
 	if contentDigest(base) != contentDigest(pinnedDifferently) {
 		t.Error("contentDigest moved when only Agent.model/effort changed: they must not be folded into attempt identity")
 	}

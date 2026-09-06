@@ -193,7 +193,6 @@ func harborArgs(s Stage, taskDir, jobsDir string) []string {
 	return args
 }
 
-
 // gateTimeout bounds the verifier, which is dawn's own program on dawn's own
 // pinned image. It is not the attempt clock and not the author's business.
 const gateTimeout = 10 * time.Minute
@@ -366,18 +365,25 @@ func writeTask(ctx context.Context, dir string, s Stage, attempt time.Duration) 
 	fmt.Fprintf(&b, "[task]\nname = %q\nversion = \"1.0.0\"\ndescription = %q\n\n",
 		taskName(s.ID), "dawn stage "+s.ID)
 
-	// The environment's baseline is no-network; only the agent phase opens, and
-	// only onto two hosts. A stage with no inputs names its pinned image
-	// directly and Harbor pulls it. A stage WITH inputs names none, because a
-	// docker_image would win over the Dockerfile materialiseInputs just wrote;
-	// the pin lives in that Dockerfile's FROM instead.
+	// The environment's baseline is no-network; only the agent phase opens. A
+	// stage with no inputs names its pinned image directly and Harbor pulls it.
+	// A stage WITH inputs names none, because a docker_image would win over the
+	// Dockerfile materialiseInputs just wrote; the pin lives in that
+	// Dockerfile's FROM instead.
 	if len(s.Inputs) > 0 {
 		fmt.Fprintf(&b, "[environment]\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n")
 	} else {
 		fmt.Fprintf(&b, "[environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n", s.Env)
 	}
-	fmt.Fprintf(&b, "[agent]\nnetwork_mode = \"allowlist\"\nallowed_hosts = [%s]\ntimeout_sec = %.1f\n\n",
-		quoted(s.Agent.hosts), attempt.Seconds())
+	// The agent phase is public, and that is a deliberate non-constraint. dawn
+	// once pinned it to an allowlist of the hosts one CLI reaches, which
+	// defended nothing: the gate decides, dawn parses zero bytes of agent
+	// output, and the agent is untrusted by construction — so where its packets
+	// go enters no soundness argument dawn makes. What the allowlist did do was
+	// encode one vendor's endpoints as if they were a fact about dawn, which
+	// silently firewalled every other CLI off from its own provider.
+	fmt.Fprintf(&b, "[agent]\nnetwork_mode = \"public\"\ntimeout_sec = %.1f\n\n",
+		attempt.Seconds())
 
 	if gated {
 		// separate: the gate never sees the agent's filesystem, only the

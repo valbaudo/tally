@@ -661,7 +661,7 @@ func TestResumeRefusesEvidenceThatIsNotThisAttempts(t *testing.T) {
 func TestResumeRefusesEvidenceFromADifferentModel(t *testing.T) {
 	a := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Gate: NoGate("test"), Prompt: "do it"}
 	b := a
-	b.Agent = Agent{name: ClaudeCode.name, image: ClaudeCode.image, model: "some-other-model"}
+	b.Agent = Agent{name: ClaudeCode.name, model: "some-other-model"}
 	if attemptID(a, 1) != attemptID(b, 1) {
 		t.Fatal("test setup broken: a and b must share an attemptID for this to exercise the model/effort guard")
 	}

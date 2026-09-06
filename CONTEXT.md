@@ -31,7 +31,7 @@ The Terminal-Bench 2.0 runner dawn adopts for one isolated attempt per trial.
 The check that decides a stage's outcome, run in a separate pinned no-network image after the agent's container is gone. "gate" is the same thing named for its role at a decision boundary.
 
 **agent profile**:
-dawn's knowledge of how to drive one agent CLI: a Go struct over a digest-pinned image, fixing the launch command, prompt delivery, gateway pointing, and config paths. It also pins the model and reasoning effort dawn tells Harbor to run — an unpinned one lets the CLI resolve it from ambient account state instead, so the same protocol could silently run a different model tomorrow. Admitted only by a build-time self-test proving a failed run leaves no declared output.
+dawn's knowledge of how to drive one agent CLI: a Go struct naming that CLI, fixing the launch command, prompt delivery, gateway pointing, and config paths. It names a CLI; it does not carry an image. The image a stage runs in is the environment, and the CLI is baked into it. It also pins the model and reasoning effort dawn tells Harbor to run — an unpinned one lets the CLI resolve it from ambient account state instead, so the same protocol could silently run a different model tomorrow. Admitted only by a build-time self-test proving a failed run leaves no declared output.
 _Avoid_: adapter (that is Harbor's word for its own).
 
 **soundness**:

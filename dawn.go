@@ -105,37 +105,34 @@ func (s State) Decided() bool {
 type Image string
 
 // Agent is an agent profile: dawn's knowledge of how to drive one CLI — its
-// name, its model and effort, over a digest-pinned image. It is a fact about
-// that image, never a knob — an author picks a profile and declares nothing
-// else about it, least of all its concurrency, which is a correctness
-// property dawn fixes.
+// name, its model and its effort. It is a fact about that CLI, never a knob —
+// an author picks a profile and declares nothing else about it, least of all
+// its concurrency, which is a correctness property dawn fixes.
 //
-// model and effort are facts for the same reason the image is: leaving
-// either unpinned does not mean the CLI runs with none. Harbor's adapter
-// finds ANTHROPIC_MODEL (or --effort) unset and the CLI resolves it from
-// ambient account state instead, so the identical protocol can silently run
-// a different model tomorrow, on a host whose account state changed under
-// it, with nothing in dawn's own receipt to say so. Pinning both here is
-// what lets the receipt record what dawn told Harbor to run rather than
-// nothing at all — see harborArgs.
+// It does NOT carry an image. The image a stage runs in is Stage.Env, and the
+// agent CLI is baked into it: Harbor installs the CLI before the agent phase
+// begins, so on dawn's no-network environments an unbaked CLI cannot reach a
+// package mirror and the trial dies in setup. A profile therefore names a CLI,
+// and the environment supplies its bytes. Agent once carried an image field
+// of its own, pinned to a literal sha256:0000…; nothing ever read it, so it
+// pinned nothing while claiming to — the exact lie Image exists to prevent.
 //
-// The name, image, model and effort are dawn's own knowledge, so they are
+// model and effort are facts dawn pins because leaving either unpinned does
+// not mean the CLI runs with none. Harbor's adapter finds ANTHROPIC_MODEL (or
+// --effort) unset and the CLI resolves it from ambient account state instead,
+// so the identical protocol can silently run a different model tomorrow, on a
+// host whose account state changed under it, with nothing in dawn's own
+// receipt to say so. Pinning them here is what lets the receipt record what
+// dawn told Harbor to run rather than nothing at all — see harborArgs.
+//
+// The name, model and effort are dawn's own knowledge, so they are
 // unexported: a protocol selects a profile, it never reads one apart. FanOut
 // is the single exception, and only because the per-agent cap is a
 // correctness fact a protocol is obliged to state in its caveats.
 type Agent struct {
 	name   string
-	image  Image
 	model  string // verbatim to `harbor -m`; "" means dawn pins nothing (oracle, nop)
 	effort string // verbatim to `--ak reasoning_effort=`; same rule
-	// hosts is the agent phase's entire allowlist: the hosts THIS CLI reaches
-	// on the credential path dawn drives it over, and no others. It belongs to
-	// the profile rather than the package because it is a fact about one
-	// binary, and dawn held it as a package global — pinned to Anthropic —
-	// until a second vendor made the mistake visible. A codex stage under that
-	// global would have been firewalled off from its own provider and failed
-	// as an infra_error with nothing in the receipt to say why.
-	hosts []string
 	// FanOut reports whether this profile may run more than one attempt at a
 	// time. Readable so a protocol can say in source that a fan is
 	// single-vendor and its blind spots are therefore correlated.
@@ -150,15 +147,8 @@ type Agent struct {
 // dawn has not measured; dawn will honestly record that it pinned nothing.
 // Neither profile pins an effort yet, for the identical reason.
 var (
-	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", model: "claude-sonnet-5", FanOut: true,
-		hosts: []string{"api.anthropic.com", "platform.claude.com"}}
-	// Codex reaches chatgpt.com and auth.openai.com and nothing else: read off
-	// the vendored 0.145.0 binary, which routes ChatGPT-subscription traffic to
-	// https://chatgpt.com/backend-api/codex and refreshes at auth.openai.com.
-	// api.openai.com is deliberately absent — that is the API-KEY path, and
-	// dawn does not drive codex over a metered key.
-	Codex = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false,
-		hosts: []string{"chatgpt.com", "auth.openai.com"}}
+	ClaudeCode = Agent{name: "claude-code", model: "claude-sonnet-5", FanOut: true}
+	Codex      = Agent{name: "codex", FanOut: false}
 )
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or

@@ -38,8 +38,7 @@ func TestWriteTaskCarriesTheSettledRules(t *testing.T) {
 		`environment_mode = "separate"`,
 		`docker_image = "rc-gate@sha256:`,
 		`docker_image = "rc-env@sha256:`,
-		`allowed_hosts = ["api.anthropic.com", "platform.claude.com"]`,
-		`network_mode = "allowlist"`,
+		`[agent]` + "\n" + `network_mode = "public"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("task.toml missing %q\n%s", want, got)
@@ -93,7 +92,7 @@ func TestWriteTaskOnLiveGateOpensBothVerifierPhases(t *testing.T) {
 	if !strings.Contains(got, `[environment]`+"\n"+`docker_image = "rc-env@sha256:`) || !strings.Contains(got, `network_mode = "no-network"`+"\n"+`os = "linux"`) {
 		t.Errorf("[environment] must stay no-network for a live gate\n%s", got)
 	}
-	if !strings.Contains(got, `[agent]`+"\n"+`network_mode = "allowlist"`+"\n"+`allowed_hosts = ["api.anthropic.com", "platform.claude.com"]`) {
+	if !strings.Contains(got, `[agent]`+"\n"+`network_mode = "public"`) {
 		t.Errorf("[agent] must be unchanged by a live gate\n%s", got)
 	}
 	if strings.Contains(got, "/logs/verifier") {
@@ -795,30 +794,5 @@ func TestTheGateSeesTheStagesInputs(t *testing.T) {
 	plain.Inputs = nil
 	if tag, root, _ := gateContext(t.TempDir(), plain); tag != pinned || root != "" {
 		t.Errorf("an input-free stage got a derived gate: %s %s", tag, root)
-	}
-}
-
-// The agent-phase allowlist follows the PROFILE, not the package. dawn held it
-// as one global pinned to Anthropic, which would have firewalled a codex stage
-// off from its own provider — an infra_error with nothing in the receipt to
-// name the cause.
-func TestAgentAllowlistIsPerProfile(t *testing.T) {
-	for _, tc := range []struct {
-		agent Agent
-		want  string
-	}{
-		{ClaudeCode, `allowed_hosts = ["api.anthropic.com", "platform.claude.com"]`},
-		{Codex, `allowed_hosts = ["chatgpt.com", "auth.openai.com"]`},
-	} {
-		dir := t.TempDir()
-		s := Stage{ID: "s", Agent: tc.agent, Env: Image("e@sha256:" + strings.Repeat("a", 64)), Prompt: "p",
-			Gate: SoundGate(Image("g@sha256:" + strings.Repeat("b", 64)))}
-		if err := writeTask(context.Background(), dir, s, time.Minute); err != nil {
-			t.Fatal(err)
-		}
-		got := readFile(t, filepath.Join(dir, "task.toml"))
-		if !strings.Contains(got, tc.want) {
-			t.Errorf("%s: task.toml missing %q\n%s", tc.agent.name, tc.want, got)
-		}
 	}
 }
