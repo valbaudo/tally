@@ -164,6 +164,36 @@ type Gate struct {
 
 // SoundGate is a gate whose passed verdict is a claim about the world. It is
 // the only kind of gate a stage can reach Passed through.
+//
+// Soundness is the AUTHOR's claim, and dawn believed three gates that did not
+// have it. The rule that would have caught all three by inspection, in the
+// order they were found:
+//
+//	A gate is sound only if the artifact supplies DATA to a procedure it
+//	cannot alter.
+//
+// There are exactly two ways to break it, and dawn's own targets managed both.
+// The artifact must not get to CHOOSE THE TEST: vdh-adyen let a finding name
+// both the exploit request and its control, so two unrelated endpoints — a
+// storefront homepage that answers 200 and an API that answers 401 — satisfied
+// "served where the control was refused" with no vulnerability anywhere near
+// it. And the artifact must not RUN INSIDE THE TEST: pr-ci measured a patch by
+// the exit code of a process that imports the patched file, so `sys.exit(0)`
+// at import ended that process 0 having run no tests at all. Its first repair
+// compared a value the same process printed, which the patched file could
+// print first, and was forged the same afternoon.
+//
+// cybergym obeys the rule and is the one gate no forgery was found against:
+// the agent hands over argv bytes, and the two builds, the runner and the
+// comparison are all the gate's own.
+//
+// dawn cannot check the rule — it is a property of a gate's reasoning, not of
+// any bytes dawn can read. What dawn does check is that the gate PROVES ITSELF
+// before dawn will spend an agent on it: see gateSelftest in harbor.go, which
+// runs the gate's own selftest in the pinned image and refuses to dispatch if
+// it does not pass. What that selftest must contain is the contract at
+// outputDir, and the case that matters is the last one — an artifact that
+// scores 1 while accomplishing nothing.
 func SoundGate(img Image) Gate { return Gate{image: img} }
 
 // LiveGate is a sound gate that reaches the named hosts. Its passed verdict is

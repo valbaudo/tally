@@ -631,3 +631,50 @@ func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 		t.Errorf("generated task did not carry the sanitised name; task.toml:\n%s", b)
 	}
 }
+
+// A gate that claims nothing proves nothing, and must not reach docker at all.
+// The image name is deliberately unpullable: if proveGate dispatched it, the
+// call would fail rather than return nil, so this passes for the right reason
+// and needs no docker of its own.
+func TestProveGateSkipsGatesThatClaimNothing(t *testing.T) {
+	proven = map[Image]error{}
+	for _, g := range []Gate{
+		FormatOnlyGate("dawn-no-such-image-should-never-be-run"),
+		NoGate("nothing to check here"),
+	} {
+		if err := proveGate(context.Background(), g, t.TempDir()); err != nil {
+			t.Fatalf("%s gate: proveGate = %v, want nil (it must not run docker)", g.kind(), err)
+		}
+	}
+}
+
+// The live path: a gate proves itself, and a gate that ships no proof is
+// refused BEFORE an agent is dispatched, which is the whole point of the
+// check. Opt in with DAWN_HARBOR_E2E=1 (needs docker and the built images).
+func TestProveGateRefusesAGateThatShipsNoProof(t *testing.T) {
+	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
+		t.Skip("set DAWN_HARBOR_E2E=1 (needs docker and the built gate images)")
+	}
+	proven = map[Image]error{}
+	dir := t.TempDir()
+
+	// A real gate carries /gate/selftest.sh and passes it.
+	real := Image("dawn-pr-ci-gate@sha256:fb9372925196db1af71f3a1349f1e9c3b5c7d1c44621ec83a5d3b5483d117242")
+	if err := proveGate(context.Background(), SoundGate(real), dir); err != nil {
+		t.Fatalf("the pr-ci gate did not prove itself: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gate-selftest.log")); err != nil {
+		t.Fatalf("no transcript beside the attempt that paid for it: %v", err)
+	}
+
+	// The gates' own base image: same bytes underneath, no selftest on top.
+	bare := Image("python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970")
+	if err := proveGate(context.Background(), SoundGate(bare), t.TempDir()); err == nil {
+		t.Fatal("a gate with no /gate/selftest.sh proved itself; SoundGate would mean nothing")
+	}
+
+	// Memoised: the answer is a property of pinned bytes, not of the call.
+	if _, ok := proven[bare]; !ok {
+		t.Fatal("the refusal was not memoised")
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -53,10 +54,85 @@ import (
 // thing, and dawn reads neither an exit code nor a line of output to know it.
 //
 // None of this reaches a gate at runtime — it is baked in — so every gate
-// image proves it at build time by running its own test.sh three ways:
-// against nothing (0), against a planted oracle artifact (1), and with its
-// own environment sabotaged (no reward.json) (experiments/harbor-targets/*/gate).
+// image proves it at build time by running its own selftest, and dawn runs
+// that same selftest again before it will spend an agent on the gate (see
+// gateSelftest). Four ways, and the fourth is the one that was missing:
+//
+//	against nothing                  reward 0
+//	against a planted oracle         reward 1
+//	with its own environment broken  NO reward.json, so infra_error
+//	against a planted FORGERY        reward 0
+//
+// A forgery is an artifact that would score 1 while accomplishing nothing —
+// not malformed input, which the first case already covers, but input the gate
+// ACCEPTS for a reason that is not the reason it is meant to accept. The first
+// three cases were the whole contract for months and two gates passed them
+// while being forgeable: pr-ci accepted `import sys; sys.exit(0)` prepended to
+// the file under test, which ended the measuring process 0 with no test run,
+// and vdh-adyen accepted a 200 from a storefront homepage paired with a 401
+// from an unrelated API. Both are now permanent selftest cases in their
+// images, so a gate that stops discriminating fails its build rather than
+// shipping (experiments/harbor-targets/*/gate).
+//
+// Nothing here can establish that an author's forgery case is a GOOD one; that
+// is judgment, and SoundGate states the rule it should be judged against.
 const outputDir = "/app/outputs"
+
+// gateSelftest is where a gate proves itself, and dawn runs it before it will
+// spend an agent on that gate. It is a path, not a flag: a gate that claims
+// soundness and ships no proof of it does not run at all.
+//
+// The order is the point. A gate is only discovered to be broken AFTER the
+// agent has run — the expensive half first, then the verdict — so a bad gate
+// has always cost a whole attempt to find (the README measures one at ~140k
+// tokens). Running the gate's own selftest first turns that into a failure
+// that costs nothing, before any agent is dispatched.
+//
+// It runs with NO NETWORK, which is not a restriction the gates had to be bent
+// around: all three write their selftests to be provable offline, and the live
+// one says so in its own header — every case it checks is refused before any
+// request is made, and it states plainly that its live half is proven by a
+// recorded run rather than by every build.
+const gateSelftest = "/gate/selftest.sh"
+
+// proven memoises the selftest per image, because the image is pinned by
+// digest: the same bytes cannot prove themselves twice differently, and a
+// search that samples ten times should pay for this once.
+var (
+	provenMu sync.Mutex
+	proven   = map[Image]error{}
+)
+
+// proveGate runs the gate's own selftest in the pinned gate image and requires
+// it to exit 0. A gate that claims nothing (NoGate, FormatOnlyGate) proves
+// nothing: dawn already refuses to let those reach Passed, so there is no
+// verdict for a selftest to protect.
+//
+// The transcript is written beside the attempt that paid for it. Later
+// attempts on the same image reuse the answer and write no transcript, which
+// is why only the first attempt's evidence carries one.
+func proveGate(ctx context.Context, g Gate, evidence string) error {
+	if k := g.kind(); k != "sound" && k != "live" {
+		return nil
+	}
+	provenMu.Lock()
+	defer provenMu.Unlock()
+	if err, ok := proven[g.image]; ok {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network=none",
+		string(g.image), gateSelftest)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		err = fmt.Errorf("dawn: gate %s did not prove itself (%s %s): %w\n%s",
+			g.image, gateSelftest, "exited non-zero", err, out)
+	}
+	if mkErr := os.MkdirAll(evidence, 0o755); mkErr == nil {
+		os.WriteFile(filepath.Join(evidence, "gate-selftest.log"), out, 0o644)
+	}
+	proven[g.image] = err
+	return err
+}
 
 // generatedTaskDirName is the basename runTrial gives the task directory it
 // generates for Harbor. It is load-bearing, not cosmetic: Harbor's
@@ -496,6 +572,11 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 	d, ok := ctx.Deadline()
 	if !ok {
 		return Result{}, fmt.Errorf("dawn: stage %s dispatched with no attempt clock", s.ID)
+	}
+	// Before the expensive half. A gate that cannot prove itself never gets an
+	// agent run spent on it.
+	if err := proveGate(ctx, s.Gate, evidence); err != nil {
+		return Result{}, err
 	}
 	t, err := runTrial(ctx, s, time.Until(d), evidence)
 	if err != nil {
