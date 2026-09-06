@@ -74,5 +74,60 @@ echo "$all4" > $A/report.json
 abstain $R "the gate's own ground truth is gone"
 mv /gate/ground_truth.off /gate/ground_truth.json
 
+
+# ---- validate gate: the adversary is scored against the machine ----
+I=/app/inputs/0
+V=/gate/validate_check.py
+rm -rf /app/inputs && mkdir -p $I
+real='{"file":"src/users.py","function":"get_user_by_name","payload":"nobody'"'"' OR '"'"'1'"'"'='"'"'1"}'
+dud='{"file":"src/users.py","function":"get_user_by_id","payload":"nobody'"'"' OR '"'"'1'"'"'='"'"'1"}'
+
+echo "$real" > $I/finding.json
+echo '{"file":"src/users.py","function":"get_user_by_name","verdict":"confirmed"}' > $A/verdict.json
+want $V 1 "the adversary confirms a finding that really proves"
+echo '{"file":"src/users.py","function":"get_user_by_name","verdict":"refuted"}' > $A/verdict.json
+want $V 0 "the adversary refutes a finding that really proves"
+# It may not log findings of its own: a verdict about anything else is refused.
+echo '{"file":"src/orders.py","function":"search_orders_by_status","verdict":"confirmed"}' > $A/verdict.json
+want $V 0 "the adversary reports a DIFFERENT function than the one it was given"
+
+echo "$dud" > $I/finding.json
+echo '{"file":"src/users.py","function":"get_user_by_id","verdict":"refuted"}' > $A/verdict.json
+want $V 1 "the adversary refutes a finding that does not prove"
+echo '{"file":"src/users.py","function":"get_user_by_id","verdict":"confirmed"}' > $A/verdict.json
+want $V 0 "the adversary rubber-stamps a decoy"
+rm -f $A/verdict.json
+
+# ---- dedupe gate: collapse without inventing or dropping ----
+D=/gate/dedupe_check.py
+rm -rf /app/inputs && mkdir -p /app/inputs/0 /app/inputs/1 /app/inputs/2
+echo '{"file":"src/users.py","function":"get_user_by_name"}'  > /app/inputs/0/finding.json
+echo '{"file":"src/users.py","function":"get_user_by_name"}'  > /app/inputs/1/finding.json
+echo '{"file":"src/orders.py","function":"search_orders_by_status"}' > /app/inputs/2/finding.json
+echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/orders.py","function":"search_orders_by_status"}]}' > $A/deduped.json
+want $D 1 "three findings, one duplicate, collapsed to two"
+echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/users.py","function":"get_user_by_name"}]}' > $A/deduped.json
+want $D 0 "the output still contains a duplicate"
+echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"}]}' > $A/deduped.json
+want $D 0 "dedupe dropped a distinct finding instead of collapsing one"
+echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/orders.py","function":"search_orders_by_status"},{"file":"src/search.py","function":"search_products"}]}' > $A/deduped.json
+want $D 0 "dedupe invented a finding that was never handed in"
+rm -f $A/deduped.json
+
+# ---- trace gate: every hop is a real call edge ----
+T=/gate/trace_check.py
+rm -rf /app/inputs && mkdir -p /app/inputs/0
+echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"}]}' > /app/inputs/0/deduped.json
+echo '{"traces":[{"function":"get_user_by_name","path":["handle_user_lookup","get_user_by_name"]}]}' > $A/trace.json
+want $T 1 "a path whose every hop is a real call edge"
+# THE FORGERY: a plausible path through functions that never call each other.
+echo '{"traces":[{"function":"get_user_by_name","path":["handle_catalog","get_user_by_name"]}]}' > $A/trace.json
+want $T 0 "a plausible path whose hop is not a call this source makes"
+echo '{"traces":[{"function":"get_user_by_name","path":["handle_user_lookup","nonexistent_fn","get_user_by_name"]}]}' > $A/trace.json
+want $T 0 "a path through a function that does not exist"
+echo '{"traces":[]}' > $A/trace.json
+want $T 0 "no reachability path for a finding that was handed in"
+rm -rf /app/inputs $A/trace.json
+
 rm -f $A/finding.json $A/report.json
 echo "SELFTEST OK"

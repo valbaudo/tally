@@ -109,6 +109,29 @@ target "vdh-report-gate" {
   tags       = ["dawn-vdh-report-gate"]
 }
 
+
+target "vdh-validate-gate" {
+  inherits   = ["reproducible"]
+  context    = "vdh-hunt"
+  dockerfile = "gate/Dockerfile.validate"
+  tags       = ["dawn-vdh-validate-gate"]
+}
+
+target "vdh-dedupe-gate" {
+  inherits   = ["reproducible"]
+  context    = "vdh-hunt"
+  dockerfile = "gate/Dockerfile.dedupe"
+  tags       = ["dawn-vdh-dedupe-gate"]
+}
+
+target "vdh-trace-gate" {
+  inherits   = ["reproducible"]
+  context    = "vdh-hunt"
+  dockerfile = "gate/Dockerfile.trace"
+  tags       = ["dawn-vdh-trace-gate"]
+}
+
 group "vdh-hunt" {
-  targets = ["vdh-hunt-env", "vdh-hunt-gate", "vdh-report-gate"]
+  targets = ["vdh-hunt-env", "vdh-hunt-gate", "vdh-report-gate",
+             "vdh-validate-gate", "vdh-dedupe-gate", "vdh-trace-gate"]
 }

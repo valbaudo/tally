@@ -7,7 +7,7 @@ FROM python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2d
 # calls them itself, so a finding is judged against bytes the agent could not
 # edit.
 COPY src/ /gate/src/
-COPY gate/oracle.py gate/hunt_check.py gate/report_check.py gate/ground_truth.json /gate/
+COPY gate/oracle.py gate/hunt_check.py gate/report_check.py gate/validate_check.py gate/dedupe_check.py gate/trace_check.py gate/ground_truth.json /gate/
 COPY gate/selftest.sh /gate/selftest.sh
 COPY gate/hunt.sh /tests/test.sh
 RUN mkdir -p /app/outputs \

@@ -25,7 +25,7 @@ func TestWriteTaskCarriesTheSettledRules(t *testing.T) {
 		Prompt: "do the thing",
 		Gate:   SoundGate(Image("rc-gate@sha256:" + strings.Repeat("b", 64))),
 	}
-	if err := writeTask(dir, s, 5*time.Minute); err != nil {
+	if err := writeTask(context.Background(), dir, s, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "task.toml"))
@@ -76,7 +76,7 @@ func TestWriteTaskOnLiveGateOpensBothVerifierPhases(t *testing.T) {
 		Prompt: "prove it",
 		Gate:   LiveGate(Image("rc-gate@sha256:"+strings.Repeat("b", 64)), "target.example.com", "10.0.0.5"),
 	}
-	if err := writeTask(dir, s, 5*time.Minute); err != nil {
+	if err := writeTask(context.Background(), dir, s, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	got := readFile(t, filepath.Join(dir, "task.toml"))
@@ -123,7 +123,7 @@ func TestWriteTaskRejectsUnpinnedAndUnexplained(t *testing.T) {
 		"silent nogate": {ID: "a", Env: pinned, Gate: NoGate("")},
 		"no id":         {ID: "", Env: pinned, Gate: SoundGate(pinned)},
 	} {
-		if err := writeTask(t.TempDir(), s, time.Minute); err == nil {
+		if err := writeTask(context.Background(), t.TempDir(), s, time.Minute); err == nil {
 			t.Errorf("%s: accepted at dispatch", name)
 		}
 	}
@@ -621,7 +621,7 @@ func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 		Prompt: "do the thing",
 		Gate:   SoundGate(Image("rc-gate@sha256:" + strings.Repeat("b", 64))),
 	}
-	if err := writeTask(dir, s, 5*time.Minute); err != nil {
+	if err := writeTask(context.Background(), dir, s, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "task.toml"))
@@ -702,7 +702,7 @@ func TestStageInputsAreBakedIntoTheNextStagesImage(t *testing.T) {
 		Prompt: "prove it", Outputs: []string{"proof.json"},
 		Inputs: []Result{upstream}, Gate: NoGate("test"),
 	}
-	if err := writeTask(dir, stage, time.Minute); err != nil {
+	if err := writeTask(context.Background(), dir, stage, time.Minute); err != nil {
 		t.Fatalf("writeTask: %v", err)
 	}
 
@@ -745,5 +745,54 @@ func TestInputNamesCannotEscapeTheBuildContext(t *testing.T) {
 		if err := cleanName(ok); err != nil {
 			t.Errorf("cleanName(%q) = %v, want nil", ok, err)
 		}
+	}
+}
+
+// The gate must see what the agent was given. Harbor carries only the agent's
+// declared ARTIFACTS into the verifier, so a gate that judges work against its
+// inputs saw nothing at all — measured, when a live run lost every validate
+// attempt to infra_error before this existed.
+func TestTheGateSeesTheStagesInputs(t *testing.T) {
+	produced := t.TempDir()
+	if err := os.WriteFile(filepath.Join(produced, "finding.json"), []byte(`{"f":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinned := Image("g@sha256:" + strings.Repeat("b", 64))
+	stage := Stage{
+		ID: "validate", Agent: ClaudeCode, Env: Image("e@sha256:" + strings.Repeat("a", 64)),
+		Prompt: "disprove it", Outputs: []string{"verdict.json"},
+		Inputs: []Result{{Manifest: Manifest{{Name: "finding.json", Digest: "sha256:0"}}, artifactsDir: produced}},
+		Gate:   SoundGate(pinned),
+	}
+	dir := t.TempDir()
+	tag, root, err := gateContext(dir, stage)
+	if err != nil {
+		t.Fatalf("gateContext: %v", err)
+	}
+	if root == "" || tag == pinned {
+		t.Fatal("a gated stage with inputs got no derived gate: it would run blind")
+	}
+	got, err := os.ReadFile(filepath.Join(root, "inputs", "0", "finding.json"))
+	if err != nil || string(got) != `{"f":1}` {
+		t.Fatalf("the input never reached the gate's build context: %q, %v", got, err)
+	}
+	df, _ := os.ReadFile(filepath.Join(root, "Dockerfile"))
+	if !strings.Contains(string(df), "FROM "+string(pinned)) {
+		t.Errorf("the derived gate lost the pinned gate's bytes: %s", df)
+	}
+	if !strings.Contains(string(df), "COPY inputs "+inputDir) {
+		t.Errorf("the derived gate does not carry the inputs: %s", df)
+	}
+	// Same gate + same inputs must name the same image, or every attempt
+	// rebuilds and resume stops meaning anything.
+	again, _, _ := gateContext(t.TempDir(), stage)
+	if again != tag {
+		t.Errorf("derived tag is not a function of its inputs: %s vs %s", tag, again)
+	}
+	// A stage with no inputs needs no derived gate.
+	plain := stage
+	plain.Inputs = nil
+	if tag, root, _ := gateContext(t.TempDir(), plain); tag != pinned || root != "" {
+		t.Errorf("an input-free stage got a derived gate: %s %s", tag, root)
 	}
 }
