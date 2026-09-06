@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<container xmlns="http://symfony.com/schema/dic/services"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://symfony.com/schema/dic/services
+        https://symfony.com/schema/dic/services/services-1.0.xsd">
+    <services>
+        <service id="Adyen\Webhook\Notification"/>
+        <service id="Adyen\Webhook\Receiver\HmacSignature" autowire="true"/>
+        <service id="Adyen\Webhook\Receiver\NotificationReceiver" autowire="true"/>
+        <service id="Adyen\Webhook\PaymentStates"/>
+        <service id="Adyen\Webhook\Processor\ProcessorFactory"/>
+        <service id="Adyen\Service\Builder\Address"/>
+        <service id="Adyen\Service\Builder\Browser"/>
+        <service id="Adyen\Service\Builder\Customer"/>
+        <service id="Adyen\Service\Builder\OpenInvoice"/>
+        <service id="Adyen\Service\Builder\Payment"/>
+        <service id="Adyen\Shopware\Util\Currency"/>
+        <service id="Adyen\Shopware\Util\Idempotency"/>
+        <service id="Adyen\Shopware\Util\CheckoutStateDataValidator"/>
+        <service id="Adyen\Shopware\Util\ShopwarePaymentTokenValidator">
+            <argument type="service" id="Shopware\Core\Checkout\Payment\Cart\Token\JWTFactoryV2"/>
+        </service>
+        <service id="Adyen\Shopware\Util\RatePayDeviceFingerprintParamsProvider">
+            <argument type="service" id="Symfony\Component\HttpFoundation\RequestStack"/>
+            <argument type="service" id="Adyen\Shopware\Service\ConfigurationService"/>
+        </service>
+        <service id="Adyen\Shopware\Util\DataArrayValidator"/>
+    </services>
+</container>

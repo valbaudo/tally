@@ -1,0 +1,23 @@
+{% if adyenFrontendData and adyenFrontendData.givingEnabled %}
+    <div id="adyen-giving-container">
+        <div id="adyen-giving-configuration"
+             data-currency="{{ adyenFrontendData.currency }}"
+             data-values="{{ adyenFrontendData.values }}"
+             data-background-url="{{ adyenFrontendData.backgroundUrl }}"
+             data-logo-url="{{ adyenFrontendData.logoUrl }}"
+             data-description="{{ adyenFrontendData.description }}"
+             data-name="{{ adyenFrontendData.name }}"
+             data-charity-url="{{ adyenFrontendData.charityUrl }}"
+             data-order-id="{{ adyenFrontendData.orderId }}"
+             data-donation-endpoint-url="{{ adyenFrontendData.donationEndpointUrl }}"
+             data-continue-action-url="{{ adyenFrontendData.continueActionUrl }}"
+             data-terms-and-conditions-url="{{ adyenFrontendData.termsAndConditionsUrl }}"
+        ></div>
+
+        <div id='donation-container'></div>
+
+        <script {% if app.request.attributes.get('_cspNonce') %} nonce="{{ app.request.attributes.get('_cspNonce') }}" {% endif %}>
+            var adyenGivingConfiguration = document.querySelector('#adyen-giving-configuration').dataset;
+        </script>
+    </div>
+{% endif %}

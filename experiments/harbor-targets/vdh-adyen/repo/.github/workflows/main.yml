@@ -1,0 +1,37 @@
+on: ["push", "pull_request"]
+name: Main Workflow
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: Run
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php-version: [ 8.2, 8.3 ]
+
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f
+        with:
+          php-version: ${{ matrix.php-version }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate composer.json and composer.lock
+        run: composer validate
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run PHP Code Sniffer
+        run: vendor/bin/phpcs .
+
+      - name: Make sure project files are compilable
+        run: find -L . -path ./vendor -prune -o -path ./tests -prune -o -name '*.php' -print0 | xargs -0 -n 1 -P 4 php -l
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit

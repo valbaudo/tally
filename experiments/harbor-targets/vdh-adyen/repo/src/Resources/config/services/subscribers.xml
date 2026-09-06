@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<container xmlns="http://symfony.com/schema/dic/services"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://symfony.com/schema/dic/services
+        https://symfony.com/schema/dic/services/services-1.0.xsd">
+    <services>
+        <!--Event subscribers-->
+        <service id="Adyen\Shopware\Subscriber\PaymentSubscriber" autowire="true">
+            <argument key="$router" type="service" id="Symfony\Component\Routing\RouterInterface"/>
+            <argument key="$requestStack" type="service" id="request_stack"/>
+            <argument key="$cartPersister" type="service" id="Shopware\Core\Checkout\Cart\CartPersister"/>
+            <argument key="$contextSwitchRoute" type="service" id="Shopware\Core\System\SalesChannel\SalesChannel\ContextSwitchRoute"/>
+            <argument key="$salesChannelContextFactory" type="service" id="Shopware\Core\System\SalesChannel\Context\SalesChannelContextFactory"/>
+            <argument key="$paymentMethodRepository" type="service" id="payment_method.repository"/>
+            <tag name="kernel.event_subscriber"/>
+        </service>
+        <service id="Adyen\Shopware\Subscriber\PostPaymentSubscriber" autowire="true">
+            <argument key="$router" type="service" id="Symfony\Component\Routing\RouterInterface"/>
+            <argument key="$requestStack" type="service" id="request_stack"/>
+            <argument key="$logger" type="service" id="monolog.logger.adyen_generic"/>
+            <tag name="kernel.event_subscriber"/>
+        </service>
+        <service id="Adyen\Shopware\Subscriber\ContextSubscriber" autowire="true">
+            <argument key="$contextSwitchRoute" type="service" id="Shopware\Core\System\SalesChannel\SalesChannel\ContextSwitchRoute"/>
+            <argument key="$cartPersister" type="service" id="Shopware\Core\Checkout\Cart\CartPersister"/>
+            <tag name="kernel.event_subscriber"/>
+        </service>
+        <service id="Adyen\Shopware\Subscriber\Response\PaymentMethodRouteResponseSubscriber" autowire="true">
+            <tag name="kernel.event_subscriber"/>
+            <tag name="kernel.reset" method="reset" />
+        </service>
+    </services>
+</container>

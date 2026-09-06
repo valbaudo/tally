@@ -1,0 +1,728 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/platform/master/src/Core/System/SystemConfig/Schema/config.xsd">
+
+    <card>
+        <title>General Settings</title>
+        <input-field type="text">
+            <name>merchantAccount</name>
+            <label>Merchant account</label>
+            <helpText>
+                Enter your merchant account identifier.
+                This can be found in your Adyen Customer Area, at the top of the screen you will see [YourCompanyAccount] &gt; [YourMerchantAccount].
+                Please note that the merchant account is different from the company account; a company account can have one or more merchant accounts.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-shopware
+            </helpText>
+        </input-field>
+        <input-field type="bool">
+            <name>environment</name>
+            <label>Live environment</label>
+        </input-field>
+        <component name="adyen-config-check-button">
+            <name>configTest</name>
+        </component>
+    </card>
+    <card>
+        <title>Production Settings</title>
+        <input-field type="password">
+            <name>apiKeyLive</name>
+            <label>API Key for live</label>
+            <helpText>
+                Enter your live API Key. This can be found in your live Customer Area &gt; Account &gt; API Credentials.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-api-key.
+                For a test environment, this field can be empty.
+            </helpText>
+        </input-field>
+        <input-field type="password">
+            <name>clientKeyLive</name>
+            <label>Client Key for live</label>
+            <helpText>
+                We use your client key to authenticate requests from your payment environment.
+                This can be found in your live Customer Area &gt; Account &gt; API Credentials.
+                See https://docs.adyen.com/plugins/shopware-6#generate-a-client-key for more information.
+                For a test environment, this field can be empty.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>liveEndpointUrlPrefix</name>
+            <label>Live endpoint URL prefix</label>
+            <helpText>
+                The URL prefix [random]-[company name] from your Adyen live Customer Area &gt; Account &gt; API URLs.
+                For a test environment, this field can be empty.
+            </helpText>
+        </input-field>
+    </card>
+    <card>
+        <title>Test Settings</title>
+        <input-field type="password">
+            <name>apiKeyTest</name>
+            <label>API Key for test</label>
+            <helpText>
+                Enter your test API Key. This can be found in your test Customer Area &gt; Account &gt; API Credentials.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-api-key
+                For a live environment, this field can be empty.
+            </helpText>
+        </input-field>
+        <input-field type="password">
+            <name>clientKeyTest</name>
+            <label>Client Key for test</label>
+            <helpText>
+                We use your client key to authenticate requests from your payment environment.
+                This can be found in your test Customer Area &gt; Account &gt; API Credentials.
+                See https://docs.adyen.com/plugins/shopware-6#generate-a-client-key for more information.
+                For a live environment, this field can be empty.
+            </helpText>
+        </input-field>
+    </card>
+    <card>
+        <title>Webhook Settings</title>
+        <input-field type="text">
+            <name>notificationUsername</name>
+            <label>Username for standard webhooks</label>
+            <helpText>
+                This is the username for basic authentication of your live endpoints.
+                Fill in from your live Adyen Customer Area &gt; Account &gt; Webhooks &gt; Edit or Add.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-notifications.
+                For testing the plugin without notifications, this field can be empty.
+            </helpText>
+        </input-field>
+        <input-field type="password">
+            <name>notificationPassword</name>
+            <label>Password for standard webhooks</label>
+            <helpText>
+                This is the password for basic authentication of your live endpoints.
+                Fill in from your live Adyen Customer Area &gt; Account &gt; Webhooks &gt; Edit or Add.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-notifications.
+                For testing the plugin without notifications, this field can be empty.
+            </helpText>
+        </input-field>
+        <input-field type="password">
+            <name>hmacTest</name>
+            <label>HMAC Key for test</label>
+            <helpText>
+                This is used to authenticate your endpoints.
+                If you want to test the webhook notifications then get your test HMAC Key from your test Adyen Customer Area &gt; Account &gt; Webhooks &gt; Edit or Add.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-notifications.
+                For testing the plugin without notifications, this field can be empty.
+            </helpText>
+        </input-field>
+        <input-field type="password">
+            <name>hmacLive</name>
+            <label>HMAC Key for live</label>
+            <helpText>
+                This is used to authenticate your endpoints.
+                Fill in your live HMAC Key from your live Adyen Customer Area &gt; Account &gt; Webhooks &gt; Edit or Add.
+                See https://docs.adyen.com/plugins/shopware-6#set-up-notifications.
+                For testing the plugin without notifications, this field can be empty.
+            </helpText>
+        </input-field>
+    </card>
+    <card>
+        <title>Capture Settings</title>
+        <input-field type="bool">
+            <name>manualCaptureEnabled</name>
+            <label>Manual Capture</label>
+            <helpText>
+                Enable this option if you want to perform the capture of funds manually later. This configuration won’t affect the capture mode of open invoice payment methods (Klarna, Afterpay Touch, Ratepay, FacilyPay/Oney, Affirm, Clearpay, Zip and PayBright).
+            </helpText>
+        </input-field>
+        <input-field type="bool">
+            <name>autoCaptureOpenInvoice</name>
+            <label>Use auto capture for open invoice payments</label>
+            <helpText>
+                Applicable for Klarna, Afterpay Touch, Ratepay, FacilyPay/Oney, Affirm, Clearpay, Zip and PayBright. By default, open invoice methods are set to manual capture. For auto capture, please contact support@adyen.com. After the approval, you can enable this option.
+            </helpText>
+        </input-field>
+        <input-field type="bool">
+            <name>captureOnShipmentEnabled</name>
+            <label>Capture on shipment for open invoice payments</label>
+            <helpText>
+                A capture request will be sent to Adyen whenever you make a shipment for an open invoice payment.
+            </helpText>
+        </input-field>
+        <component name="sw-entity-single-select-override">
+            <name>orderState</name>
+            <entity>state_machine_state</entity>
+            <label>Order shipping state for triggering capture</label>
+            <helpText>
+                This is the order shipping status that needs to be fulfilled in order to make a capture request to Adyen for open invoice payments.
+            </helpText>
+        </component>
+        <input-field type="int">
+            <name>rescheduleTime</name>
+            <label>Capture delay for shipment</label>
+            <helpText>
+                This is the time to wait before trying the next capture in seconds if the shipping state is set and not fulfilled.
+            </helpText>
+            <defaultValue>43200</defaultValue>
+        </input-field>
+    </card>
+    <card>
+        <title>Refund Settings</title>
+        <input-field type="single-select">
+            <name>refundStrategyGiftcard</name>
+            <label>Refund strategy for gift cards</label>
+            <helpText>Only relevant if you accept gift cards on Adyen payments.</helpText>
+            <options>
+                <option>
+                    <id>fifo</id>
+                    <name>Refund from the first payment first</name>
+                </option>
+                <option>
+                    <id>filo</id>
+                    <name>Refund from the last payment first</name>
+                </option>
+                <option>
+                    <id>ratio</id>
+                    <name>Refund based on ratio</name>
+                </option>
+            </options>
+        </input-field>
+    </card>
+    <card>
+        <title>Ratepay payment methods configuration</title>
+        <input-field type="text">
+            <name>deviceFingerprintSnippetId</name>
+            <label>Device fingerprint snippet id</label>
+            <helpText>
+                Set the device fingerprint snippet id provided by Ratepay. This value is required for the Ratepay payment methods to be available at checkout.
+            </helpText>
+        </input-field>
+    </card>
+    <card>
+        <title>Address form settings</title>
+        <input-field type="bool">
+            <name>billingAddressReadOnly</name>
+            <label>Configure the billing address to be displayed as read-only, preventing customer edits</label>
+            <helpText>
+                If set to true, the billing address will be read-only. Otherwise, it will be editable.
+            </helpText>
+        </input-field>
+        <input-field type="bool">
+            <name>shippingAddressReadOnly</name>
+            <label>Configure the shipping address to be displayed as read-only, preventing customer edits</label>
+            <helpText>
+                If set to true, the shipping address will be read-only. Otherwise, it will be editable.
+            </helpText>
+        </input-field>
+    </card>
+    <card>
+        <title>Express checkout</title>
+        <input-field type="bool">
+            <name>applePayExpressCheckoutEnabled</name>
+            <label>Enable Apple Pay express checkout</label>
+            <helpText>
+                This enables Apple Pay express checkout payments on the product and cart pages. For Apple Pay method to be available, it must also be activated on the Adyen account and added to the desired sales channel.
+            </helpText>
+        </input-field>
+        <input-field type="bool">
+            <name>googlePayExpressCheckoutEnabled</name>
+            <label>Enable Google Pay express checkout</label>
+            <helpText>
+                This enables Google Pay express checkout payments on the product and cart pages. For Google Pay method to be available, it must also be activated on the Adyen account and added to the desired sales channel.
+            </helpText>
+        </input-field>
+        <input-field type="bool">
+            <name>payPalExpressCheckoutEnabled</name>
+            <label>Enable PayPal express checkout</label>
+            <helpText>
+                This enables PayPal express checkout payments on the product and cart pages. For PayPal method to be available, it must also be activated on the Adyen account and added to the desired sales channel.
+            </helpText>
+        </input-field>
+    </card>
+    <card>
+        <title>PayPal</title>
+        <input-field type="single-select">
+            <name>paypalButtonColor</name>
+            <label>Select PayPal button color</label>
+            <helpText>PayPal button color. Refer to the documentation to preview how different color options are displayed.
+                <![CDATA[<a href="https://developer.paypal.com/sdk/js/reference/#color" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>gold</id>
+                    <name>Gold</name>
+                </option>
+                <option>
+                    <id>blue</id>
+                    <name>Blue</name>
+                </option>
+                <option>
+                    <id>silver</id>
+                    <name>Silver</name>
+                </option>
+                <option>
+                    <id>white</id>
+                    <name>White</name>
+                </option>
+                <option>
+                    <id>black</id>
+                    <name>Black</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>paypalButtonShape</name>
+            <label>Select PayPal button shape</label>
+            <helpText>PayPal button shape. Refer to the documentation to preview how different shape options are displayed.
+                <![CDATA[<a href="https://developer.paypal.com/sdk/js/reference/#shape" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>rect</id>
+                    <name>Rect</name>
+                </option>
+                <option>
+                    <id>pill</id>
+                    <name>Pill</name>
+                </option>
+                <option>
+                    <id>sharp</id>
+                    <name>Sharp</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>paypalButtonLabel</name>
+            <label>Select PayPal button label</label>
+            <helpText>PayPal button label. Refer to the documentation to preview how different label options are displayed.
+                <![CDATA[<a href="https://developer.paypal.com/sdk/js/reference/#label" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>paypal</id>
+                    <name>Paypal</name>
+                </option>
+                <option>
+                    <id>checkout</id>
+                    <name>Checkout</name>
+                </option>
+                <option>
+                    <id>buynow</id>
+                    <name>Buynow</name>
+                </option>
+                <option>
+                    <id>pay</id>
+                    <name>Pay</name>
+                </option>
+                <option>
+                    <id>installment</id>
+                    <name>Installment</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>paypalInstallmentsForMX</name>
+            <label>Select the number of installments for Mexico if the PayPal installment label is selected</label>
+            <helpText>Number of installments for Mexico. Refer to the documentation to preview the installment label option.
+                <![CDATA[<a href="https://developer.paypal.com/sdk/js/reference/#label" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>3</id>
+                    <name>3</name>
+                </option>
+                <option>
+                    <id>6</id>
+                    <name>6</name>
+                </option>
+                <option>
+                    <id>9</id>
+                    <name>9</name>
+                </option>
+                <option>
+                    <id>12</id>
+                    <name>12</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>paypalInstallmentsForBR</name>
+            <label>Select the number of installments for Brazil if the PayPal installment label is selected</label>
+            <helpText>Number of installments for Brazil. Refer to the documentation to preview the installment label option.
+                <![CDATA[<a href="https://developer.paypal.com/sdk/js/reference/#label" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>2</id>
+                    <name>2</name>
+                </option>
+                <option>
+                    <id>3</id>
+                    <name>3</name>
+                </option>
+                <option>
+                    <id>4</id>
+                    <name>4</name>
+                </option>
+                <option>
+                    <id>5</id>
+                    <name>5</name>
+                </option>
+                <option>
+                    <id>6</id>
+                    <name>6</name>
+                </option>
+                <option>
+                    <id>7</id>
+                    <name>7</name>
+                </option>
+                <option>
+                    <id>8</id>
+                    <name>8</name>
+                </option>
+                <option>
+                    <id>9</id>
+                    <name>9</name>
+                </option>
+                <option>
+                    <id>10</id>
+                    <name>10</name>
+                </option>
+                <option>
+                    <id>11</id>
+                    <name>11</name>
+                </option>
+                <option>
+                    <id>12</id>
+                    <name>12</name>
+                </option>
+            </options>
+        </input-field>
+    </card>
+    <card>
+        <title>GooglePay</title>
+        <input-field type="text">
+            <name>googleMerchantId</name>
+            <label>Google Merchant ID</label>
+            <helpText>
+                Enter the Google Mechant ID to use as the primary value when initializing the Google Pay component. If not specified, the ID configured in the Adyen Customer Area will be used as a fallback.
+            </helpText>
+        </input-field>
+        <input-field type="single-select">
+            <name>googlePayButtonType</name>
+            <label>Select GooglePay button type</label>
+            <helpText>GooglePay button type. Refer to the documentation to preview how different type options are displayed.
+                <![CDATA[<a href="https://developers.google.com/pay/api/web/reference/request-objects#ButtonOptions" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>book</id>
+                    <name>Book</name>
+                </option>
+                <option>
+                    <id>buy</id>
+                    <name>Buy</name>
+                </option>
+                <option>
+                    <id>checkout</id>
+                    <name>Checkout</name>
+                </option>
+                <option>
+                    <id>donate</id>
+                    <name>Donate</name>
+                </option>
+                <option>
+                    <id>order</id>
+                    <name>Order</name>
+                </option>
+                <option>
+                    <id>pay</id>
+                    <name>Pay</name>
+                </option>
+                <option>
+                    <id>plain</id>
+                    <name>Plain</name>
+                </option>
+                <option>
+                    <id>subscribe</id>
+                    <name>Subscribe</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>googlePayButtonColor</name>
+            <label>Select GooglePay button color</label>
+            <helpText>GooglePay button color. Refer to the documentation to preview how different color options are displayed.
+                <![CDATA[<a href="https://developers.google.com/pay/api/web/reference/request-objects#ButtonOptions" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>default</id>
+                    <name>Default</name>
+                </option>
+                <option>
+                    <id>black</id>
+                    <name>Black</name>
+                </option>
+                <option>
+                    <id>white</id>
+                    <name>White</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>googlePayButtonSize</name>
+            <label>Select GooglePay button size</label>
+            <helpText>GooglePay button size. Refer to the documentation to preview how different sizes are displayed.
+                <![CDATA[<a href="https://developers.google.com/pay/api/web/reference/request-objects#ButtonOptions" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>static</id>
+                    <name>Static</name>
+                </option>
+                <option>
+                    <id>fill</id>
+                    <name>Fill</name>
+                </option>
+            </options>
+        </input-field>
+    </card>
+    <card>
+        <title>Apple Pay</title>
+        <input-field type="single-select">
+            <name>applePayButtonType</name>
+            <label>Select Apple Pay button type</label>
+            <helpText>Apple Pay button type. Refer to the documentation to preview how different type options are displayed.
+                <![CDATA[<a href="https://developer.apple.com/design/human-interface-guidelines/apple-pay#Button-types" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>plain</id>
+                    <name>Plain</name>
+                </option>
+                <option>
+                    <id>buy</id>
+                    <name>Buy</name>
+                </option>
+                <option>
+                    <id>donate</id>
+                    <name>Donate</name>
+                </option>
+                <option>
+                    <id>check-out</id>
+                    <name>Check Out</name>
+                </option>
+                <option>
+                    <id>book</id>
+                    <name>Book</name>
+                </option>
+                <option>
+                    <id>subscribe</id>
+                    <name>Subscribe</name>
+                </option>
+                <option>
+                    <id>add-money</id>
+                    <name>Add Money</name>
+                </option>
+                <option>
+                    <id>contribute</id>
+                    <name>Contribute</name>
+                </option>
+                <option>
+                    <id>order</id>
+                    <name>Order</name>
+                </option>
+                <option>
+                    <id>reload</id>
+                    <name>Reload</name>
+                </option>
+                <option>
+                    <id>rent</id>
+                    <name>Rent</name>
+                </option>
+                <option>
+                    <id>support</id>
+                    <name>Support</name>
+                </option>
+                <option>
+                    <id>tip</id>
+                    <name>Tip</name>
+                </option>
+                <option>
+                    <id>top-up</id>
+                    <name>Top Up</name>
+                </option>
+            </options>
+        </input-field>
+        <input-field type="single-select">
+            <name>applePayButtonColor</name>
+            <label>Select Apple Pay button color</label>
+            <helpText>Apple Pay button color. Refer to the documentation to preview how different color options are displayed.
+                <![CDATA[<a href="https://developer.apple.com/design/human-interface-guidelines/apple-pay#Button-styles" target="_blank">
+                    Documentation
+                </a>   ]]>
+            </helpText>
+            <options>
+                <option>
+                    <id>black</id>
+                    <name>Black</name>
+                </option>
+                <option>
+                    <id>white</id>
+                    <name>White</name>
+                </option>
+                <option>
+                    <id>white-outline</id>
+                    <name>White Outline</name>
+                </option>
+            </options>
+        </input-field>
+    </card>
+    <card>
+        <title>Adyen Giving</title>
+        <input-field type="bool">
+            <name>adyenGivingEnabled</name>
+            <label>Enable Adyen Giving</label>
+            <helpText>
+                This enables Adyen Giving and offers the donation form in the order success page.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>adyenGivingCharityMerchantAccount</name>
+            <label>Charity Merchant Account</label>
+            <helpText>
+                Adyen merchant account for the charity.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>adyenGivingCharityName</name>
+            <label>Charity Name</label>
+            <helpText>
+                Name of the charity displayed on the Adyen Giving form.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>adyenGivingCharityDescription</name>
+            <label>Charity Description</label>
+            <helpText>
+                Description of the charity.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>adyenGivingCharityWebsite</name>
+            <label>Charity Website</label>
+            <helpText>
+                Link to the charity website.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>adyenGivingTermsAndConditions</name>
+            <label>Terms and Conditions</label>
+            <helpText>
+                Link to the charity organization's terms and conditions page.
+            </helpText>
+        </input-field>
+        <input-field type="text">
+            <name>adyenGivingDonationAmounts</name>
+            <label>Donation Amounts</label>
+            <helpText>
+                Suggested amounts that the shopper can choose to donate using the order currency, separated by commas.
+            </helpText>
+        </input-field>
+        <component name="sw-media-field">
+            <name>adyenGivingCharityLogo</name>
+            <label>Charity Logo</label>
+            <helpText>
+                Logo displayed on the Adyen Giving form.
+            </helpText>
+        </component>
+        <component name="sw-media-field">
+            <name>adyenGivingBackgroundImage</name>
+            <label>Background Image</label>
+            <helpText>
+                Background image of the Adyen Giving form.
+            </helpText>
+        </component>
+    </card>
+    <card>
+        <title>Gift cards</title>
+        <input-field type="single-select">
+            <name>addGiftCardOption</name>
+            <label>Adding new gift cards on the cart page</label>
+            <helpText>
+                Choose how shoppers can add new gift cards on the cart page.
+            </helpText>
+            <options>
+                <option>
+                    <id>showFields</id>
+                    <name>Show fields for adding a new gift card</name>
+                </option>
+                <option>
+                    <id>showButton</id>
+                    <name>Show a button for adding a new gift card</name>
+                </option>
+            </options>
+            <defaultValue>showFields</defaultValue>
+        </input-field>
+        <input-field type="single-select">
+            <name>voucherBlockPosition</name>
+            <label>Position of the vouchers block</label>
+            <helpText>
+                Select where the vouchers block should be displayed in the cart totals.
+            </helpText>
+            <options>
+                <option>
+                    <id>aboveOrderTotals</id>
+                    <name>Above order totals</name>
+                </option>
+                <option>
+                    <id>belowOrderTotals</id>
+                    <name>Below order totals</name>
+                </option>
+            </options>
+            <defaultValue>belowOrderTotals</defaultValue>
+        </input-field>
+        <input-field type="bool">
+            <name>showVouchersCheckout</name>
+            <label>Show vouchers on the checkout page</label>
+            <helpText>
+                Enable this option to display applied vouchers on the checkout page.
+            </helpText>
+            <defaultValue>false</defaultValue>
+        </input-field>
+        <input-field type="bool">
+            <name>showVouchersSeparately</name>
+            <label>Show each voucher as a separate item in the order totals</label>
+            <helpText>
+                Enable this option to list each applied voucher as a separate line in the order totals.
+            </helpText>
+            <defaultValue>false</defaultValue>
+        </input-field>
+    </card>
+    <card>
+        <title>Domain URL</title>
+        <input-field type="bool">
+            <name>enableOverrideDefaultDomain</name>
+            <label>Enabled</label>
+        </input-field>
+        <component name="sw-entity-single-select">
+            <name>defaultDomainId</name>
+            <entity>sales_channel_domain</entity>
+            <labelProperty>url</labelProperty>
+            <label>Select default domain URL</label>
+            <helpText>
+                Select the preferred domain from the list of existing domains to be used in returnUrl.
+            </helpText>
+        </component>
+    </card>
+</config>

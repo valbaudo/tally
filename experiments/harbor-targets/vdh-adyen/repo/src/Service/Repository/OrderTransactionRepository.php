@@ -1,0 +1,150 @@
+<?php
+/**
+ *                       ######
+ *                       ######
+ * ############    ####( ######  #####. ######  ############   ############
+ * #############  #####( ######  #####. ######  #############  #############
+ *        ######  #####( ######  #####. ######  #####  ######  #####  ######
+ * ###### ######  #####( ######  #####. ######  #####  #####   #####  ######
+ * ###### ######  #####( ######  #####. ######  #####          #####  ######
+ * #############  #############  #############  #############  #####  ######
+ *  ############   ############  #############   ############  #####  ######
+ *                                      ######
+ *                               #############
+ *                               ############
+ *
+ * Adyen Payment Module
+ *
+ * Copyright (c) 2021 Adyen B.V.
+ * This file is open source and available under the MIT license.
+ * See the LICENSE file for more info.
+ *
+ * Author: Adyen <shopware@adyen.com>
+ */
+
+namespace Adyen\Shopware\Service\Repository;
+
+use Adyen\Shopware\Service\ConfigurationService;
+use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionEntity;
+use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsAnyFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Sorting\FieldSorting;
+use Shopware\Core\System\SalesChannel\SalesChannelContext;
+
+class OrderTransactionRepository
+{
+    /**
+     * @var EntityRepository
+     */
+    private EntityRepository $orderTransactionRepository;
+
+    /**
+     * OrderTransactionRepository constructor.
+     *
+     * @param EntityRepository $orderTransactionRepository
+     */
+    public function __construct(EntityRepository $orderTransactionRepository)
+    {
+        $this->orderTransactionRepository = $orderTransactionRepository;
+    }
+
+    /**
+     * @param string $orderId
+     * @param array $states
+     * @param SalesChannelContext|null $context
+     *
+     * @return OrderTransactionEntity|null
+     */
+    public function getFirstAdyenOrderTransactionByStates(
+        string $orderId,
+        array $states,
+        ?SalesChannelContext $context = null
+    ): ?OrderTransactionEntity {
+        $criteria = new Criteria();
+        $criteria->addAssociation('stateMachineState');
+        $criteria->addAssociation('order');
+        $criteria->addAssociation('order.currency');
+        $criteria->addAssociation('paymentMethod');
+        $criteria->addAssociation('paymentMethod.plugin');
+        $criteria->addFilter(new EqualsFilter('order.id', $orderId));
+
+        if ($context) {
+            $criteria->addFilter(new EqualsFilter('order.salesChannelId', $context->getSalesChannelId()));
+            $criteria->addFilter(new EqualsFilter('order.orderCustomer.customerId', $context->getCustomerId()));
+        }
+
+        $criteria->addFilter(
+            new EqualsAnyFilter('stateMachineState.technicalName', $states)
+        );
+        $criteria->addFilter(
+            new EqualsFilter('paymentMethod.plugin.name', ConfigurationService::BUNDLE_NAME)
+        );
+
+        $criteria->setLimit(1);
+        $criteria->addSorting(new FieldSorting('createdAt', FieldSorting::DESCENDING));
+
+        return $this->orderTransactionRepository->search(
+            $criteria,
+            $context ? $context->getContext() : Context::createDefaultContext()
+        )->first();
+    }
+
+    /**
+     * @param string $orderId
+     *
+     * @return OrderTransactionEntity|null
+     */
+    public function getFirstAdyenOrderTransaction(string $orderId): ?OrderTransactionEntity
+    {
+        $criteria = new Criteria();
+        $criteria->addAssociation('order');
+        $criteria->addAssociation('order.currency');
+        $criteria->addAssociation('paymentMethod');
+        $criteria->addAssociation('paymentMethod.plugin');
+        $criteria->addFilter(new EqualsFilter('order.id', $orderId));
+        $criteria->addFilter(
+            new EqualsFilter('paymentMethod.plugin.name', ConfigurationService::BUNDLE_NAME)
+        );
+
+        $criteria->setLimit(1);
+        $criteria->addSorting(new FieldSorting('createdAt', FieldSorting::DESCENDING));
+
+        return $this->orderTransactionRepository->search($criteria, Context::createDefaultContext())->first();
+    }
+
+    /**
+     * @param string $orderTransactionId
+     *
+     * @return OrderTransactionEntity|null
+     */
+    public function getWithId(string $orderTransactionId): ?OrderTransactionEntity
+    {
+        $criteria = new Criteria();
+        $criteria->addAssociation('order');
+        $criteria->addAssociation('order.currency');
+        $criteria->addAssociation('paymentMethod');
+        $criteria->addAssociation('paymentMethod.plugin');
+        $criteria->addAssociation('stateMachineState');
+        $criteria->addFilter(new EqualsFilter('id', $orderTransactionId));
+
+        return $this->orderTransactionRepository->search($criteria, Context::createDefaultContext())->first();
+    }
+
+    /**
+     * @param OrderTransactionEntity $orderTransactionEntity
+     *
+     * @return void
+     */
+    public function updateCustomFields(OrderTransactionEntity $orderTransactionEntity): void
+    {
+        $this->orderTransactionRepository->update([
+            [
+                'id' => $orderTransactionEntity->getId(),
+                'customFields' => $orderTransactionEntity->getCustomFields(),
+            ]
+        ], Context::createDefaultContext());
+    }
+}

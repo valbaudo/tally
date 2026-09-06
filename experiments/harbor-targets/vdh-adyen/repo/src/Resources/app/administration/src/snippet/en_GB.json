@@ -1,0 +1,38 @@
+{
+    "adyen": {
+        "configTestTitle": "Configuration test",
+        "configTestSuccess": "Configuration is successfully tested",
+        "configTestFail": "There's an issue in your configuration",
+        "adyenRefunds": "Adyen Refunds",
+        "refundTitle": "Refund",
+        "refundSuccessful": "A refund has been successfully submitted.",
+        "invalidRefundAmount": "Refund amount exceeds order total",
+        "error": "An error has occurred. Please check the logs.",
+        "refundFetchError": "An error has occurred while attempting to get linked refunds.",
+        "refundConfirm": "Create refund for order",
+        "createRefund": "Create Refund",
+        "noRefundsCreated": "No refunds created",
+        "columnHeaders": {
+            "pspReference": "PSP Reference",
+            "amount": "Amount",
+            "status": "Status",
+            "event": "Event",
+            "success": "Success",
+            "created": "Created",
+            "updated": "Updated",
+            "errorCount": "Error Count",
+            "errorMessage": "Error Message"
+        },
+        "reprocessNotification": "Reprocess Notification",
+        "notificationRescheduleSuccess": "Notification will be processed again.",
+        "notificationsTitle": "Adyen Webhook Notifications",
+        "noNotificationsReceived": "No webhook notifications received.",
+        "adyenPaymentCaptureTitle": "Adyen Capture Requests",
+        "noCaptureRequests": "No capture requests have been sent",
+        "sendCaptureRequest": "Send Capture Request",
+        "captureConfirm": "Capture payment for order",
+        "captureSuccessful": "Capture request has been successfully sent",
+        "pendingWebhook": "Order is pending webhook.",
+        "authorisedPayments": "Authorised Payments"
+    }
+}

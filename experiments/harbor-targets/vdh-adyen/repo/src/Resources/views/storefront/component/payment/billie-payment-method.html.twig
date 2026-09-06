@@ -1,0 +1,31 @@
+{% if payment.formattedHandlerIdentifier == 'handler_adyen_billiepaymentmethodhandler' %}
+    <div id="billie-payment-fields" class="billie-fields">
+        <p class="text-muted mt-2">
+            {{ "adyen.billie.requiredFields"|trans }}
+        </p>
+        <div class="form-group" style="margin-bottom: 10px">
+            <label for="adyen-company-name">{{ "adyen.billie.companyName"|trans }}</label>
+            <input
+                    type="text"
+                    id="adyen-company-name"
+                    name="companyName"
+                    value="{{ adyenFrontendData.companyName }}"
+                    placeholder="{{ "adyen.billie.companyNamePlaceholder"|trans }}"
+                    class="form-control"
+                    required
+            />
+        </div>
+        <span id="adyen-company-name-error" class="text-danger" style="display: none; margin-bottom: 15px">{{ "adyen.billie.companyNameRequired"|trans }}</span>
+        <div class="form-group" style="margin-bottom: 10px">
+            <label for="adyen-registration-number">{{ "adyen.billie.companyNumber"|trans }}</label>
+            <input
+                    type="text"
+                    id="adyen-registration-number"
+                    name="registrationNumber"
+                    placeholder="{{ "adyen.billie.companyNumberPlaceholder"|trans }}"
+                    class="form-control"
+            />
+        </div>
+        <span id="adyen-company-number-error" class="text-danger" style="display: none; margin-bottom: 15px">{{ "adyen.billie.companyNumberRequired"|trans }}</span>
+    </div>
+{% endif %}

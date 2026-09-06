@@ -1,0 +1,17 @@
+{% sw_extends '@Storefront/storefront/component/payment/payment-fields.html.twig' %}
+
+{% set adyenFrontendData = page.extensions[constant('Adyen\\Shopware\\Subscriber\\PaymentSubscriber::ADYEN_DATA_EXTENSION_ID')] %}
+
+{% block component_payment_methods %}
+    <div class="payment-methods">
+        {% sw_include '@AdyenPaymentShopware6/storefront/component/adyencheckout.html.twig' %}
+        <template data-adyen-payment></template>
+
+        {% block component_payment_method %}
+            {{ parent() }}
+        {% endblock %}
+
+        <input type="hidden" name="adyenStateData" id="adyenStateData">
+        <input type="hidden" name="adyenOrigin" id="adyenOrigin">
+    </div>
+{% endblock %}

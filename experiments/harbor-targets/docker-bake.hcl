@@ -50,3 +50,24 @@ target "cybergym-gate" {
 group "cybergym" {
   targets = ["cybergym-env", "cybergym-gate"]
 }
+
+# One vendored copy of adyen-shopware6 (MIT), shared by both images: the gate
+# checks citations against source the agent never touched, and building both
+# from one tree is what guarantees they start identical.
+target "vdh-adyen-env" {
+  inherits   = ["reproducible"]
+  context    = "vdh-adyen"
+  dockerfile = "environment/Dockerfile"
+  tags     = ["dawn-vdh-adyen-env"]
+}
+
+target "vdh-adyen-gate" {
+  inherits   = ["reproducible"]
+  context    = "vdh-adyen"
+  dockerfile = "gate/Dockerfile"
+  tags     = ["dawn-vdh-adyen-gate"]
+}
+
+group "vdh-adyen" {
+  targets = ["vdh-adyen-env", "vdh-adyen-gate"]
+}

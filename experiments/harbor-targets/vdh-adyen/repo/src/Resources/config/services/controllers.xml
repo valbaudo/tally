@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<container xmlns="http://symfony.com/schema/dic/services"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://symfony.com/schema/dic/services
+        https://symfony.com/schema/dic/services/services-1.0.xsd">
+    <services>
+        <service id="Adyen\Shopware\Controller\StoreApi\Payment\PaymentController" autowire="true">
+            <argument key="$orderTransactionRepository" type="service" id="order_transaction.repository"/>
+            <argument key="$logger" type="service" id="monolog.logger.adyen_generic"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Controller\StoreApi\OrderApi\OrderApiController" autowire="true">
+            <argument key="$contextSwitchRoute" type="service"
+                      id="Shopware\Core\System\SalesChannel\SalesChannel\ContextSwitchRoute"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Controller\StoreApi\Donate\DonateController" autowire="true">
+            <argument key="$logger" type="service" id="monolog.logger.adyen_generic"/>
+            <argument key="$orderTransactionRepository" type="service" id="order_transaction.repository"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Controller\StoreApi\ExpressCheckout\ExpressCheckoutController" autowire="true">
+            <argument type="service" id="Adyen\Shopware\Service\ExpressCheckoutService"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Storefront\Controller\NotificationReceiverController">
+            <argument type="service" id="Adyen\Shopware\Controller\StoreApi\Notification\NotificationController"/>
+            <call method="setContainer">
+                <argument type="service" id="service_container"/>
+            </call>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Controller\StoreApi\Notification\NotificationController">
+            <argument type="service" id="Adyen\Shopware\Service\NotificationReceiverService"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Storefront\Controller\FrontendProxyController" autowire="true">
+            <argument key="$cartOrderRoute" type="service"
+                      id="Shopware\Core\Checkout\Cart\SalesChannel\CartOrderRoute"/>
+            <argument key="$handlePaymentMethodRoute" type="service"
+                      id="Shopware\Core\Checkout\Payment\SalesChannel\HandlePaymentMethodRoute"/>
+            <call method="setContainer">
+                <argument type="service" id="service_container"/>
+            </call>
+            <argument key="$requestStack" type="service" id="request_stack"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+        <service id="Adyen\Shopware\Controller\AdminController" autowire="true">
+            <argument type="service" key="$logger" id="monolog.logger.adyen_api"/>
+            <tag name="controller.service_arguments"/>
+        </service>
+    </services>
+</container>

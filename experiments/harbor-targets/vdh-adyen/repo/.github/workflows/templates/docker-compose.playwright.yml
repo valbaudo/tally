@@ -1,0 +1,23 @@
+version: '3'
+
+services:
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.62.1-noble
+    networks:
+      - localnetwork
+    shm_size: 1gb
+    ipc: host
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      - SHOPWARE_BASE_URL
+      - PAYPAL_USERNAME
+      - PAYPAL_PASSWORD
+    volumes:
+      - ../scripts/e2e.sh:/e2e.sh
+      - ../e2e/adyen-integration-tools-tests/:/tmp/adyen-integration-tools-tests/
+      - ../../../test-report:/tmp/test-report
+
+networks:
+  localnetwork:
+    external: true

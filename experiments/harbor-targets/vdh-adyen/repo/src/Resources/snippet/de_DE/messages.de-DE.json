@@ -1,0 +1,28 @@
+{
+    "adyen": {
+        "updateDetails": "Zahlungsdetails aktualisieren",
+        "loading": "Laden...",
+        "notification": {
+            "message": "Ihre Bestellung wird bearbeitet!"
+        },
+        "paymentMethodSelectionError": "Leider ist beim Speichern der Auswahl der Zahlungsmethode ein Fehler aufgetreten. Bitte wählen Sie eine andere Zahlungsmethode.",
+        "giftcard": {
+            "addGiftcards": "Geschenkkarten hinzufügen",
+            "removeGiftcard": "Geschenkkarte entfernen",
+            "closeGiftcardSection": "Geschenkkartenbereich schließen",
+            "remainingBalance": "Verbleibendes guthaben der geschenkkarte",
+            "remainingAmount": "Restbetrag",
+            "discount": "Geschenkkarten-Rabatt",
+            "chooseGiftcard": "Bitte wählen Sie eine Geschenkkarte aus..."
+        },
+        "billie": {
+            "companyName": "Firmenname*",
+            "companyNamePlaceholder": "Firmenname eingeben",
+            "companyNumber": "Registernummer",
+            "companyNumberPlaceholder": "Registernummer eingeben",
+            "requiredFields": "Die mit einem Stern (*) markierten Felder sind Pflichtfelder.",
+            "companyNameRequired": "Firmenname ist erforderlich.",
+            "companyNumberRequired": "Die Handelsregisternummer ist für Rechnungsadressen in den Niederlanden und Schweden erforderlich."
+        }
+    }
+}

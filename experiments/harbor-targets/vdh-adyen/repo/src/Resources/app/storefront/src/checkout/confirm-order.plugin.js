@@ -1,0 +1,919 @@
+/*
+ *                       ######
+ *                       ######
+ * ############    ####( ######  #####. ######  ############   ############
+ * #############  #####( ######  #####. ######  #############  #############
+ *        ######  #####( ######  #####. ######  #####  ######  #####  ######
+ * ###### ######  #####( ######  #####. ######  #####  #####   #####  ######
+ * ###### ######  #####( ######  #####. ######  #####          #####  ######
+ * #############  #############  #############  #############  #####  ######
+ *  ############   ############  #############   ############  #####  ######
+ *                                      ######
+ *                               #############
+ *                               ############
+ *
+ * Adyen Payment Module
+ *
+ * Copyright (c) 2020 Adyen B.V.
+ * This file is open source and available under the MIT license.
+ * See the LICENSE file for more info.
+ *
+ */
+
+import Plugin from 'src/plugin-system/plugin.class';
+import DomAccess from 'src/helper/dom-access.helper';
+import HttpClient from 'src/service/http-client.service';
+import FormSerializeUtil from 'src/utility/form/form-serialize.util';
+import ElementLoadingIndicatorUtil from 'src/utility/loading-indicator/element-loading-indicator.util';
+import adyenConfiguration from '../configuration/adyen';
+
+/* global adyenCheckoutOptions, adyenCheckoutConfiguration, AdyenCheckout */
+/* eslint-disable no-unused-vars */
+export default class ConfirmOrderPlugin extends Plugin {
+
+    init() {
+        this._client = new HttpClient();
+        this.selectedAdyenPaymentMethod = this.getSelectedPaymentMethodKey();
+        this.confirmOrderForm = DomAccess.querySelector(document, '#confirmOrderForm');
+        this.checkoutMainContent = DomAccess.querySelector(document, '#content-main');
+        this.shoppingCartSummaryBlock = DomAccess.querySelectorAll(document, '.checkout-aside-summary-list');
+
+        this.minorUnitsQuotient = adyenCheckoutOptions.amount / adyenCheckoutOptions.totalPrice;
+        this.giftcardDiscount = adyenCheckoutOptions.giftcardDiscount;
+        this.remainingAmount = adyenCheckoutOptions.totalPrice - this.giftcardDiscount;
+        this.responseHandler = this.handlePaymentAction;
+        this.adyenCheckout = Promise;
+
+        this.setupPaymentMethodSwitchHandler();
+
+        this.initializeCheckoutComponent().then(function () {
+            // Non adyen payment method selected
+            // this can not happen, because this js plugin is registered only if adyen methods selected
+            // PluginManager.register('ConfirmOrderPlugin', ConfirmOrderPlugin, '#adyen-payment-checkout-mask');
+            if (adyenCheckoutOptions.selectedPaymentMethodPluginId !==
+                adyenCheckoutOptions.adyenPluginId) {
+                return;
+            }
+
+            if (!adyenCheckoutOptions || !adyenCheckoutOptions.paymentStatusUrl ||
+                !adyenCheckoutOptions.checkoutOrderUrl || !adyenCheckoutOptions.paymentHandleUrl) {
+                console.error('Adyen payment configuration missing.');
+                return;
+            }
+
+            if (this.selectedAdyenPaymentMethod in adyenConfiguration.componentsWithPayButton) {
+                // replaces confirm button with adyen pay button for paywithgoogle, applepay etc.
+                this.initializeCustomPayButton();
+            }
+
+            if (this.selectedAdyenPaymentMethod === "klarna_b2b") {
+                this.checkoutMainContent.addEventListener('click', this.onConfirmOrderSubmit.bind(this));
+                return;
+            }
+
+            if (adyenConfiguration.updatablePaymentMethods.includes(this.selectedAdyenPaymentMethod) && !this.stateData) {
+                // create inline component for cards etc. and set event listener for submit button to confirm payment component
+                this.renderPaymentComponent(this.selectedAdyenPaymentMethod);
+            } else {
+                this.checkoutMainContent.addEventListener('click', this.onConfirmOrderSubmit.bind(this));
+            }
+        }.bind(this));
+        if (adyenCheckoutOptions.payInFullWithGiftcard > 0) {
+            if (parseInt(adyenCheckoutOptions.giftcardDiscount, 10)) {
+                this.appendGiftcardSummary();
+            }
+        } else {
+            this.appendGiftcardSummary();
+        }
+    }
+
+    _buildPayloadWithFormData(stateData, extra = {}) {
+        const payload = { ...extra, stateData: JSON.stringify(stateData) };
+        if (this.confirmOrderForm) {
+            for (const [key, value] of new FormData(this.confirmOrderForm).entries()) {
+                if (!(key in payload)) {
+                    payload[key] = value;
+                }
+            }
+        }
+        return payload;
+    }
+
+    setupPaymentMethodSwitchHandler() {
+        document.addEventListener('change', (event) => {
+            if (event.target.name === 'paymentMethodId') {
+
+                this.temporarilyDisableAdyenValidation();
+
+                setTimeout(() => {
+                    this.restoreAdyenValidation();
+                }, 100);
+            }
+        }, true);
+    }
+
+    temporarilyDisableAdyenValidation() {
+        const adyenPaymentSection = document.querySelector('#adyen-payment-checkout-mask');
+        if (!adyenPaymentSection) return;
+
+        const adyenFields = adyenPaymentSection.querySelectorAll('input, select, textarea');
+        adyenFields.forEach(field => {
+            field.setAttribute('data-original-required', field.hasAttribute('required') ? 'true' : 'false');
+            field.removeAttribute('required');
+            field.setAttribute('novalidate', 'true');
+            field.setAttribute('data-validation-skipped', 'true');
+        });
+    }
+
+    restoreAdyenValidation() {
+        const adyenFields = document.querySelectorAll('[data-validation-skipped]');
+
+        adyenFields.forEach(field => {
+            if (field.getAttribute('data-original-required') === 'true') {
+                field.setAttribute('required', 'true');
+            }
+            field.removeAttribute('novalidate');
+            field.removeAttribute('data-validation-skipped');
+            field.removeAttribute('data-original-required');
+        });
+    }
+
+    async initializeCheckoutComponent() {
+        const {AdyenCheckout} = window.AdyenWeb;
+        const {locale, clientKey, environment, merchantAccount} = adyenCheckoutConfiguration;
+        const paymentMethodsResponse = adyenCheckoutOptions.paymentMethodsResponse;
+        const ADYEN_CHECKOUT_CONFIG = {
+            locale,
+            clientKey,
+            environment,
+            showPayButton: this.selectedAdyenPaymentMethod in adyenConfiguration.componentsWithPayButton,
+            paymentMethodsResponse: JSON.parse(paymentMethodsResponse),
+            onAdditionalDetails: this.handleOnAdditionalDetails.bind(this),
+            countryCode: activeShippingAddress.country,
+        };
+
+        this.adyenCheckout = await AdyenCheckout(ADYEN_CHECKOUT_CONFIG);
+    }
+
+    handleOnAdditionalDetails(state) {
+        this._client.post(
+            `${adyenCheckoutOptions.paymentDetailsUrl}`,
+            JSON.stringify({orderId: this.orderId, stateData: JSON.stringify(state.data)}),
+            function (paymentResponse) {
+                if (this._client._request.status !== 200) {
+                    location.href = this.errorUrl.toString();
+                    return;
+                }
+
+                this.responseHandler(paymentResponse);
+            }.bind(this)
+        );
+    }
+
+    onConfirmOrderSubmit(event) {
+        const submitButton = event.target.closest('#confirmOrderForm button[type="submit"]');
+        if (!submitButton) {
+            return;
+        }
+
+        this.restoreAdyenValidation();
+
+        const form = DomAccess.querySelector(document, '#confirmOrderForm', false);
+        if (!form.checkValidity()) {
+            form.reportValidity();
+            return;
+        }
+
+        if (this.selectedAdyenPaymentMethod === "klarna_b2b") {
+            const companyNameElement = DomAccess.querySelector(document, '#adyen-company-name');
+            const companyName = companyNameElement ? companyNameElement.value.trim() : '';
+            const companyNameError = DomAccess.querySelector(document, '#adyen-company-name-error');
+
+            const companyNumberElement = DomAccess.querySelector(document, '#adyen-registration-number');
+            const companyNumber = companyNumberElement ? companyNumberElement.value.trim() : '';
+            const companyNumberError = DomAccess.querySelector(document, '#adyen-company-number-error');
+
+            companyNameError.style.display = 'none';
+            companyNumberError.style.display = 'none';
+
+            let hasError = false;
+
+            if (!companyName) {
+                companyNameError.style.display = 'block';
+                hasError = true;
+            }
+
+            if (!companyNumber && (activeBillingAddress.country === 'NL' || activeBillingAddress.country === 'SE')) {
+                companyNumberError.style.display = 'block';
+                hasError = true;
+            }
+
+            if (hasError) {
+                event.preventDefault();
+                return;
+            }
+        }
+
+        event.preventDefault();
+        ElementLoadingIndicatorUtil.create(document.body);
+        const formData = FormSerializeUtil.serialize(form);
+        this.confirmOrder(formData);
+    }
+
+    renderPaymentComponent(type) {
+        if (type === 'oneclick') {
+            this.renderStoredPaymentMethodComponents();
+            return;
+        }
+        if (type === 'giftcard') {
+            return;
+        }
+
+        // Get the payment method object from paymentMethodsResponse
+        let paymentMethodConfigs = JSON.parse(adyenCheckoutOptions.paymentMethodsResponse).paymentMethods.filter(function (paymentMethod) {
+            return paymentMethod['type'] === type;
+        });
+        if (paymentMethodConfigs.length === 0) {
+            if (this.adyenCheckout.options.environment === 'test') {
+                console.error('Payment method configuration not found. ', type);
+            }
+            return;
+        }
+        let paymentMethod = paymentMethodConfigs[0];
+
+        // Mount payment method instance
+        this.mountPaymentComponent(paymentMethod, false);
+    }
+
+    renderStoredPaymentMethodComponents() {
+        // Iterate through and render the stored payment methods
+        const storedPaymentMethods = this.adyenCheckout.paymentMethodsResponse.storedPaymentMethods;
+        // Mount payment method instance
+        storedPaymentMethods.forEach((paymentMethod) => {
+            let selector = `[data-adyen-stored-payment-method-id="${paymentMethod.id}"]`;
+            this.mountPaymentComponent(paymentMethod, true, selector);
+        });
+
+        this.hideStorePaymentMethodComponents();
+        let selectedId = null;
+        let storedPaymentMethodFields = DomAccess.querySelectorAll(document, '[name=adyenStoredPaymentMethodId]');
+        storedPaymentMethodFields.forEach(field => {
+            if (!selectedId) {
+                selectedId = field.value;
+            }
+            field.addEventListener('change', this.showSelectedStoredPaymentMethod.bind(this));
+        });
+        this.showSelectedStoredPaymentMethod(null, selectedId);
+    }
+
+    showSelectedStoredPaymentMethod(event, selectedId = null) {
+        // Only show the component for the selected stored payment method
+        this.hideStorePaymentMethodComponents();
+        selectedId = event ? event.target.value : selectedId;
+        let selector = `[data-adyen-stored-payment-method-id="${selectedId}"]`;
+        let component = DomAccess.querySelector(document, selector);
+        component.style.display = 'block';
+    }
+
+    hideStorePaymentMethodComponents() {
+        let storedPaymentComponents = DomAccess.querySelectorAll(document, '.stored-payment-component');
+        storedPaymentComponents.forEach(component => {
+            component.style.display = 'none';
+        });
+    }
+
+    confirmOrder(formData, extraParams = {}, actions = {}) {
+        const orderId = adyenCheckoutOptions.orderId;
+        formData.set('affiliateCode', adyenCheckoutOptions.affiliateCode);
+        formData.set('campaignCode', adyenCheckoutOptions.campaignCode);
+        if (!!orderId) { //Only used if the order is being edited
+            this.updatePayment(formData, orderId, extraParams, actions)
+        } else {
+            this.createOrder(formData, extraParams, actions);
+        }
+    }
+
+    updatePayment(formData, orderId, extraParams, actions) {
+        formData.set('orderId', orderId);
+        try {
+            this._client.post(
+                adyenCheckoutOptions.updatePaymentUrl,
+                formData,
+                this.afterSetPayment.bind(this, extraParams, actions)
+            );
+        } catch (e) {
+            console.log(e);
+            if (actions.reject) {
+                actions.reject({});
+            }
+        }
+    }
+
+    paypalOrder(formData, actions) {
+        try {
+            this._client.post(
+                adyenCheckoutOptions.paypalOrderUrl,
+                JSON.stringify(formData),
+                this.responseHandler.bind(this)
+            );
+        } catch (e) {
+            console.log(e);
+            if (actions.reject) {
+                actions.reject({});
+            }
+        }
+    }
+
+    paypalOrderFinalize(state, actions) {
+        try {
+            this._client.post(
+                `${adyenCheckoutOptions.paypalOrderFinalizeUrl}`,
+                JSON.stringify(this._buildPayloadWithFormData(state.data)),
+                function (paymentResponse) {
+                    let response = JSON.parse(paymentResponse);
+
+                    if (response.redirectUrl) {
+                        window.location.href = response.redirectUrl;
+
+                        return;
+                    }
+
+                    if (actions.reject) {
+                        actions.reject({});
+                    }
+
+                    window.location.reload();
+                }
+            );
+        } catch (e) {
+            console.log(e);
+            if (actions.reject) {
+                actions.reject({});
+            }
+        }
+    }
+
+    createOrder(formData, extraParams, actions) {
+        this._client.post(
+            adyenCheckoutOptions.checkoutOrderUrl,
+            formData,
+            this.afterCreateOrder.bind(this, extraParams, actions)
+        );
+    }
+
+    afterCreateOrder(extraParams = {}, actions, response) {
+        let order;
+        try {
+            order = JSON.parse(response);
+        } catch (error) {
+            ElementLoadingIndicatorUtil.remove(document.body);
+            console.log(error);
+            if (actions.reject) {
+                actions.reject({});
+            }
+            return;
+        }
+
+        if (order.url) {
+            location.href = order.url;
+
+            return;
+        }
+
+        this.orderId = order.id;
+        this.errorUrl = new URL(
+            location.origin + adyenCheckoutOptions.paymentErrorUrl);
+        this.errorUrl.searchParams.set('orderId', order.id);
+
+        if (adyenCheckoutOptions.selectedPaymentMethodHandler === 'handler_adyen_billiepaymentmethodhandler') {
+            const companyNameElement = DomAccess.querySelector(document, '#adyen-company-name');
+            const companyName = companyNameElement ? companyNameElement.value : '';
+            const registrationNumberElement = DomAccess.querySelector(document, '#adyen-registration-number');
+            const registrationNumber = registrationNumberElement ? registrationNumberElement.value : '';
+
+            extraParams.companyName = companyName;
+            extraParams.registrationNumber = registrationNumber;
+        }
+
+        let params = {
+            'orderId': this.orderId,
+        };
+        // Append any extra parameters passed, e.g. stateData
+        for (const property in extraParams) {
+            params[property] = extraParams[property];
+        }
+
+        try {
+            this._client.post(
+                adyenCheckoutOptions.paymentHandleUrl,
+                JSON.stringify(params),
+                this.afterPayOrder.bind(this, this.orderId, actions),
+            );
+        } catch (error) {
+            console.error("Error in afterCreateOrder:", error);
+            if (actions.reject) {
+                actions.reject({});
+            }
+        }
+    }
+
+    afterSetPayment(extraParams = {}, actions, response) {
+        try {
+            const responseObject = JSON.parse(response);
+            if (responseObject.success) {
+                this.afterCreateOrder(extraParams, actions,
+                    JSON.stringify({id: adyenCheckoutOptions.orderId}));
+            }
+        } catch (error) {
+            ElementLoadingIndicatorUtil.remove(document.body);
+            console.log(error);
+            if (actions.reject) {
+                actions.reject({});
+            }
+            return;
+        }
+    }
+
+    afterPayOrder(orderId, actions, response) {
+        try {
+            response = JSON.parse(response);
+            this.returnUrl = response.redirectUrl;
+        } catch (error) {
+            ElementLoadingIndicatorUtil.remove(document.body);
+            console.log(error);
+            if (actions.reject) {
+                actions.reject({});
+            }
+            return;
+        }
+
+        if (response.paymentFailed) {
+            if (actions.reject) {
+                actions.reject({});
+            }
+            location.href = this.returnUrl;
+        }
+
+        if (actions.resolve) {
+            actions.resolve({});
+        }
+
+        try {
+            this._client.post(
+                `${adyenCheckoutOptions.paymentStatusUrl}`,
+                JSON.stringify({'orderId': orderId}),
+                this.responseHandler.bind(this),
+            );
+        } catch (e) {
+            console.log(e);
+        }
+    }
+
+    handlePaymentAction(response) {
+        try {
+            const paymentResponse = JSON.parse(response);
+            if (paymentResponse.isFinal || paymentResponse.action.type === 'voucher') {
+                location.href = this.returnUrl;
+            }
+            if (!!paymentResponse.action) {
+                const actionModalConfiguration = {};
+                if (paymentResponse.action.type === 'threeDS2') {
+                    actionModalConfiguration.challengeWindowSize = '05';
+                }
+
+                this.adyenCheckout
+                    .createFromAction(paymentResponse.action, actionModalConfiguration)
+                    .mount('[data-adyen-payment-action-container]');
+                const modalActionTypes = ['threeDS2', 'qrCode']
+                if (modalActionTypes.includes(paymentResponse.action.type)) {
+                    const bootstrapVersion = window.jQuery && $.fn.tooltip && $.fn.tooltip.Constructor && $.fn.tooltip.Constructor.VERSION;
+                    const isBootstrap4 = bootstrapVersion && bootstrapVersion.startsWith('4');
+                    if (window.jQuery && isBootstrap4) {
+                        // Bootstrap v4 support
+                        $('[data-adyen-payment-action-modal]').modal({show: true});
+                    } else {
+                        // Bootstrap v5 support
+                        var adyenPaymentModal = new bootstrap.Modal(document.getElementById('adyen-payment-action-modal'), {
+                            keyboard: false
+                        });
+                        adyenPaymentModal.show();
+                    }
+                }
+            }
+        } catch (e) {
+            console.log(e);
+        }
+    }
+
+    initializeCustomPayButton() {
+
+        const componentConfig = adyenConfiguration.componentsWithPayButton[this.selectedAdyenPaymentMethod];
+
+        this.completePendingPayment(this.selectedAdyenPaymentMethod, componentConfig);
+
+        // get selected payment method object
+        let selectedPaymentMethod = this.adyenCheckout.paymentMethodsResponse.paymentMethods
+            .filter(item => item.type === this.selectedAdyenPaymentMethod);
+
+        /*
+         * If the PM is GooglePay in Shopware, check for the `paywithgoogle` tx_variant also in paymentMethods response.
+         * This block should be remove after depreating the `paywithgoogle` tx_variant.
+         */
+        // TODO: Following block will be removed after the deprecation of the `paywithgoogle` tx_variant.
+        if (selectedPaymentMethod.length < 1 && this.selectedAdyenPaymentMethod === 'googlepay') {
+            selectedPaymentMethod = this.adyenCheckout.paymentMethodsResponse.paymentMethods
+                .filter(item => item.type === 'paywithgoogle');
+        }
+
+        if (selectedPaymentMethod.length < 1) {
+            return;
+        }
+        let selectedPaymentMethodObject = selectedPaymentMethod[0];
+
+        if (!adyenCheckoutOptions.amount) {
+            console.error('Failed to fetch Cart/Order total amount.');
+            return;
+        }
+
+        if (!!componentConfig.prePayRedirect) {
+            this.renderPrePaymentButton(componentConfig, selectedPaymentMethodObject);
+            return;
+        }
+
+        const baseConfig = {
+            amount: {
+                value: adyenCheckoutOptions.amount,
+                currency: adyenCheckoutOptions.currency,
+            },
+            data: {
+                personalDetails: shopperDetails,
+                billingAddress: activeBillingAddress,
+                deliveryAddress: activeShippingAddress
+            },
+            onClick: (resolve, reject) => {
+                if (!componentConfig.onClick(resolve, reject, this)) {
+                    return false;
+                }
+                if (this.selectedAdyenPaymentMethod !== 'applepay') {
+                    ElementLoadingIndicatorUtil.create(document.body);
+                }
+            },
+            onCancel: (data, component) => {
+                ElementLoadingIndicatorUtil.remove(document.body);
+                componentConfig.onCancel(data, component, this);
+            },
+            onError: (error, component) => {
+                ElementLoadingIndicatorUtil.remove(document.body);
+
+                if (component.props.name === 'PayPal') {
+
+                    return;
+                }
+
+                componentConfig.onError(error, component, this);
+                console.log(error);
+            }
+        };
+
+        if (this.selectedAdyenPaymentMethod === 'paypal') {
+            baseConfig.onSubmit = function (state, component, actions) {
+                if (state.isValid) {
+                    let formData = this._buildPayloadWithFormData(state.data);
+
+                    if ('responseHandler' in componentConfig) {
+                        this.responseHandler = componentConfig.responseHandler.bind(component, this);
+                    }
+
+                    this.paypalOrder(formData, actions)
+                } else {
+                    component.showValidation();
+                    if (this.adyenCheckout.options.environment === 'test') {
+                        console.log('Payment failed: ', state);
+                    }
+                }
+            }.bind(this);
+
+            baseConfig.onAdditionalDetails = function (state, actions) {
+                this.paypalOrderFinalize(state, actions)
+            }.bind(this);
+
+        } else {
+            baseConfig.onSubmit = function (state, component, actions) {
+                if (state.isValid) {
+                    if (this.selectedAdyenPaymentMethod === 'applepay') {
+                        ElementLoadingIndicatorUtil.create(document.body);
+                    }
+                    let extraParams = {
+                        stateData: JSON.stringify(state.data)
+                    };
+                    let formData = FormSerializeUtil.serialize(this.confirmOrderForm);
+                    if ('responseHandler' in componentConfig) {
+                        this.responseHandler = componentConfig.responseHandler.bind(component, this);
+                    }
+                    this.confirmOrder(formData, extraParams, actions);
+                } else {
+                    component.showValidation();
+                    if (this.adyenCheckout.options.environment === 'test') {
+                        console.log('Payment failed: ', state);
+                    }
+                }
+            }.bind(this);
+        }
+
+        let PAY_BUTTON_CONFIG = Object.assign(componentConfig.extra, selectedPaymentMethodObject, baseConfig);
+
+        if (selectedPaymentMethodObject.type === "paywithgoogle" || selectedPaymentMethodObject.type === "googlepay") {
+            const {
+                googlepayButtonType,
+                googlepayButtonColor,
+                googlepayButtonSize,
+                googleMerchantId,
+                gatewayMerchantId
+            } = adyenCheckoutOptions;
+            PAY_BUTTON_CONFIG = {
+                ...PAY_BUTTON_CONFIG,
+                ...(googlepayButtonType && { buttonType: googlepayButtonType }),
+                ...(googlepayButtonColor && { buttonColor: googlepayButtonColor }),
+                ...(googlepayButtonSize && { buttonSizeMode: googlepayButtonSize }),
+                configuration: {
+                    ...(googleMerchantId && { merchantId: googleMerchantId }),
+                    ...(gatewayMerchantId && { gatewayMerchantId })
+                }
+            };
+        }
+
+        if (selectedPaymentMethodObject.type === "paypal") {
+            const {
+                paypalButtonColor,
+                paypalButtonShape,
+                paypalButtonLabel,
+                paypalButtonInstallmentsMexico,
+                paypalButtonInstallmentsBrazil
+            } = adyenCheckoutOptions;
+
+            const style = {
+                ...(paypalButtonColor && {color: paypalButtonColor}),
+                ...(paypalButtonShape && {shape: paypalButtonShape}),
+                ...(paypalButtonLabel && {label: paypalButtonLabel}),
+                ...(
+                    paypalButtonLabel === 'installment' &&
+                    activeBillingAddress?.country === 'MX' &&
+                    {period: paypalButtonInstallmentsMexico}
+                ),
+                ...(
+                    paypalButtonLabel === 'installment' &&
+                    activeBillingAddress?.country === 'BR' &&
+                    {period: paypalButtonInstallmentsBrazil}
+                )
+            };
+
+            if (Object.keys(style).length > 0) {
+                PAY_BUTTON_CONFIG.style = style;
+            }
+        }
+
+        if (selectedPaymentMethodObject.type === "applepay") {
+            const {
+                applepayButtonType,
+                applepayButtonColor,
+            } = adyenCheckoutOptions;
+
+            PAY_BUTTON_CONFIG = {
+                ...PAY_BUTTON_CONFIG,
+                ...(applepayButtonType && {buttonType: applepayButtonType}),
+                ...(applepayButtonColor && {buttonColor: applepayButtonColor}),
+            }
+        }
+
+        const paymentMethodInstance = AdyenWeb.createComponent(selectedPaymentMethodObject.type, this.adyenCheckout, PAY_BUTTON_CONFIG);
+
+        try {
+            if ('isAvailable' in paymentMethodInstance) {
+                paymentMethodInstance.isAvailable().then(function () {
+                    this.mountCustomPayButton(paymentMethodInstance);
+                }.bind(this)).catch(e => {
+                    console.log(selectedPaymentMethodObject.type + ' is not available', e);
+                });
+            } else {
+                this.mountCustomPayButton(paymentMethodInstance);
+            }
+        } catch (e) {
+            console.log(e);
+        }
+    }
+
+    renderPrePaymentButton(componentConfig, selectedPaymentMethodObject) {
+        if (selectedPaymentMethodObject.type === 'amazonpay') {
+            componentConfig.extra = this.setAddressDetails(componentConfig.extra);
+        }
+        const PRE_PAY_BUTTON = Object.assign(componentConfig.extra, selectedPaymentMethodObject, {
+            configuration: selectedPaymentMethodObject.configuration,
+            amount: {
+                value: adyenCheckoutOptions.amount,
+                currency: adyenCheckoutOptions.currency,
+            },
+            onClick: (resolve, reject) => {
+                if (!componentConfig.onClick(resolve, reject, this)) {
+                    return false;
+                }
+                ElementLoadingIndicatorUtil.create(document.body);
+            },
+            onError: (error, component) => {
+                ElementLoadingIndicatorUtil.remove(document.body);
+                componentConfig.onError(error, component, this);
+                console.log(error);
+            }
+        });
+
+        const paymentMethodInstance = AdyenWeb.createComponent(selectedPaymentMethodObject.type, this.adyenCheckout, PRE_PAY_BUTTON);
+        this.mountCustomPayButton(paymentMethodInstance);
+    }
+
+    completePendingPayment(paymentMethodType, config) {
+        const url = new URL(location.href);
+        // Check for pending payment session
+        if (url.searchParams.has(config.sessionKey)) {
+            ElementLoadingIndicatorUtil.create(document.body);
+
+            const paymentMethodInstance = AdyenWeb.createComponent(paymentMethodType, this.adyenCheckout, {
+                [config.sessionKey]: url.searchParams.get(config.sessionKey),
+                showOrderButton: false,
+                onSubmit: function (state, component, actions) {
+                    if (state.isValid) {
+                        let extraParams = {
+                            stateData: JSON.stringify(state.data)
+                        };
+                        let formData = FormSerializeUtil.serialize(this.confirmOrderForm);
+                        this.confirmOrder(formData, extraParams, actions);
+                    }
+                }.bind(this),
+            });
+
+            this.mountCustomPayButton(paymentMethodInstance);
+            paymentMethodInstance.submit();
+        }
+    }
+
+    getSelectedPaymentMethodKey() {
+        return Object.keys(
+            adyenConfiguration.paymentMethodTypeHandlers).find(
+            key => adyenConfiguration.paymentMethodTypeHandlers[key] ===
+                adyenCheckoutOptions.selectedPaymentMethodHandler);
+    }
+
+    mountCustomPayButton(paymentMethodInstance) {
+        let form = document.querySelector('#confirmOrderForm');
+        if (form) {
+            let submitButton = form.querySelector('button[type=submit]');
+            if (submitButton && !submitButton.disabled) {
+                let confirmButtonContainer = document.createElement('div');
+                confirmButtonContainer.id = 'adyen-confirm-button';
+                confirmButtonContainer.setAttribute('data-adyen-confirm-button', '')
+                form.appendChild(confirmButtonContainer);
+                paymentMethodInstance.mount(confirmButtonContainer);
+                submitButton.remove();
+            }
+        }
+    }
+
+    mountPaymentComponent(paymentMethod, isOneClick = false, selector = null) {
+        const configuration = Object.assign({}, paymentMethod, {
+            data: {
+                personalDetails: shopperDetails,
+                billingAddress: activeBillingAddress,
+                deliveryAddress: activeShippingAddress
+            },
+            onSubmit: function (state, component, actions) {
+                if (state.isValid) {
+                    if (isOneClick) {
+                        state.data.paymentMethod.holderName = paymentMethod.holderName ?? '';
+                    }
+
+                    let extraParams = {
+                        stateData: JSON.stringify(state.data)
+                    };
+                    let formData = FormSerializeUtil.serialize(this.confirmOrderForm);
+                    ElementLoadingIndicatorUtil.create(document.body);
+                    this.confirmOrder(formData, extraParams, actions);
+                } else {
+                    component.showValidation();
+                    if (this.adyenCheckout.options.environment === 'test') {
+                        console.log('Payment failed: ', state);
+                    }
+                }
+            }.bind(this)
+        });
+
+        if (paymentMethod.type === 'scheme') {
+            configuration.hasHolderName = true;
+            configuration.holderNameRequired = true;
+            configuration.clickToPayConfiguration = {
+                merchantDisplayName: adyenCheckoutConfiguration.merchantAccount,
+                shopperEmail: shopperDetails.shopperEmail
+            };
+        }
+
+        if (paymentMethod.type === 'ratepay' ||
+            paymentMethod.type === 'affirm' ||
+            paymentMethod.type === 'facilypay_3x' ||
+            paymentMethod.type === 'facilypay_4x' ||
+            paymentMethod.type === 'facilypay_6x' ||
+            paymentMethod.type === 'facilypay_10x' ||
+            paymentMethod.type === 'facilypay_12x'
+        ) {
+            configuration.visibility = {
+                personalDetails: "editable",
+                billingAddress: adyenCheckoutOptions.billingAddressReadOnly ? "readOnly" : "editable",
+                deliveryAddress: adyenCheckoutOptions.shippingAddressReadOnly ? "readOnly" : "editable",
+            };
+        }
+
+        if (!isOneClick && paymentMethod.type === 'scheme' && adyenCheckoutOptions.displaySaveCreditCardOption) {
+            configuration.enableStoreDetails = true;
+        }
+        let componentSelector = isOneClick ? selector : '#' + this.el.id;
+        try {
+            const paymentMethodInstance = AdyenWeb.createComponent(paymentMethod.type, this.adyenCheckout, configuration);
+            paymentMethodInstance.mount(componentSelector);
+            this.checkoutMainContent.addEventListener('click', function (event) {
+                const submitButton = event.target.closest('#confirmOrderForm button[type="submit"]');
+                if (!submitButton) {
+                    return;
+                }
+                event.preventDefault();
+
+                const form = DomAccess.querySelector(document, '#confirmOrderForm', false);
+                if (!form.checkValidity()) {
+                    form.reportValidity();
+                    return;
+                }
+                event.preventDefault();
+                this.el.parentNode.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start",
+                });
+
+                if (isOneClick) {
+                    const data = paymentMethodInstance.data || {};
+                    const state = {
+                        isValid: true,
+                        data: data
+                    };
+                    configuration.onSubmit(state, paymentMethodInstance, {});
+                    return;
+                }
+
+                paymentMethodInstance.submit();
+            }.bind(this));
+        } catch (err) {
+            console.error(paymentMethod.type, err);
+            return false;
+        }
+    }
+
+    appendGiftcardSummary() {
+        if (parseInt(adyenCheckoutOptions.giftcardDiscount, 10) && this.shoppingCartSummaryBlock.length) {
+            let giftcardDiscount = parseFloat(this.giftcardDiscount).toFixed(2);
+            let remainingAmount = parseFloat(this.remainingAmount).toFixed(2);
+
+            let shoppingCartSummaryDetails =
+                '<dt class="col-7 checkout-aside-summary-label checkout-aside-summary-total adyen-giftcard-summary">' +
+                adyenCheckoutOptions.translationAdyenGiftcardDiscount +
+                '</dt>' +
+                '<dd class="col-5 checkout-aside-summary-value checkout-aside-summary-total adyen-giftcard-summary">' +
+                adyenCheckoutOptions.currencySymbol + giftcardDiscount +
+                '</dd>' +
+                '<dt class="col-7 checkout-aside-summary-label checkout-aside-summary-total adyen-giftcard-summary">' +
+                adyenCheckoutOptions.translationAdyenGiftcardRemainingAmount +
+                '</dt>' +
+                '<dd class="col-5 checkout-aside-summary-value checkout-aside-summary-total adyen-giftcard-summary">' +
+                adyenCheckoutOptions.currencySymbol + remainingAmount +
+                '</dd>';
+
+            this.shoppingCartSummaryBlock[0].innerHTML += shoppingCartSummaryDetails;
+        }
+    }
+
+    /**
+     * Set the address details based on the passed data in confirm-payment twig file
+     * If no phone number is linked to customer, do not set addressDetails and update Product Type
+     *
+     * @param extra
+     */
+    setAddressDetails(extra) {
+        if (activeShippingAddress.phoneNumber !== '') {
+            extra.addressDetails = {
+                name: shopperDetails.firstName + ' ' + shopperDetails.lastName,
+                addressLine1: activeShippingAddress.street,
+                city: activeShippingAddress.city,
+                postalCode: activeShippingAddress.postalCode,
+                countryCode: activeShippingAddress.country,
+                phoneNumber: activeShippingAddress.phoneNumber
+            };
+        } else {
+            extra.productType = 'PayOnly';
+        }
+
+        return extra;
+    }
+}

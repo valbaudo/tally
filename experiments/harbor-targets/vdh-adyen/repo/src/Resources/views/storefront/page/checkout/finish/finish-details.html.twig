@@ -1,0 +1,24 @@
+{% sw_extends '@Storefront/storefront/page/checkout/finish/finish-details.html.twig' %}
+{% set adyenFrontendData = page.extensions[constant('Adyen\\Shopware\\Subscriber\\PostPaymentSubscriber::ADYEN_DATA_EXTENSION_ID')] %}
+
+{% block page_checkout_finish_data %}
+
+    {{ parent() }}
+
+    {% sw_include '@AdyenPaymentShopware6/storefront/component/adyencheckout.html.twig' %}
+    {% if adyenFrontendData %}
+        <script {% if app.request.attributes.get('_cspNonce') %} nonce="{{ app.request.attributes.get('_cspNonce') }}" {% endif %}>
+            window.localStorage.removeItem('confirmOrderForm.tos');
+        </script>
+        {% if adyenFrontendData.notification %}
+            <h2 style="text-align: center; margin-bottom: 40px">{{ "adyen.notification.message"|trans }}</h2>
+        {% endif %}
+        {% if adyenFrontendData.givingEnabled %}
+            {% sw_include '@AdyenPaymentShopware6/storefront/component/adyen-giving/adyen-giving-component.html.twig' %}
+        {% endif %}
+        {% if adyenFrontendData.action %}
+            {% sw_include '@AdyenPaymentShopware6/storefront/component/payment/payment-success-action.html.twig' %}
+        {% endif %}
+    {% endif %}
+
+{% endblock %}
