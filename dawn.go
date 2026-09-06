@@ -128,6 +128,14 @@ type Agent struct {
 	image  Image
 	model  string // verbatim to `harbor -m`; "" means dawn pins nothing (oracle, nop)
 	effort string // verbatim to `--ak reasoning_effort=`; same rule
+	// hosts is the agent phase's entire allowlist: the hosts THIS CLI reaches
+	// on the credential path dawn drives it over, and no others. It belongs to
+	// the profile rather than the package because it is a fact about one
+	// binary, and dawn held it as a package global — pinned to Anthropic —
+	// until a second vendor made the mistake visible. A codex stage under that
+	// global would have been firewalled off from its own provider and failed
+	// as an infra_error with nothing in the receipt to say why.
+	hosts []string
 	// FanOut reports whether this profile may run more than one attempt at a
 	// time. Readable so a protocol can say in source that a fan is
 	// single-vendor and its blind spots are therefore correlated.
@@ -142,8 +150,15 @@ type Agent struct {
 // dawn has not measured; dawn will honestly record that it pinned nothing.
 // Neither profile pins an effort yet, for the identical reason.
 var (
-	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", model: "claude-sonnet-5", FanOut: true}
-	Codex      = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false}
+	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", model: "claude-sonnet-5", FanOut: true,
+		hosts: []string{"api.anthropic.com", "platform.claude.com"}}
+	// Codex reaches chatgpt.com and auth.openai.com and nothing else: read off
+	// the vendored 0.145.0 binary, which routes ChatGPT-subscription traffic to
+	// https://chatgpt.com/backend-api/codex and refreshes at auth.openai.com.
+	// api.openai.com is deliberately absent — that is the API-KEY path, and
+	// dawn does not drive codex over a metered key.
+	Codex = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false,
+		hosts: []string{"chatgpt.com", "auth.openai.com"}}
 )
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or

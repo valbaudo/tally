@@ -1,0 +1,28 @@
+# The mdash agent environment for the CODEX profile. Byte-for-byte the same
+# target as Dockerfile — same base, same app, same /app/outputs — differing in
+# exactly one thing: which agent CLI is baked. That is the point. MDASH's
+# defining claim is a panel of DIFFERENT models on the SAME surface, so the
+# only honest way to express it is two images whose sole difference is the
+# vendor of the binary on PATH.
+#
+# Baked for the same reason claude's is: dawn's tasks run the environment
+# no-network, and Harbor's install step reaches the package mirror BEFORE the
+# agent phase opens its allowlist. Codex.install() returns early when
+# _INSTALL_CHECK_COMMAND (`command -v codex`) exits 0 and no --agent-version
+# was pinned, so nothing is fetched at trial time.
+FROM node:22-bookworm@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d AS cli
+RUN npm install -g @openai/codex@0.145.0
+
+# codex ships a node wrapper (bin/codex.js) that dispatches to a vendored
+# native binary, unlike claude.exe which is the binary. So node is load-bearing
+# here, not a convenience, and the whole package tree comes with it: the
+# vendored codex locates its bundled rg and zsh relative to its own path.
+FROM python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
+COPY --from=cli /usr/local/bin/node /usr/local/bin/node
+COPY --from=cli /usr/local/lib/node_modules/@openai/codex /usr/local/lib/node_modules/@openai/codex
+RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+
+COPY app/ /srv/mdash/
+
+WORKDIR /app
+RUN mkdir -p /app/outputs && chmod 0777 /app/outputs

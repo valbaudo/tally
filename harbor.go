@@ -193,9 +193,6 @@ func harborArgs(s Stage, taskDir, jobsDir string) []string {
 	return args
 }
 
-// The agent phase reaches these two hosts and no others. Verified by grepping
-// the pinned CLI binary: everything else it contacts degrades quietly.
-var agentAllowedHosts = []string{"api.anthropic.com", "platform.claude.com"}
 
 // gateTimeout bounds the verifier, which is dawn's own program on dawn's own
 // pinned image. It is not the attempt clock and not the author's business.
@@ -380,7 +377,7 @@ func writeTask(ctx context.Context, dir string, s Stage, attempt time.Duration) 
 		fmt.Fprintf(&b, "[environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n", s.Env)
 	}
 	fmt.Fprintf(&b, "[agent]\nnetwork_mode = \"allowlist\"\nallowed_hosts = [%s]\ntimeout_sec = %.1f\n\n",
-		quoted(agentAllowedHosts), attempt.Seconds())
+		quoted(s.Agent.hosts), attempt.Seconds())
 
 	if gated {
 		// separate: the gate never sees the agent's filesystem, only the

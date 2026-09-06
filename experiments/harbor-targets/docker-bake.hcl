@@ -84,8 +84,15 @@ target "mdash-gate" {
   tags     = ["dawn-mdash-gate"]
 }
 
+target "mdash-env-codex" {
+  inherits   = ["reproducible"]
+  context    = "mdash/environment"
+  dockerfile = "Dockerfile.codex"
+  tags       = ["dawn-mdash-env-codex"]
+}
+
 group "mdash" {
-  targets = ["mdash-env", "mdash-gate"]
+  targets = ["mdash-env", "mdash-env-codex", "mdash-gate"]
 }
 
 target "vdh-hunt-env" {

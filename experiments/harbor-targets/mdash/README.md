@@ -375,3 +375,43 @@ would need the secret to be unreadable to the agent's uid while readable to the
 app's -- a different, heavier design. This task deliberately does not attempt
 it; what it isolates is the *transport and gate* question, not shortcut-proof
 scoring.
+
+## The codex environment image
+
+`environment/Dockerfile.codex` is the same target for a second vendor: same
+base, same `app/`, same `/app/outputs` — differing in exactly one thing, which
+agent CLI is on `PATH`. MDASH's defining claim is a panel of *different* models
+on the *same* surface, so two images whose sole difference is the vendor of one
+binary is the only honest way to express it.
+
+```bash
+docker buildx bake mdash-env-codex   # from experiments/harbor-targets/
+```
+
+Measured 2026-09-06 (OrbStack, arm64):
+
+| fact | value |
+|---|---|
+| digest | `dawn-mdash-env-codex@sha256:7003829e738723ee20e50a09849e89cfa94e5ddbd77365a38e58ab6db0c6460c` |
+| reproducible | yes — a `--no-cache` rebuild yields the identical digest |
+| `command -v codex` | `/usr/local/bin/codex`, exit 0 |
+| `codex --version` | `codex-cli 0.145.0` |
+| baked tree | 305 MB (`@openai/codex` + its vendored linux-arm64 binary) |
+
+Baked for the same reason claude's is, and the reason is Harbor's ordering, not
+convenience: `Codex.install()` returns early only when `_INSTALL_CHECK_COMMAND`
+(`command -v codex`) exits 0, and that install runs **before** the agent phase
+opens its allowlist. On a `no-network` environment an unbaked CLI cannot reach
+the package mirror and the trial dies in setup, before any auth.
+
+Unlike `claude.exe`, which is the binary, codex ships a node wrapper that
+dispatches to a vendored native binary — so `node` is load-bearing here, and
+the whole package tree comes with it: the vendored codex locates its bundled
+`rg` and `zsh` relative to its own path.
+
+**Not yet run against a live model.** Harbor's codex adapter takes ChatGPT
+subscription auth via `CODEX_AUTH_JSON_PATH=<a 0600 seed copy>` (never
+`CODEX_FORCE_AUTH_JSON`, which reads `~/.codex/auth.json` in place). See
+`docs/research/oauth-cli-in-container.md` for why that copy is a landmine
+around a refresh: OpenAI burns the old refresh token *before* the write, and
+the write lands in a container about to be deleted.
