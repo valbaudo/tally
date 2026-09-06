@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -676,5 +677,73 @@ func TestProveGateRefusesAGateThatShipsNoProof(t *testing.T) {
 	// Memoised: the answer is a property of pinned bytes, not of the call.
 	if _, ok := proven[bare]; !ok {
 		t.Fatal("the refusal was not memoised")
+	}
+}
+
+// Stage.Inputs was documented for months as "the only way anything crosses an
+// attempt boundary" while writeTask emitted nothing for it — the surface
+// describing behaviour that did not exist. This asserts the behaviour, not the
+// sentence: the bytes land in the build context, the Dockerfile bakes them at
+// the documented path, and the prebuilt image key is GONE (a docker_image
+// would win over the Dockerfile and the inputs would silently vanish).
+func TestStageInputsAreBakedIntoTheNextStagesImage(t *testing.T) {
+	produced := t.TempDir()
+	if err := os.WriteFile(filepath.Join(produced, "finding.json"), []byte(`{"x":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	upstream := Result{
+		State:        Passed,
+		Manifest:     Manifest{{Name: "finding.json", Digest: "sha256:0"}},
+		artifactsDir: produced,
+	}
+	dir := t.TempDir()
+	stage := Stage{
+		ID: "prove", Agent: ClaudeCode, Env: Image("e@sha256:" + strings.Repeat("a", 64)),
+		Prompt: "prove it", Outputs: []string{"proof.json"},
+		Inputs: []Result{upstream}, Gate: NoGate("test"),
+	}
+	if err := writeTask(dir, stage, time.Minute); err != nil {
+		t.Fatalf("writeTask: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "environment", "inputs", "0", "finding.json"))
+	if err != nil || string(got) != `{"x":1}` {
+		t.Fatalf("input bytes did not reach the build context: %q, %v", got, err)
+	}
+	df, err := os.ReadFile(filepath.Join(dir, "environment", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("no generated Dockerfile: %v", err)
+	}
+	if !strings.Contains(string(df), "FROM "+string(stage.Env)) {
+		t.Errorf("Dockerfile lost the pin: %s", df)
+	}
+	if !strings.Contains(string(df), "COPY inputs "+inputDir) {
+		t.Errorf("Dockerfile does not bake the inputs: %s", df)
+	}
+	toml, err := os.ReadFile(filepath.Join(dir, "task.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(toml), "docker_image = "+strconv.Quote(string(stage.Env))) {
+		t.Error("task.toml still names the prebuilt image: it would win over the Dockerfile and the inputs would never arrive")
+	}
+	if !strings.Contains(instruction(stage), inputDir+"/0/finding.json") {
+		t.Error("the agent is never told where its inputs are")
+	}
+}
+
+// A declared name becomes a path in a build context, so it must be a plain
+// relative one. Stage.Outputs is Go source and cannot be chosen by an agent —
+// but three gates were broken today by a rule that held only in a comment.
+func TestInputNamesCannotEscapeTheBuildContext(t *testing.T) {
+	for _, bad := range []string{"../escape", "/etc/passwd", "a/../../b", ""} {
+		if err := cleanName(bad); err == nil {
+			t.Errorf("cleanName(%q) = nil, want an error", bad)
+		}
+	}
+	for _, ok := range []string{"finding.json", "sub/finding.json"} {
+		if err := cleanName(ok); err != nil {
+			t.Errorf("cleanName(%q) = %v, want nil", ok, err)
+		}
 	}
 }

@@ -397,10 +397,25 @@ type Stage struct {
 	// runs in would control a path inside it. A declared name is fixed here,
 	// in Go source, before either container exists.
 	Outputs []string
-	// Inputs are earlier results whose artifacts this stage reads. dawn mounts
-	// them read-only at a fixed path together with their manifest. This is the
+	// Inputs are earlier results whose artifacts this stage reads. This is the
 	// only way anything crosses an attempt boundary: every attempt is a fresh
 	// container, so what survives, survives as bytes.
+	//
+	// They are BAKED, not mounted, and the difference is worth stating because
+	// this doc claimed the wrong one for months while emitting nothing at all.
+	// Harbor gives a task one environment — a prebuilt image OR a Dockerfile in
+	// the task directory — so dawn generates that Dockerfile: FROM the stage's
+	// own pinned Env, COPY the inputs. See inputDir in harbor.go for why the
+	// docker_image key then has to be absent.
+	//
+	// Each input arrives at /app/inputs/<i>/<name>, indexed by its position in
+	// this list, and dawn writes those paths into the instruction so the prompt
+	// never has to. Order is deliberate and hashed: attemptID folds in
+	// inputDigest, so two stages differing only in which results they consume
+	// are different attempts.
+	//
+	// Measured end to end (experiments/transportprobe): a stage wrote a file,
+	// the next stage read it back, and the two manifests carry the same digest.
 	Inputs []Result
 	// Gate is the verifier. The zero value is not a gate — use NoGate.
 	Gate Gate
@@ -426,6 +441,11 @@ type Result struct {
 	// classify only reaches Passed for a gated, rewarded trial (harbor.go's
 	// Rule 5) — so by the time anything reads it, it is always valid.
 	publishDir string
+	// artifactsDir is where this attempt's declared outputs actually sit on
+	// the host. Unexported for the same reason publishDir is: a protocol names
+	// a Result in Stage.Inputs and dawn resolves the bytes — an author never
+	// handles a path, so an author can never point one somewhere else.
+	artifactsDir string
 	// drew is what this attempt drew, for the receipt. Unexported for the
 	// same reason metrics is: consumption is something dawn reports, never
 	// something a protocol branches on. There is no denominator to compare

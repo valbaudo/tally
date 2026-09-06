@@ -78,6 +78,26 @@ import (
 // is judgment, and SoundGate states the rule it should be judged against.
 const outputDir = "/app/outputs"
 
+// inputDir is where a stage finds the artifacts of the stages it declared in
+// Stage.Inputs, and it is the other half of outputDir's convention: outputs
+// leave at a path dawn fixed, inputs arrive at one.
+//
+// They arrive BAKED, not mounted. Harbor gives a task one environment, and
+// that environment is either a prebuilt docker_image or a Dockerfile in the
+// task directory it builds (environments/definition.py:
+// "Set [environment].docker_image or add environment/Dockerfile"). dawn
+// already owns the whole task directory, so a stage with inputs gets a
+// generated two-line Dockerfile — FROM the stage's own pinned Env, COPY the
+// inputs — and no docker_image key at all, because a prebuilt image WINS over
+// a Dockerfile unless the build is forced (should_use_prebuilt_docker_image).
+// The pin is not lost by this: it moves into the FROM line.
+//
+// Safety rests on a fact Stage.Outputs already states: the names copied here
+// are the DECLARED names from Go source, never a string the agent chose, so a
+// name cannot become a path an agent controls inside a container it never
+// runs in. cleanName re-checks it rather than trusting the sentence.
+const inputDir = "/app/inputs"
+
 // gateSelftest is where a gate proves itself, and dawn runs it before it will
 // spend an agent on that gate. It is a path, not a flag: a gate that claims
 // soundness and ships no proof of it does not run at all.
@@ -259,6 +279,12 @@ type trial struct {
 	// there is no such thing as half a Manifest, which is always infra_error.
 	Outputs Manifest
 	Present bool
+	// ArtifactsDir is where Harbor left those collected outputs on the host.
+	// It is what makes Stage.Inputs possible at all: a later stage's build
+	// context is filled by copying the DECLARED names out of this directory
+	// (materialiseInputs). Set by read() beside Outputs, from the same
+	// collected tree, so it is non-empty exactly when Present is true.
+	ArtifactsDir string
 	// PublishDir is the gate's own publish directory on the host — the
 	// verifier's trial dir plus "publish" — where a SoundGate hands the
 	// actuator the bytes it verified rather than the bytes the agent sent.
@@ -324,6 +350,9 @@ func writeTask(dir string, s Stage, attempt time.Duration) error {
 	if err := os.MkdirAll(filepath.Join(dir, "environment"), 0o755); err != nil {
 		return err
 	}
+	if err := materialiseInputs(dir, s); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(dir, "instruction.md"), []byte(instruction(s)), 0o644); err != nil {
 		return err
 	}
@@ -336,10 +365,16 @@ func writeTask(dir string, s Stage, attempt time.Duration) error {
 	fmt.Fprintf(&b, "[task]\nname = %q\nversion = \"1.0.0\"\ndescription = %q\n\n",
 		taskName(s.ID), "dawn stage "+s.ID)
 
-	// The environment is the task: the input tree is baked into this image, so
-	// there is nothing to build and no Dockerfile to ship. Its baseline is
-	// no-network; only the agent phase opens, and only onto two hosts.
-	fmt.Fprintf(&b, "[environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n", s.Env)
+	// The environment's baseline is no-network; only the agent phase opens, and
+	// only onto two hosts. A stage with no inputs names its pinned image
+	// directly and Harbor pulls it. A stage WITH inputs names none, because a
+	// docker_image would win over the Dockerfile materialiseInputs just wrote;
+	// the pin lives in that Dockerfile's FROM instead.
+	if len(s.Inputs) > 0 {
+		fmt.Fprintf(&b, "[environment]\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n")
+	} else {
+		fmt.Fprintf(&b, "[environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n", s.Env)
+	}
 	fmt.Fprintf(&b, "[agent]\nnetwork_mode = \"allowlist\"\nallowed_hosts = [%s]\ntimeout_sec = %.1f\n\n",
 		quoted(agentAllowedHosts), attempt.Seconds())
 
@@ -359,6 +394,58 @@ func writeTask(dir string, s Stage, attempt time.Duration) error {
 	return os.WriteFile(filepath.Join(dir, "task.toml"), []byte(b.String()), 0o644)
 }
 
+// cleanName rejects any declared output name that is not a plain relative
+// path. Stage.Outputs is written in Go source, so this cannot fire on an
+// agent's choosing — but the names become paths in a build context here, and
+// a rule that holds only because of a sentence in a doc comment is the exact
+// thing three of dawn's gates were broken by.
+func cleanName(name string) error {
+	if name == "" || strings.HasPrefix(name, "/") || filepath.Clean(name) != name ||
+		strings.HasPrefix(filepath.Clean(name), "..") {
+		return fmt.Errorf("dawn: %q is not a plain relative output name", name)
+	}
+	return nil
+}
+
+// materialiseInputs copies each declared input's artifacts into the task's
+// build context and writes the Dockerfile that bakes them in. A stage with no
+// inputs writes nothing and keeps naming its prebuilt image.
+//
+// Inputs arrive at inputDir/<i>/<name>, indexed by position in Stage.Inputs
+// rather than by stage id, because attemptID already hashes that list IN ORDER
+// (inputDigest) and order is the thing a protocol chose deliberately.
+func materialiseInputs(dir string, s Stage) error {
+	if len(s.Inputs) == 0 {
+		return nil
+	}
+	for i, in := range s.Inputs {
+		if in.artifactsDir == "" {
+			return fmt.Errorf("dawn: stage %s: input %d handed back no artifacts to mount", s.ID, i)
+		}
+		for _, a := range in.Manifest {
+			if err := cleanName(a.Name); err != nil {
+				return err
+			}
+			dst := filepath.Join(dir, "environment", "inputs", fmt.Sprint(i), a.Name)
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			b, err := os.ReadFile(filepath.Join(in.artifactsDir, a.Name))
+			if err != nil {
+				return fmt.Errorf("dawn: stage %s: input %d: %w", s.ID, i, err)
+			}
+			if err := os.WriteFile(dst, b, 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	df := fmt.Sprintf("# Generated by dawn: this stage declared Stage.Inputs.\n"+
+		"# The pin is here rather than in task.toml's [environment] on purpose —\n"+
+		"# see inputDir. Base bytes are the stage's own Env, unchanged.\n"+
+		"FROM %s\nCOPY inputs %s\n", s.Env, inputDir)
+	return os.WriteFile(filepath.Join(dir, "environment", "Dockerfile"), []byte(df), 0o644)
+}
+
 func quoted(ss []string) string {
 	out := make([]string, len(ss))
 	for i, s := range ss {
@@ -376,6 +463,20 @@ func instruction(s Stage) string {
 	var b strings.Builder
 	b.WriteString(s.Prompt)
 	b.WriteString("\n\n---\n\n")
+	// Inputs come first: they are context the agent needs before it reads what
+	// to hand back. dawn names the paths rather than the prompt doing it, for
+	// the same reason it owns the output paths — the author writes the task,
+	// dawn owns where bytes live.
+	if len(s.Inputs) > 0 {
+		fmt.Fprintf(&b, "Earlier stages of this run handed you %d input(s), "+
+			"baked into this container read-only:\n\n", len(s.Inputs))
+		for i, in := range s.Inputs {
+			for _, a := range in.Manifest {
+				fmt.Fprintf(&b, "  - `%s/%d/%s`\n", inputDir, i, a.Name)
+			}
+		}
+		b.WriteString("\n")
+	}
 	if len(s.Outputs) == 0 {
 		fmt.Fprintf(&b, "This stage declares no output files. Nothing written "+
 			"into `%s`, or anywhere else in this container, crosses the boundary.\n", outputDir)
@@ -497,11 +598,12 @@ func (t *trial) read(jobsDir string, outputs []string) error {
 		if e.Status != "ok" && e.Status != "empty" {
 			continue // outputDir itself was not collected; Present stays false
 		}
-		m, ok, err := digest(filepath.Join(trialDir, e.Destination), outputs)
+		collected := filepath.Join(trialDir, e.Destination)
+		m, ok, err := digest(collected, outputs)
 		if err != nil {
 			return err
 		}
-		t.Outputs, t.Present = m, ok
+		t.Outputs, t.Present, t.ArtifactsDir = m, ok, collected
 	}
 	return nil
 }
@@ -593,7 +695,8 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 // agent output. It is a pure function of a Stage and a trial precisely so that
 // the rules can be read in one place and tested without Docker.
 func classify(s Stage, t trial) Result {
-	r := Result{Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir, drew: t.Drew}
+	r := Result{Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir,
+		artifactsDir: t.ArtifactsDir, drew: t.Drew}
 	gated := s.Gate.image != ""
 	switch {
 	// Rule 1: cancelled from outside the run. Checked first, ahead of every
