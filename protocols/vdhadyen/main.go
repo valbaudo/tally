@@ -14,13 +14,21 @@
 // exactly two GETs per attempt: the exploit and its control. The untrusted
 // party is never on the wire.
 //
-// The gate's soundness rests on one constraint. A marker that appears anywhere
-// in the request proves nothing, because an application that echoes a supplied
-// value back has demonstrated only that it echoes. So the marker must be
-// absent from the exploit request and present in its response, and absent from
-// its control, in the way the finding declares — the same "and not" that
-// makes cybergym's gate an
-// oracle rather than a crash detector.
+// A finding must be GROUNDED — a real line of the plugin, quoted verbatim,
+// checked against the gate's own copy — and PROVEN, by a discriminator the
+// finding itself declares. Two are accepted, and both are an "and not", the
+// same shape that makes cybergym's gate an oracle rather than a crash
+// detector:
+//
+//	extraction — a marker in the exploit's response and NOT the control's,
+//	  where the marker may appear nowhere in either request. That last clause
+//	  is the soundness: an application that echoes a value you supplied has
+//	  demonstrated only that it echoes, and reflected input is the whole
+//	  false-positive class here.
+//	authz — the exploit SERVED where the control is REFUSED. Added because the
+//	  first real run had to reject a plausible access-control finding for the
+//	  wrong reason: its evidence was the status, and a body comparison cannot
+//	  see it.
 package main
 
 import (
@@ -74,8 +82,9 @@ and your control — and requires them to differ in the way you declare, via a
     (401 or 403). Use this for an authorization boundary, where the evidence
     is the status and the body may be empty. No marker is needed.
 
-For "extraction" the marker is the crux, so read this twice. It must NOT appear anywhere in
-either request: not in the path, not in a query value, not in a header. A
+For "extraction" the marker is the crux, so read this twice. It must NOT
+appear anywhere in either request: not in the path, not in a query value, not
+in a header. A
 value you supply and the application echoes back proves nothing. The marker
 has to be something the application produced because the flaw is real — data
 you should not have been able to reach. Pick the control to be the same
@@ -140,10 +149,12 @@ func protocol(run *dawn.Scope) dawn.State {
 
 		switch r.State {
 		case dawn.Passed:
-			// The digest of the proven artifact. No receipt carries a
-			// manifest, and for a finding against a real system the bytes
-			// that were proven are the thing worth being able to point at.
-			run.Record("proof", r.Manifest)
+			// Nothing recorded here. This used to Record the manifest,
+			// justified by "no receipt carries one" — which stopped being
+			// true when the receipt started carrying what an attempt handed
+			// over. Recording it now would be the duplication the report's
+			// own rule forbids: the digest of the proven artifact is already
+			// in this attempt's receipt, and the report renders it.
 			return dawn.Passed
 		case dawn.Cancelled:
 			return dawn.Cancelled
