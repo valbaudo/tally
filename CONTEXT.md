@@ -42,14 +42,14 @@ _Avoid_: "cheap" as a soundness value.
 What a protocol's verifier can actually establish — sound-and-cheap, real-but-expensive, or none. The oracle decides a protocol's shape.
 
 **scope**:
-A bounded region of a protocol run with its own budget lease. There is one per run: scopes were nestable until four protocols were written and none nested.
+A bounded region of a protocol run with its own budget lease, within the run-wide budget.
 
 **lease**:
-An atomic reservation a scope holds before dispatch, counted in wall clock, attempts, or container concurrency — never in money or tokens. Provider quota is not leasable: it has no published ceiling and its exhaustion may be unobservable, so dawn tracks draw rate, never a balance. Leases are booked by Scope.charge(), which is atomic; there is no separate ledger.
+An atomic reservation a scope holds before dispatch, counted in wall clock, attempts, or container concurrency — never in money or tokens. Provider quota is not leasable: it has no published ceiling and its exhaustion may be unobservable, so dawn tracks draw rate, never a balance. Leases are booked by Scope.charge(), which is atomic and walks every ancestor scope; there is no separate ledger.
 
 **admission**:
-charge() — not a separate component, and no longer a semaphore either. It was charge() plus one memory-sized semaphore per agent name, which existed to bound how many attempts of one agent a fan could put in flight at once. Scope.Fan was deleted after four protocols used it zero times, and with one dispatch at a time there is nothing left to admit against.
-_Avoid_: admission queue (an earlier sketch of a separate component, never built), scheduler as a second component, budget authority.
+charge() plus one semaphore per agent name — not a separate component. charge() is the existing, already-atomic ancestor walk; the semaphore caps how many attempts of one agent may be in flight at once, sized memory-aware for an agent that can fan (Scope.Fan) and fixed at one for an agent that cannot (Codex). No ordering, no fairness: a fan returns results in index order regardless of dispatch order, so wait-order never matters.
+_Avoid_: admission queue (an earlier, pre-Fan sketch of a separate component that was never built), scheduler as a second component, budget authority.
 
 **actuator**:
 The trusted component that performs an external effect (push a branch, open a PR, call a scoring endpoint) after verification, so the agent never holds production credentials. Runs in dawn's own process, fires only on `passed`, and publishes only bytes the gate itself wrote.

@@ -168,6 +168,56 @@ func TestRunnerErrorIsInfraError(t *testing.T) {
 	}
 }
 
+// Children draw FROM the parent: two siblings leased more than the parent
+// holds still share the parent's counter, and the second one starves.
+func TestChildrenDrawFromTheParent(t *testing.T) {
+	f := &fake{script: []State{Rejected}}
+	r, _ := testRun(t, f)
+	root := r.root(Lease{Attempts: 3, WallClock: time.Hour})
+
+	a := root.Scope("a", Dispatching(10, time.Minute))
+	b := root.Scope("b", Dispatching(10, time.Minute))
+	spend := func(s *Scope) int {
+		n := 0
+		for s.More() {
+			s.Run(okStage)
+			n++
+		}
+		return n
+	}
+	if got := spend(a); got != 3 {
+		t.Errorf("first child ran %d, want 3: it may not outspend the parent", got)
+	}
+	if got := spend(b); got != 0 {
+		t.Errorf("second child ran %d, want 0: the parent was already spent", got)
+	}
+	if root.used != 3 {
+		t.Errorf("root charged %d, want 3: children's dispatches book against it", root.used)
+	}
+}
+
+// A child leased more clock than its parent has left does not get it: its
+// deadline is clamped at creation, so it stops admitting when the parent's
+// clock is out even though its own counter is untouched.
+func TestChildCannotOutliveTheParentsClock(t *testing.T) {
+	f := &fake{script: []State{Rejected}}
+	r, _ := testRun(t, f)
+	root := r.root(Lease{Attempts: 100, WallClock: 0})
+	child := root.Scope("child", Dispatching(10, time.Hour))
+	if child.deadline.After(root.deadline) {
+		t.Fatal("child deadline outlives the parent's")
+	}
+	if child.More() {
+		t.Fatal("More() true: the child claimed an hour the parent does not have")
+	}
+	if msg := caughtBug(t, func() { child.Run(okStage) }); msg == "" {
+		t.Fatal("dispatching past the parent's clock did not unwind")
+	}
+	if f.calls != 0 {
+		t.Errorf("dispatches = %d, want 0", f.calls)
+	}
+}
+
 // More() is the counter and the deadline, and each half flips it alone.
 func TestMoreFlipsOnEitherHalfOfTheLease(t *testing.T) {
 	f := &fake{script: []State{Rejected}}

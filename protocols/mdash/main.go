@@ -91,9 +91,9 @@ func main() {
 // did not find it will re-derive the same wrong answer from the same source,
 // having never seen the verdict. That is spend, not signal.
 //
-// MDASH was the last candidate for dawn's fan-out, nested scopes and
-// stage-to-stage Inputs, and it wanted none of them. All three are gone now:
-// four protocols, zero uses, and Inputs never had a consumer at all.
+// Note what this protocol does NOT use: no Fan, no nested Scope, no
+// Stage.Inputs. MDASH was the last candidate for any of them and it wanted
+// none — see the note in the run's record.
 func protocol(run *dawn.Scope) dawn.State {
 	exploit := run.Run(dawn.Stage{
 		ID:      "exploit",
