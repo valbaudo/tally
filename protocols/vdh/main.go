@@ -27,6 +27,20 @@
 //	          own AST of the source
 //	report    recall and precision against a key only the gate image holds
 //
+// WHAT IS STILL DROPPED, so nobody has to infer it: the VVS triage half
+// (Dedup → Judgment → Fixing), and sibling-spawning inside a hunter — VDH's
+// hunters fan out again to exploration subagents, and dawn's Scope.Scope would
+// nest a fan but this protocol does not use it. The fan is three wide where
+// VDH runs fifty to two hundred, and that is spend policy, not capability.
+//
+// MEASURED ACROSS TWO RUNS, and it is the reason the Validate stage exists.
+// Nine adversaries per run, each told its sole job was to DISPROVE the finding
+// it was handed. Both runs: nine verdicts, nine "confirmed", ZERO refutations.
+// Their apparent accuracy went 3/9 → 8/9 between runs while their behaviour
+// did not change at all — only the share of findings that happened to be real
+// did. An adversarial pass that never refutes is not adversarial, and dawn can
+// say so because its gate replays the payload instead of believing the verdict.
+//
 // recon, gapfill and feedback emit plans rather than claims, so they are
 // ungated and dawn clamps them to unverified. Their effect is measured
 // downstream: a bad queue shows up as hunters that prove nothing.
