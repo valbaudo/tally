@@ -95,7 +95,7 @@ agent starts.
 | | |
 |---|---|
 | `dawn.go` | the whole author-facing surface: six states, `Stage`, `Gate`, `Lease`, `Result` |
-| `runtime.go` | scopes, leases, admission, fan-out, resume, the actuator |
+| `runtime.go` | the scope, its lease, admission, resume, the actuator |
 | `harbor.go` | the runner: generates the task, runs one trial, classifies it |
 | `report.go` | the run's receipt |
 | `protocols/prci/` | the worked example |

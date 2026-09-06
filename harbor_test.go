@@ -2,7 +2,6 @@ package dawn
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,100 +161,6 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 		t.Errorf("nop hands nothing over, got %v", got.Outputs)
 	}
 	t.Logf("dir=%s rewards=%v present=%v outputs=%v", got.Dir, got.Rewards, got.Present, got.Outputs)
-}
-
-// TestFanOverlapsRealHarborTrials is Q2 proven for real, not against a fake:
-// four real Harbor trials against the shipped pr-ci target, using Harbor's
-// "nop" agent — the same agent TestRunTrialAgainstAGeneratedTask already
-// uses, so it costs nothing and needs no token, yet every container, every
-// environment build and every gate run is genuine.
-//
-// NOT "oracle": Harbor's OracleAgent hardcodes its solution script's path as
-// <task_dir>/solution/solve.sh (harbor/models/task/paths.py) — a HOST-side
-// file dawn's compiler has no way to produce, because Stage has no
-// "solution" field and never will (dawn runs real agents against real
-// unknowns; baking an answer key is not in its vocabulary, on purpose). This
-// was verified by trying it: harbor fails every trial with "Solution script
-// not found" before ever reaching the gate.
-//
-// nop hands nothing over, so every child's terminal state is InfraError
-// (Rule 2: a declared output that was never collected) rather than Passed —
-// but that is still a REAL trial with a REAL environment build and a REAL
-// gate run, and the state is irrelevant to what this test proves: overlap in
-// wall time, and correct placement by index.
-//
-// DAWN_MAX_CONCURRENT pins the width to exactly 4 so the comparison below
-// does not depend on this host's own memory or core count. Opt in with
-// DAWN_HARBOR_E2E=1, same images as TestRunTrialAgainstAGeneratedTask.
-func TestFanOverlapsRealHarborTrials(t *testing.T) {
-	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
-		t.Skip("set DAWN_HARBOR_E2E=1 (needs harbor, docker, rc-pr-ci images)")
-	}
-	// Opting into the e2e path and then leaving the images unset used to pass
-	// in 0.18s: both "trials" failed instantly, and "four fanned < 4x one"
-	// is trivially true of two instant failures. A test that passes when its
-	// subject never ran is worse than no test, so this fails rather than
-	// skips — the caller asked for the real thing.
-	if os.Getenv("DAWN_E2E_ENV") == "" || os.Getenv("DAWN_E2E_GATE") == "" {
-		t.Fatal("DAWN_HARBOR_E2E=1 requires DAWN_E2E_ENV and DAWN_E2E_GATE (digest-pinned images)")
-	}
-	t.Setenv("DAWN_MAX_CONCURRENT", "4")
-
-	env := Image(os.Getenv("DAWN_E2E_ENV"))
-	gate := Image(os.Getenv("DAWN_E2E_GATE"))
-	stage := func(id string) Stage {
-		return Stage{
-			ID:      id,
-			Agent:   Agent{name: "nop", FanOut: true},
-			Env:     env,
-			Prompt:  "Fix calc.py in /app/repo and write the diff as fix.patch.",
-			Outputs: []string{"fix.patch"},
-			Gate:    SoundGate(gate),
-		}
-	}
-	mk := func(i int) Stage { return stage(fmt.Sprintf("rc-pr-ci-fan-%d", i)) }
-
-	r := &run{dir: t.TempDir(), ctx: context.Background(), dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}, actuations: map[string]string{}}
-
-	// Baseline: one real trial, timed alone, on its own stage id so its
-	// evidence directory never collides with a fan child's.
-	start := time.Now()
-	baseline := r.root(Dispatching(1, 10*time.Minute)).Run(stage("rc-pr-ci-baseline"))
-	oneTrial := time.Since(start)
-	// A real containerised trial takes tens of seconds. Anything near-instant
-	// means harbor refused before starting one, and the overlap ratio below
-	// would then be comparing two failures to each other.
-	if oneTrial < 5*time.Second {
-		t.Fatalf("baseline trial took %v: harbor did not run a real container, so the overlap measurement is meaningless", oneTrial)
-	}
-	if baseline.State != InfraError {
-		t.Fatalf("baseline nop trial: state = %s, want infra_error (nop hands nothing back)", baseline.State)
-	}
-
-	// Four, fanned. Attempts == n exactly: every child spends its one charge
-	// before any of them finishes, so nobody retries mid-fan regardless of
-	// nop's InfraError outcome (see dispatchAttempt: a retry only happens
-	// when the scope still admits one, and this scope is fully spent the
-	// instant all four children have charged).
-	start = time.Now()
-	results := r.root(Dispatching(4, 10*time.Minute)).Fan(4, mk)
-	fanTime := time.Since(start)
-
-	for i, res := range results {
-		if res.State != InfraError {
-			t.Errorf("child %d: state = %s, want infra_error", i, res.State)
-			continue
-		}
-		if want := attemptID(mk(i), 1); res.attemptID != want {
-			t.Errorf("child %d: attemptID = %s, want %s — index order broken", i, res.attemptID, want)
-		}
-	}
-
-	ratio := float64(fanTime) / float64(oneTrial)
-	t.Logf("one trial = %v, four fanned = %v (%.2fx)", oneTrial, fanTime, ratio)
-	if fanTime > oneTrial*3 {
-		t.Errorf("fan of 4 took %v (%.2fx a single trial's %v), want well under 4x: no real overlap happened", fanTime, ratio, oneTrial)
-	}
 }
 
 // The classifier is the whole of dawn's state assignment, so it is asserted as

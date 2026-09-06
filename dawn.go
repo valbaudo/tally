@@ -119,22 +119,16 @@ type Image string
 // what lets the receipt record what dawn told Harbor to run rather than
 // nothing at all — see harborArgs.
 //
-// The name, image, model and effort are dawn's own knowledge, so they are
-// unexported: a protocol selects a profile, it never reads one apart. FanOut
-// is the single exception, and only because the per-agent cap is a
-// correctness fact a protocol is obliged to state in its caveats.
+// Every field is dawn's own knowledge, so all of them are unexported: a
+// protocol selects a profile, it never reads one apart.
 type Agent struct {
 	name   string
 	image  Image
 	model  string // verbatim to `harbor -m`; "" means dawn pins nothing (oracle, nop)
 	effort string // verbatim to `--ak reasoning_effort=`; same rule
-	// FanOut reports whether this profile may run more than one attempt at a
-	// time. Readable so a protocol can say in source that a fan is
-	// single-vendor and its blind spots are therefore correlated.
-	FanOut bool
 }
 
-// The profiles dawn ships. Only ClaudeCode may fan out. ClaudeCode's model is
+// The profiles dawn ships. ClaudeCode's model is
 // pinned to what every run has actually been doing — measured off Harbor's
 // raw agent logs, since nothing before this recorded it — so the pin is
 // behaviour-neutral. Codex's model stays "": the CLI prints no effective
@@ -142,8 +136,8 @@ type Agent struct {
 // dawn has not measured; dawn will honestly record that it pinned nothing.
 // Neither profile pins an effort yet, for the identical reason.
 var (
-	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", model: "claude-sonnet-5", FanOut: true}
-	Codex      = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000", FanOut: false}
+	ClaudeCode = Agent{name: "claude-code", image: "dawn-claude-code@sha256:0000000000000000000000000000000000000000000000000000000000000000", model: "claude-sonnet-5"}
+	Codex      = Agent{name: "codex", image: "dawn-codex@sha256:0000000000000000000000000000000000000000000000000000000000000000"}
 )
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or
@@ -389,19 +383,11 @@ type Stage struct {
 	// name instead of walking the output tree, so a file the agent invented
 	// and never declared cannot enter the Manifest.
 	//
-	// This is not pedantry. Today Artifact.Name is filepath.Rel's echo of
-	// whatever the agent chose to call its file — harmless only because
-	// nothing yet treats that string as a path. The moment Stage.Inputs
-	// materialises a PRIOR stage's manifest into a new container, that
-	// string becomes a mount path, and an agent in a container it never
-	// runs in would control a path inside it. A declared name is fixed here,
-	// in Go source, before either container exists.
+	// This is not pedantry. Artifact.Name is otherwise filepath.Rel's echo of
+	// whatever the agent chose to call its file, and a name the AGENT chose
+	// would be a name dawn quotes back into its own paths. A declared name is
+	// fixed here, in Go source, before either container exists.
 	Outputs []string
-	// Inputs are earlier results whose artifacts this stage reads. dawn mounts
-	// them read-only at a fixed path together with their manifest. This is the
-	// only way anything crosses an attempt boundary: every attempt is a fresh
-	// container, so what survives, survives as bytes.
-	Inputs []Result
 	// Gate is the verifier. The zero value is not a gate — use NoGate.
 	Gate Gate
 }
@@ -439,12 +425,12 @@ type Result struct {
 }
 
 // attemptID names one dispatch attempt: stage.ID, a digest of the stage's own
-// content, a digest of its resolved inputs, and the attempt number Scope.Run
-// already counts (the nth dispatch of this scope's retry loop).
+// content, and the attempt number Scope.Run already counts (the nth dispatch
+// of this scope's retry loop).
 //
 // LOUD COMMENT, because this hash is append-only vocabulary the instant
 // anything durable is keyed by it (the per-run actuation record, Step's
-// dedup): if a later ticket changes what feeds contentDigest or inputDigest,
+// dedup): if a later ticket changes what feeds contentDigest,
 // every existing dedup record silently starts meaning something else — same
 // key, different attempt, and dawn would skip an effect that never actually
 // ran. Recovery, whenever it lands, must layer run/lineage identity
@@ -454,11 +440,10 @@ func attemptID(s Stage, attemptNumber int) string {
 	type key struct {
 		StageID       string
 		Content       string
-		Input         string
 		AttemptNumber int
 	}
 	// Marshal of plain strings, slices and ints never errors.
-	b, _ := json.Marshal(key{s.ID, contentDigest(s), inputDigest(s.Inputs), attemptNumber})
+	b, _ := json.Marshal(key{s.ID, contentDigest(s), attemptNumber})
 	return sha256hex(b)
 }
 
@@ -486,33 +471,7 @@ func contentDigest(s Stage) string {
 	return sha256hex(b)
 }
 
-// inputDigest hashes the ordered Manifest of each Result in Stage.Inputs —
-// already content digests, so this is a digest of digests. Order matters:
-// Inputs is a list a protocol wrote in a deliberate order.
-func inputDigest(inputs []Result) string {
-	type artifact struct{ Name, Digest string }
-	manifests := make([][]artifact, len(inputs))
-	for i, r := range inputs {
-		for _, a := range r.Manifest {
-			manifests[i] = append(manifests[i], artifact{a.Name, a.Digest})
-		}
-	}
-	b, _ := json.Marshal(manifests)
-	return sha256hex(b)
-}
-
 func sha256hex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
-}
-
-// anyDecided reports whether any child of a fan produced an outcome from the
-// work. Unexported: it is a loop over State.Decided, not surface.
-func anyDecided(rs []Result) bool {
-	for _, r := range rs {
-		if r.State.Decided() {
-			return true
-		}
-	}
-	return false
 }

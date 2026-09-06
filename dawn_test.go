@@ -41,12 +41,6 @@ func TestDecided(t *testing.T) {
 			t.Errorf("%q.Decided() = %v", s, !want)
 		}
 	}
-	if !anyDecided([]Result{{State: InfraError}, {State: Rejected}}) {
-		t.Error("anyDecided missed a rejected child")
-	}
-	if anyDecided([]Result{{State: InfraError}, {State: Exhausted}}) {
-		t.Error("anyDecided voted on a fan where nothing voted")
-	}
 }
 
 // LiveGate is a sound gate, not a format-only one: it must report "live" from
@@ -108,11 +102,6 @@ func TestAttemptIDIsStableAndSensitiveToWhatItHashes(t *testing.T) {
 	differentPrompt.Prompt = "do it differently"
 	if attemptID(base, 1) == attemptID(differentPrompt, 1) {
 		t.Error("attemptID must vary with stage content (contentDigest)")
-	}
-	withInput := base
-	withInput.Inputs = []Result{{Manifest: Manifest{{Name: "a", Digest: "sha256:1"}}}}
-	if attemptID(base, 1) == attemptID(withInput, 1) {
-		t.Error("attemptID must vary with resolved inputs (inputDigest)")
 	}
 	// The stage id is hashed OUTSIDE contentDigest, but still feeds attemptID.
 	differentID := base

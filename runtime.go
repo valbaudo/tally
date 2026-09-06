@@ -11,14 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -209,10 +206,9 @@ type run struct {
 // spend a sibling's budget.
 type Scope struct {
 	run      *run
-	parent   *Scope
 	id       string
 	lease    Lease
-	deadline time.Time // start + WallClock, never later than the parent's
+	deadline time.Time // start + WallClock
 	used     int       // dispatches charged to this scope, retries included
 }
 
@@ -331,22 +327,6 @@ func (r *run) root(lease Lease) *Scope {
 	return &Scope{run: r, id: "root", lease: lease, deadline: time.Now().Add(lease.WallClock)}
 }
 
-// Scope opens a nested scope with its own lease. Nesting is how a protocol
-// says that one instance's whole escalation is bounded separately from the
-// run.
-func (s *Scope) Scope(id string, lease Lease) *Scope {
-	// A child draws from its parent: its clock cannot outlast the parent's,
-	// and every dispatch it makes is charged to the parent too (see charge),
-	// so its Attempts is a ceiling on its own share and never an allowance on
-	// top of the parent's. A child leased more clock than its parent has left
-	// simply stops admitting when the parent's deadline arrives.
-	deadline := time.Now().Add(lease.WallClock)
-	if deadline.After(s.deadline) {
-		deadline = s.deadline
-	}
-	return &Scope{run: s.run, parent: s, id: s.id + "/" + id, lease: lease, deadline: deadline}
-}
-
 // More reports whether the lease can still admit an attempt. It is the loop
 // guard: "try again until the scope runs out" is the one question a protocol
 // asks the admission queue rather than being told the answer to.
@@ -375,18 +355,12 @@ func (s *Scope) More() bool {
 // make Dispatching(1, per) a scope that cannot dispatch at all. What bounds
 // the attempt instead is the clock Run hands it — the remaining scope clock
 // when that is the smaller of the two — and an attempt cut short that way is
-// Exhausted, which is the state for "dawn's own clock ended it". The counter
-// half walks the ancestry, because siblings spend the same parent counter.
+// Exhausted, which is the state for "dawn's own clock ended it".
 func (s *Scope) admits(now time.Time) bool {
 	if !now.Before(s.deadline) {
 		return false
 	}
-	for a := s; a != nil; a = a.parent {
-		if a.used >= a.lease.Attempts {
-			return false
-		}
-	}
-	return true
+	return s.used < s.lease.Attempts
 }
 
 // charge admits one dispatch and books it against the scope and every ancestor,
@@ -397,16 +371,14 @@ func (s *Scope) charge() bool {
 	if !s.admits(time.Now()) {
 		return false
 	}
-	for a := s; a != nil; a = a.parent {
-		a.used++
-	}
+	s.used++
 	return true
 }
 
 // Run dispatches one attempt and blocks until it reaches a terminal state.
 // Machine overcapacity is queueing, never an error.
 func (s *Scope) Run(stage Stage) Result {
-	return s.dispatchAttempt(stage, true)
+	return s.dispatchAttempt(stage)
 }
 
 // stageID is Stage.ID's grammar: one Harbor task-name segment, verbatim from
@@ -421,17 +393,14 @@ var stageID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // dispatchAttempt is Run's body — compiles the stage into a task.toml dawn
 // owns entirely (artifacts list, separate no-network verifier, digest-pinned
-// verifier image, agent-phase allowlist) and dispatches it — parameterised on
-// whether a spent scope on the very FIRST charge is a protocol bug.
+// verifier image, agent-phase allowlist) and dispatches it.
 //
-// bugOnFirstCharge is true for every caller except Fan's own children. A
-// plain Run against an already-spent scope is a caller that skipped More(),
-// which is the protocol bug More()'s doc names. Several fan children racing
-// the SAME scope's remaining Attempts down to zero is a different thing: the
-// scope was sized correctly, More() was true a moment ago, and the loser of
-// that race gets an ordinary InfraError — like any other spent-lease
-// dispatch — instead of tearing down every sibling with it (see Fan).
-func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
+// A dispatch against an already-spent scope is a caller that skipped More(),
+// which is the protocol bug More()'s doc names. That used to be conditional,
+// because a fan's children could race the same scope's Attempts down to zero
+// and the loser of that race had done nothing wrong. With Fan gone there is
+// one dispatch at a time and no such race.
+func (s *Scope) dispatchAttempt(stage Stage) Result {
 	if !stageID.MatchString(stage.ID) {
 		bug("scope %s dispatched stage id %q: an id is one segment, %s — qualify with '-' or '.', not '/'", s.id, stage.ID, stageID)
 	}
@@ -457,16 +426,8 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 		// per Run call and stops, so this never shows.
 		r, resumed := resumeResult(evidence, stage, retry+1)
 		if !resumed {
-			// Concurrency admission: charge() (already atomic, already walks
-			// ancestors) plus this one semaphore, acquired before
-			// charge/Dispatch and released right after — see agentGates.
-			// Held only across the charge+dispatch below, never across the
-			// backoff sleep, so a flaky child doesn't sit on a slot while it
-			// waits to retry.
-			release := acquireAgentGate(stage.Agent, stage.Env)
 			if !s.charge() {
-				release()
-				if retry == 0 && bugOnFirstCharge {
+				if retry == 0 {
 					bug("scope %s dispatched %q on a spent lease: guard the dispatch with More()", s.id, stage.ID)
 				}
 				return Result{State: InfraError}
@@ -482,7 +443,6 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 			var err error
 			r, err = s.run.dispatch.Dispatch(ctx, stage, evidence)
 			cancel()
-			release()
 			if err != nil {
 				r = Result{State: InfraError}
 			}
@@ -566,132 +526,6 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	return classify(s, t), true
 }
 
-// fanWidth is the Q2 concurrency formula: clamp(1, NumCPU, 80% of host
-// memory / one attempt's image size). Plain NumCPU has no idea an image is
-// heavy: 12-wide against pr-ci's 1.94 GB image asks ~23 GB of a 9.4 GB VM.
-// Verifier containers run concurrently with agent containers, and dawn's own
-// process plus the Docker daemon share that same pool, so usable is 80% of
-// the total, not 100% — turning the clamp into a target is how a concurrency
-// knob becomes an OOM knob. An attempt OOM-killed mid-trial writes no
-// result.json, so dawn classifies it infra_error and burns the lease
-// retrying into the same wall — a config mistake wearing a flakiness
-// costume.
-//
-// A docker inspect failure, or an unreadable host memory figure, fails
-// CLOSED to 1 — never to NumCPU(). "Overcapacity is queueing, never an
-// error" has to mean the failure mode is safe, not fast: serial-by-default
-// is the only answer that cannot OOM.
-//
-// DAWN_MAX_CONCURRENT wins outright when set, mirroring DAWN_RUN_ROOT.
-func fanWidth(env Image) int {
-	return width(env, hostMemoryBytes, imageSizeBytes, runtime.NumCPU())
-}
-
-// width is fanWidth's arithmetic, parameterised on how to read host memory,
-// one image's size, and the CPU count, so the formula is fully deterministic
-// in a test — without Docker, a real host, or a dependency on how many cores
-// happen to run the test.
-func width(env Image, hostMem func() (int64, bool), imageSize func(Image) (int64, bool), cpu int) int {
-	if v, ok := os.LookupEnv("DAWN_MAX_CONCURRENT"); ok {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	mem, ok := hostMem()
-	if !ok {
-		return 1
-	}
-	size, ok := imageSize(env)
-	if !ok || size <= 0 {
-		return 1
-	}
-	n := int(mem * 80 / 100 / size)
-	if n < 1 {
-		n = 1
-	}
-	if n > cpu {
-		n = cpu
-	}
-	return n
-}
-
-// hostMemoryBytes reads total physical memory on the host dawn's own process
-// runs on — the same pool the Docker daemon and every container draw from.
-// ok is false on any unsupported OS or read failure, which is exactly the
-// "unreadable host memory" case fanWidth fails closed on.
-func hostMemoryBytes() (int64, bool) {
-	// The memory that bounds concurrency is the DOCKER DAEMON's, not this
-	// machine's. Containers run inside a VM on macOS, and the two numbers
-	// differ by more than the safety factor: measured here, sysctl reports
-	// 19.3 GB while the VM the trials actually run in has 9.4 GB. Sizing
-	// against the host would allow 7 concurrent copies of a 1.94 GB image —
-	// 13.6 GB into a 9.4 GB VM — which is the OOM this whole formula exists
-	// to prevent, arrived at by a longer route.
-	//
-	// docker is already a dependency this file shells to for image size, so
-	// asking it for the pool its own containers draw from adds no new
-	// surface, and it is right on Linux too, where the daemon is bounded by
-	// whatever cgroup it runs under rather than by /proc/meminfo.
-	out, err := exec.Command("docker", "info", "--format", "{{.MemTotal}}").Output()
-	if err != nil {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	return n, err == nil && n > 0
-}
-
-// imageSizeBytes shells out to docker — already a dependency Harbor drives —
-// to size one pinned image. ok is false on any inspect failure: an image
-// dawn cannot size is an image dawn cannot safely fan.
-func imageSizeBytes(env Image) (int64, bool) {
-	out, err := exec.Command("docker", "image", "inspect", string(env), "--format", "{{.Size}}").Output()
-	if err != nil {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	return n, err == nil && n > 0
-}
-
-// agentGates is one semaphore per agent NAME, built lazily on first use and
-// never rebuilt — the structural form of Codex's cap of 1. Capacity is 1
-// when the profile cannot fan (Agent.FanOut == false), otherwise fanWidth's
-// memory-aware limit, sized against whichever stage first dispatches that
-// agent name: a fan is homogeneous, so that is mk(0)'s Env for a Fan call
-// (Fan sizes it before spawning a single child) and simply the one Env
-// there is for a plain Run.
-//
-// Every dispatch acquires it, in dispatchAttempt above, fanned or not — which
-// is what makes the cap hold structurally rather than by convention:
-// Fan(24, codexStage) still spawns 24 goroutines, but they serialise here
-// instead of overlapping, and that is safe because Dispatching's WallClock
-// already funds the fully-serial worst case.
-//
-// FanOut is a bool and can only express "1" or "the pool" — a future agent
-// with, say, a cap of 3 would need the field widened past a bool.
-var (
-	agentGatesMu sync.Mutex
-	agentGates   = map[string]chan struct{}{}
-)
-
-// acquireAgentGate blocks until a slot for a's name is free and returns the
-// release func. See agentGates for why this is keyed by name alone and built
-// only once.
-func acquireAgentGate(a Agent, env Image) func() {
-	agentGatesMu.Lock()
-	g, ok := agentGates[a.name]
-	if !ok {
-		n := 1
-		if a.FanOut {
-			n = fanWidth(env)
-		}
-		g = make(chan struct{}, n)
-		agentGates[a.name] = g
-	}
-	agentGatesMu.Unlock()
-	g <- struct{}{}
-	return func() { <-g }
-}
-
 // attemptClock is what one attempt gets: dawn's per-attempt clock, or the rest
 // of the scope's clock when that is shorter. The scope's WallClock is a bound
 // on the scope as a whole, so a late attempt is truncated rather than allowed
@@ -701,65 +535,6 @@ func (s *Scope) attemptClock() time.Duration {
 		return rest
 	}
 	return s.lease.AttemptWallClock
-}
-
-// Fan dispatches n attempts concurrently. It DRAINS — never fail-fast — and
-// returns every child's terminal state in INDEX order regardless of dispatch
-// or completion order, because a fan-in that silently drops children is a
-// corpus that shrank without saying so; index order is also why wait-order
-// never matters. By the time a caller sees an InfraError child, that branch
-// already exhausted its own retries.
-//
-// Concurrency is admission, not a second data structure: dispatchAttempt's
-// existing charge() plus one per-agent-name semaphore (agentGates), sized
-// once against mk(0)'s Env — a fan is homogeneous, so every child shares one
-// image and dawn need not ask docker n times over. There is no ordering and
-// no fairness beyond index order; the "admission queue" once sketched in
-// CONTEXT.md never existed.
-//
-// A child that cannot be charged returns InfraError like any other
-// spent-lease dispatch rather than unwinding the whole run: several children
-// racing this SAME scope's remaining Attempts down to zero is not the
-// protocol bug More()'s doc warns about, it is what a fan sized exactly to
-// its lease looks like — that sizing is the author's job, not a clamp Fan
-// applies (below).
-//
-// There is no child limit and no concurrency argument: the agent profile
-// fixes the parallelism, and n is the author's to size. Fan does NOT clamp n
-// to the lease — n, plus whatever retries those children turn out to owe,
-// has to fit in the scope's remaining Attempts. Declare the lease as the
-// fan's width plus retry headroom; nothing here checks that you did.
-//
-// Every child charges THIS SAME scope — s.id is identical across every one
-// of them, so it cannot disambiguate a Record. A Record made from inside
-// mk(i), or by the caller processing result i, MUST qualify its name by the
-// child's own Stage.ID. Record's existing duplicate-name bug() is the
-// correctness net, not something to route around: two children writing the
-// same unqualified name is the exact prototype bug — two values silently
-// overwriting one key — turned into a loud crash instead. The cost is author
-// discipline with no soft failure: one unqualified Record in a wide fan
-// crashes the whole run.
-func (s *Scope) Fan(n int, mk func(i int) Stage) []Result {
-	if n < 0 {
-		bug("scope %s Fan called with negative n=%d", s.id, n)
-	}
-	if n > 0 {
-		// Build (and size) this agent's gate against the fan's own image
-		// before any child races to do it implicitly.
-		first := mk(0)
-		acquireAgentGate(first.Agent, first.Env)()
-	}
-	results := make([]Result, n)
-	var wg sync.WaitGroup
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func(i int) {
-			defer wg.Done()
-			results[i] = s.dispatchAttempt(mk(i), false)
-		}(i)
-	}
-	wg.Wait()
-	return results
 }
 
 // Record writes one named value into dawn's run record. It is the channel for
