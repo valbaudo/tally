@@ -41,11 +41,17 @@ import (
 // dawn assigns a state by first match, parsing no agent output at all:
 //
 //  1. external cancel                                    -> Cancelled
-//  2. declared output missing or invalid                 -> InfraError (always)
-//  3. output present, gate wrote no valid reward         -> InfraError
-//  4. output present, gate ran, dawn's own timeout hit   -> Exhausted
+//  2. dawn's own timeout hit                             -> Exhausted
+//  3. declared output missing or invalid                 -> InfraError (always)
+//  4. output present, gate wrote no valid reward         -> InfraError
 //  5. output present, gate ran, clean exit               -> Passed / Rejected,
 //     or Unverified for a format-only gate or no gate at all
+//
+// The first two are the facts dawn owns directly — both are ctx.Err() — and
+// they are read before anything inferred from what a killed attempt left
+// behind. Rules 3 and 4 used to come first, which made Exhausted unreachable:
+// a clock-kill always leaves a missing output and a Harbor fault, so the
+// timeout was filed as infra_error and retried into the same clock.
 type State string
 
 const (
@@ -59,7 +65,11 @@ const (
 	Unverified State = "unverified"
 	// Exhausted: dawn's own clock ended it, not the agent and not a gate. dawn
 	// assigns it to a dispatched attempt that hit its AttemptWallClock, and to
-	// nothing else (rule 4 above).
+	// nothing else (rule 2 above). It says nothing about whether the declared
+	// output was written or the gate ran — a clock-kill usually means neither,
+	// because the agent was still working when the clock fired. That is the
+	// point: the clock firing is a complete explanation on its own, and it is
+	// not retried, because retrying into the same clock cannot end differently.
 	//
 	// A protocol may also RETURN it for a loop that never got to dispatch —
 	// More() false at the first turn — because that is the only honest word

@@ -280,9 +280,24 @@ func TestClassifyAssignsStatesByFirstMatch(t *testing.T) {
 		"output never collected": {sound, trial{Rewarded: true, Rewards: map[string]float64{"reward": 1}}, InfraError},
 		"gate wrote no verdict":  {sound, trial{Present: true}, InfraError},
 		"harbor raised":          {sound, trial{Present: true, Fault: "ValidationError: nope", Rewarded: true, Rewards: map[string]float64{"reward": 1}}, InfraError},
-		"dawn's clock ended it":  {sound, trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}, TimedOut: true}, Exhausted},
-		"format-only clamped":    {format, won, Unverified},
-		"ungated":                {none, trial{Present: true}, Unverified},
+		// The shape a REAL clock-kill produces, taken from a measured trial
+		// (attempts/pov-1/1 of vdh-adyen, 20m20s against a 20m clock): the
+		// agent was still working, so its declared output is missing, and
+		// Harbor was SIGTERM'd, so it finalized with a CancelledError. The
+		// case this replaces hand-built {Present: true, Rewarded: true,
+		// Fault: ""} with TimedOut — a trial the runner CANNOT produce, since
+		// the thing that sets TimedOut is the same thing that sets Fault and
+		// leaves the output unwritten. It passed over an impossible world and
+		// hid the bug: Exhausted was assigned zero times in twenty-one real
+		// attempts.
+		"dawn's clock ended it": {sound, trial{TimedOut: true, Present: false, Rewarded: false, Fault: "CancelledError: "}, Exhausted},
+		// The companion, and the reason the reorder is safe: an infra failure
+		// with no clock event is still InfraError, still retryable. This is
+		// the ~190s credential failure the old ordering claimed to protect —
+		// it never sets TimedOut, so it falls through exactly as before.
+		"infra failure, clock never fired": {sound, trial{TimedOut: false, Present: false}, InfraError},
+		"format-only clamped":              {format, won, Unverified},
+		"ungated":                          {none, trial{Present: true}, Unverified},
 		// Rule 1 wins over everything, including a trial that otherwise looks
 		// like a clean win: cancelled from outside is never a verdict.
 		"externally cancelled": {sound, trial{Present: true, Rewarded: true, Rewards: map[string]float64{"reward": 1}, Cancelled: true}, Cancelled},

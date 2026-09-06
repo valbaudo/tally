@@ -521,7 +521,39 @@ func classify(s Stage, t trial) Result {
 	// that happened to still have voted.
 	case t.Cancelled:
 		r.State = Cancelled
-	// Rule 2: a declared output that is missing or could not be collected is
+	// Rule 2: dawn's own clock ended it.
+	//
+	// Second, with Cancelled, and ahead of everything below — because these
+	// two are the only facts in this switch dawn owns DIRECTLY. Both are
+	// ctx.Err() (see clockOutcome), mutually exclusive, and observed rather
+	// than inferred. Every rule below is read out of the wreckage dawn's own
+	// SIGTERM left behind, and a killed attempt is guaranteed to leave some:
+	// the agent dies mid-work so its declared output is missing, and Harbor
+	// finalizes with a CancelledError that arrives here as t.Fault. Asking
+	// those questions first means dawn's answer to "why did this attempt end"
+	// is derived from the mess it made rather than from the fact it already
+	// had.
+	//
+	// This ordering was the other way round, and the consequence was measured
+	// rather than argued: across every run ever made against this package,
+	// twenty-one attempts, Exhausted was assigned ZERO times. It was not rare,
+	// it was unreachable — one of six states that classify could never emit,
+	// and the one naming the thing that actually happened. A real 20-minute
+	// timeout on a real target was filed as infra_error, which is retryable,
+	// so dawn re-dispatched into the same wall: 5.1M tokens burned, then 3.9M
+	// more, for a verdict no attempt could have produced.
+	//
+	// The rule this replaces claimed missing-output had to come first or a
+	// ~190s credential failure would be misfiled as a real result. It does
+	// not follow. That failure never sets TimedOut — the clock did not fire —
+	// so it falls straight through to the missing-output rule below, exactly
+	// as it always did.
+	//
+	// Nothing else changes to stop the retry: dispatchAttempt retries on
+	// InfraError alone, so an attempt that is Exhausted is simply returned.
+	case t.TimedOut:
+		r.State = Exhausted
+	// Rule 3: a declared output that is missing or could not be collected is
 	// infra_error, always — dawn cannot tell a bad attempt from a broken
 	// collection, and guessing in the agent's favour is how a forged verdict
 	// gets in. An empty output directory is present and valid.
@@ -530,14 +562,10 @@ func classify(s Stage, t trial) Result {
 	// Harbor itself raised: whatever the trial was, it was not a verdict.
 	case t.Fault != "":
 		r.State = InfraError
-	// Rule 3: the gate ran and wrote no valid reward. A crashed gate emits no
+	// Rule 4: the gate ran and wrote no valid reward. A crashed gate emits no
 	// reward.json, and a non-numeric one Harbor rejects before dawn sees it.
 	case gated && !t.Rewarded:
 		r.State = InfraError
-	// Rule 4: dawn's own clock ended it. Not the agent's doing and not a
-	// gate's, so it is never Rejected.
-	case t.TimedOut:
-		r.State = Exhausted
 	// Rule 5, first half: nothing established a verdict. A format-only gate is
 	// CLAMPED here — it is above the reward branch, so there is no code path
 	// from a format-only stage to Passed, whatever number the gate wrote.
