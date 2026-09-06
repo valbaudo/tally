@@ -5,7 +5,7 @@
 # one level down.
 FROM python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
 
-COPY calc.py test_calc.py ci.sh /gate/repo/
+COPY calc.py test_calc.py ci.sh check.py /gate/repo/
 RUN chmod +x /gate/repo/ci.sh \
  && cd /gate/repo \
  && git init -q -b main \
@@ -21,6 +21,8 @@ RUN chmod +x /gate/repo/ci.sh \
 
 COPY test.sh /tests/test.sh
 COPY oracle.patch /gate/oracle.patch
+COPY forgery-exit.patch /gate/forgery-exit.patch
+COPY forgery-echo.patch /gate/forgery-echo.patch
 COPY selftest.sh /gate/selftest.sh
 RUN mkdir -p /app/outputs
 RUN chmod +x /tests/test.sh /gate/selftest.sh && /gate/selftest.sh

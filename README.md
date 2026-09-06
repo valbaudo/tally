@@ -28,8 +28,12 @@ uv tool install harbor==0.22.0
 **2. Build the images.** Every image a protocol pins is built from one declarative file:
 
 ```bash
-docker buildx bake -f experiments/harbor-targets/docker-bake.hcl pr-ci
+cd experiments/harbor-targets && docker buildx bake -f docker-bake.hcl pr-ci
 ```
+
+The `cd` is load-bearing: bake resolves each target's `context` against the working
+directory, not against the bake file, so running this from the repo root fails with
+`unable to prepare context: path "pr-ci/environment" not found`.
 
 The two digests this produces are the constants in
 [protocols/prci/main.go](protocols/prci/main.go). **They will match**: the build is a

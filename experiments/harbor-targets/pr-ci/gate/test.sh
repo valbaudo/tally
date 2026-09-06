@@ -1,7 +1,16 @@
 #!/bin/bash
 # The gate. Starts from its OWN pristine baked repo, applies the agent's
-# unified diff as DATA (never executes anything the agent wrote), and runs
-# its own baked ci.sh.
+# unified diff with --include=calc.py, and runs its own baked ci.sh.
+#
+# It DOES execute what the agent wrote, and pretending otherwise is what once
+# made this gate forgeable: calc.py is the file --include legitimately admits,
+# and the process that measures the fix must import it. An earlier version of
+# this comment claimed the diff was applied "as DATA (never executes anything
+# the agent wrote)", and on the strength of that claim ci.sh trusted the exit
+# code of that very process -- which the agent's own module can set. So the
+# containment is not that agent code never runs; it is that agent code can only
+# influence VALUES, never the comparison: ci.sh decides by matching answers it
+# already knows, and a module that produces no answer is red.
 #
 # Single exit path: /logs/verifier/reward.json is the LAST thing written, and
 # nothing else writes a reward. Harbor restores declared artifacts into this

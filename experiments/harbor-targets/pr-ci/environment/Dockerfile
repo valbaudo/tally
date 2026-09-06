@@ -18,7 +18,7 @@ COPY --from=cli /usr/local/bin/node /usr/local/bin/node
 COPY --from=cli /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
 
 WORKDIR /app
-COPY calc.py test_calc.py ci.sh /app/repo/
+COPY calc.py test_calc.py ci.sh check.py /app/repo/
 RUN chmod +x /app/repo/ci.sh \
  && cd /app/repo \
  && git init -q -b main \
