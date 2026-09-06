@@ -8,9 +8,17 @@
 # what bounds it; TARGET in check.py is what bounds where it tries.
 FROM python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
 
+# The oracle, supplied at build time so the repo holds no secret. Default
+# UNARMED: that image refuses to vote (see check.py), which is the honest state
+# for a gate with no ground truth. Arming it changes these bytes, so an armed
+# gate is a different digest -- which is correct, since it is a different
+# oracle.
+ARG CANARY=UNARMED
+
 COPY repo /gate/repo
 COPY gate/check.py /gate/check.py
+RUN sed -i "s/^CANARY = .*/CANARY = \"$CANARY\"/" /gate/check.py
 COPY gate/test.sh /tests/test.sh
 COPY gate/selftest.sh /gate/selftest.sh
 RUN mkdir -p /app/outputs
-RUN chmod +x /tests/test.sh /gate/selftest.sh && /gate/selftest.sh
+RUN chmod +x /tests/test.sh /gate/selftest.sh && /gate/selftest.sh build
