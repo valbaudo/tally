@@ -415,9 +415,12 @@ func cleanName(name string) error {
 // build context and writes the Dockerfile that bakes them in. A stage with no
 // inputs writes nothing and keeps naming its prebuilt image.
 //
-// Inputs arrive at inputDir/<i>/<name>, indexed by position in Stage.Inputs
-// rather than by stage id, because attemptID already hashes that list IN ORDER
-// (inputDigest) and order is the thing a protocol chose deliberately.
+// Inputs arrive at inputDir/<producing stage id>/<name>. They used to arrive
+// at inputDir/<position>, which made every multi-input stage depend on the
+// order of a Go slice: a prompt had to spell out "the queue, followed by the
+// verdicts", a gate had to trust that ordering, and a fan of fifty produced
+// fifty anonymous directories. Slice order still feeds inputDigest, so it is
+// still attempt identity — it just no longer decides the layout.
 func materialiseInputs(dir string, s Stage) error {
 	if len(s.Inputs) == 0 {
 		return nil
@@ -435,15 +438,27 @@ func materialiseInputs(dir string, s Stage) error {
 // copyInputs fills one build context with the declared artifacts of every
 // input, at <root>/<i>/<name>.
 func copyInputs(root string, s Stage) error {
+	seen := map[string]bool{}
 	for i, in := range s.Inputs {
 		if in.artifactsDir == "" {
 			return fmt.Errorf("dawn: stage %s: input %d handed back no artifacts to mount", s.ID, i)
 		}
+		// Result.Stage is exported, so a protocol can set it to anything; it
+		// becomes a directory name in two containers, which makes it the same
+		// trust boundary cleanName guards. The grammar it must satisfy is the
+		// one Stage.ID already has.
+		if !stageID.MatchString(in.Stage) {
+			return fmt.Errorf("dawn: stage %s: input %d has no usable stage name (%q)", s.ID, i, in.Stage)
+		}
+		if seen[in.Stage] {
+			return fmt.Errorf("dawn: stage %s: two inputs both named %q; one would bury the other", s.ID, in.Stage)
+		}
+		seen[in.Stage] = true
 		for _, a := range in.Manifest {
 			if err := cleanName(a.Name); err != nil {
 				return err
 			}
-			dst := filepath.Join(root, fmt.Sprint(i), a.Name)
+			dst := filepath.Join(root, in.Stage, a.Name)
 			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 				return err
 			}
@@ -503,9 +518,11 @@ func gateContext(dir string, s Stage) (tag Image, root string, err error) {
 	}
 	key := struct {
 		Gate   Image
+		Stages []string
 		Inputs []Manifest
 	}{Gate: s.Gate.image}
 	for _, in := range s.Inputs {
+		key.Stages = append(key.Stages, in.Stage)
 		key.Inputs = append(key.Inputs, in.Manifest)
 	}
 	b, _ := json.Marshal(key)
@@ -550,9 +567,9 @@ func instruction(s Stage) string {
 	if len(s.Inputs) > 0 {
 		fmt.Fprintf(&b, "Earlier stages of this run handed you %d input(s), "+
 			"baked into this container read-only:\n\n", len(s.Inputs))
-		for i, in := range s.Inputs {
+		for _, in := range s.Inputs {
 			for _, a := range in.Manifest {
-				fmt.Fprintf(&b, "  - `%s/%d/%s`\n", inputDir, i, a.Name)
+				fmt.Fprintf(&b, "  - `%s/%s/%s`\n", inputDir, in.Stage, a.Name)
 			}
 		}
 		b.WriteString("\n")
@@ -775,7 +792,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 // agent output. It is a pure function of a Stage and a trial precisely so that
 // the rules can be read in one place and tested without Docker.
 func classify(s Stage, t trial) Result {
-	r := Result{Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir,
+	r := Result{Stage: s.ID, Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir,
 		artifactsDir: t.ArtifactsDir, drew: t.Drew}
 	gated := s.Gate.image != ""
 	switch {

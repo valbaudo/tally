@@ -55,11 +55,11 @@ import (
 
 const (
 	env          dawn.Image = "dawn-vdh-hunt-env@sha256:4a0b273153cac34a551d282e6a58d0a15463c20ea2f2e8a457d5f5090650fbea"
-	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:369dd5290d48cb9d9e92cc9c5bef4b38e0d04aa807ac1529683c12784d394aca"
-	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:eaa3625b77c8a741116bab074a5aa6f791bfae688a2c4e230d04921defe8b63a"
-	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:13c17c6405382f57085b9be2bffd9de967769814a2b326370c02642e9ba8b2e8"
-	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:c322e1755eb95aef68bd0b8ccaa6673f6f61552cd64aa94329ece59e1248c50f"
-	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:9d3d480971fa7cf3000064b325f223afbdd04b8029e42941e0d46dcbeadbb2e5"
+	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:699430537bc9b2868ad49ab0e41484b623df99fdd13baf539fd7426d698a84d2"
+	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:86af3d545527fe52c249e4097496d4fa5ff0eae47092142fdbeff12d124bd419"
+	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:b1f66f063ac9456e0973dc6d3b619ac3ef732d4cf944e37e89c4ca19b4c2c70b"
+	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:9d4b028c8d691f883df4a9b276ce7ef54a580471b0ef4c357dea4d1b843ced55"
+	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:1915664a7e9cc773621e3977d9a29f3d7f8f294054a033ff6a97201c62b80078"
 )
 
 // The fan width and the number of gapfill rounds. Both are spend policy, not
@@ -131,8 +131,9 @@ Write one JSON object:
 		// findings would see that area as covered and never come back to it.
 		queue = run.Run(dawn.Stage{
 			ID: fmt.Sprintf("gapfill-r%d", round), Agent: dawn.ClaudeCode, Env: env,
-			Prompt: `Your inputs are the hunting queue a round of hunters worked from, followed by
-the adversaries' verdicts on what those hunters found. Read /app/src as well.
+			Prompt: `Your inputs are under /app/inputs, one directory per stage that produced them:
+the hunting queue a round worked from, and the adversaries' verdicts on what
+that round found. Read /app/src as well.
 
 A finding an adversary REFUTED leaves its area still uncovered — treat it as a
 gap, not as ground already walked.
@@ -158,20 +159,27 @@ Write one JSON object:
 	// 5. DEDUPE — a fan duplicates; this collapses it without losing anything.
 	deduped := run.Run(dawn.Stage{
 		ID: "dedupe", Agent: dawn.ClaudeCode, Env: env,
-		Prompt: `Your inputs are findings from several hunters, and some of them are the same bug
-found twice.
+		Prompt: `Your inputs are under /app/inputs, one directory per hunter that produced a
+finding. Some describe the SAME bug.
 
-Collapse them: keep every DISTINCT (file, function) exactly once. Do not drop a
-distinct finding and do not add one that was not handed to you — the verifier
-checks all three.
+Collapse them, and DECLARE the collapsing: each finding you keep lists the
+inputs it stands for, including itself. Two reports of one bug become one
+finding absorbing both — even where they name different functions, if you judge
+them the same bug.
+
+The verifier checks your grouping is a partition: every input absorbed by
+exactly one keeper, nothing absorbed that was never handed in. It does not
+second-guess WHICH things you judged equivalent — but it will not let work be
+silently dropped.
 
 Write one JSON object:
-  {"findings": [{"file": "src/....py", "function": "...", "why": "..."}]}`,
+  {"findings": [{"file": "src/....py", "function": "...", "why": "...",
+                 "absorbed": [{"file": "...", "function": "..."}]}]}`,
 		Inputs:  confirmed,
 		Outputs: []string{"deduped.json"},
 		Gate:    dawn.SoundGate(dedupeGate),
 	})
-	record(run, deduped, "dedupe", "in", "distinct_in", "out")
+	record(run, deduped, "dedupe", "in", "kept", "collapsed")
 
 	// 6. TRACE — is it reachable from outside? Every hop is checked against
 	// the gate's own AST, so a plausible path through functions that never
@@ -277,8 +285,17 @@ not return it. Try it yourself first.
 Note the request handlers in src/api.py take a request mapping, not a bare
 string — the bug is one hop further in, and that is where a finding belongs.
 
-Write one JSON object:
-  {"file": "src/....py", "function": "...", "payload": "...", "why": "..."}`, i+1, hunters, i),
+A finding is not just a payload. Hand back all four parts:
+
+  {"file": "src/....py", "function": "...", "payload": "...",
+   "why":    "how the input reaches the SQL text",
+   "threat": {"attacker": "who can send this", "boundary": "what it crosses"},
+   "fix":    {"old": "the exact source text to replace, verbatim",
+              "new": "what replaces it"}}
+
+The verifier applies your fix to ITS OWN copy and replays the same payload: it
+must no longer reach anything, and ordinary input must still work. "old" has to
+appear exactly once in the file, so include enough lines to be unambiguous.`, i+1, hunters, i),
 			Inputs:  []dawn.Result{queue},
 			Outputs: []string{"finding.json"},
 			Gate:    dawn.SoundGate(huntGate),

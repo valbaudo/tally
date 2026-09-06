@@ -408,11 +408,11 @@ type Stage struct {
 	// own pinned Env, COPY the inputs. See inputDir in harbor.go for why the
 	// docker_image key then has to be absent.
 	//
-	// Each input arrives at /app/inputs/<i>/<name>, indexed by its position in
-	// this list, and dawn writes those paths into the instruction so the prompt
-	// never has to. Order is deliberate and hashed: attemptID folds in
-	// inputDigest, so two stages differing only in which results they consume
-	// are different attempts.
+	// Each input arrives at /app/inputs/<its Stage>/<name>, and dawn writes
+	// those paths into the instruction so the prompt never has to. Order is
+	// still hashed — attemptID folds in inputDigest, so two stages differing
+	// only in which results they consume are different attempts — but order no
+	// longer decides where anything lands. See Result.Stage.
 	//
 	// Measured end to end (experiments/transportprobe): a stage wrote a file,
 	// the next stage read it back, and the two manifests carry the same digest.
@@ -426,6 +426,19 @@ type Result struct {
 	// State is the verdict. It is the whole branching vocabulary a protocol
 	// has; there is nothing else to switch on.
 	State State
+	// Stage is the Stage.ID that produced this result, and downstream it is
+	// this result's DIRECTORY NAME under /app/inputs.
+	//
+	// It is exported because it is the only thing that makes a multi-input
+	// stage legible. Inputs used to arrive at /app/inputs/<position>, so a
+	// prompt had to say "the queue, followed by the verdicts" and a gate had
+	// to be keyed on the order of a Go slice — a coupling paid for in prose,
+	// invisible in the evidence tree, and hopeless at a fan of fifty. Named by
+	// stage, the filesystem is the query: /app/inputs/hunt-r1-*/finding.json.
+	//
+	// Slice order still feeds inputDigest, so it remains part of attempt
+	// identity; it just no longer decides where anything lands.
+	Stage string
 	// Manifest records what this attempt's declared outputs were.
 	Manifest Manifest
 	// metrics is what the gate wrote alongside its reward, read through

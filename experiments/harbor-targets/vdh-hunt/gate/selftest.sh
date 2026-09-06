@@ -17,7 +17,27 @@ H=/gate/hunt_check.py
 R=/gate/report_check.py
 mkdir -p $A
 
-# ---- hunt gate ----
+# ---- hunt gate: grounded + proven + threat model + a fix that flips ----
+# A complete finding is written by this helper; each case below breaks exactly
+# one part of it, so a failure names the part.
+finding() { python3 - "$@" > $A/finding.json <<'P'
+import json, sys
+f = {"file": sys.argv[1], "function": sys.argv[2], "payload": sys.argv[3],
+     "why": "user input is spliced into the SQL text instead of bound",
+     "threat": {"attacker": "any caller who can reach the request handler",
+                "boundary": "the database query's meaning, crossed by unescaped input"},
+     "fix": {"old": sys.argv[4], "new": sys.argv[5]}}
+json.dump(f, open("/app/outputs/finding.json", "w"))
+P
+}
+UOLD=$(cat <<'P'
+    sql = f"SELECT id, name, is_admin FROM users WHERE name = '{username}'"
+    return run_query(conn, sql)
+P
+)
+UNEW='    return run_query(conn, "SELECT id, name, is_admin FROM users WHERE name = ?", (username,))'
+INJ="nobody' OR '1'='1"
+
 rm -f $A/finding.json
 want $H 0 "nothing at $A/finding.json"
 echo 'not json' > $A/finding.json
@@ -27,23 +47,29 @@ want $H 0 "the finding names no function"
 echo '{"file":"src/nope.py","function":"x","payload":"y"}' > $A/finding.json
 want $H 0 "the cited module is not in this target"
 
-# THE TWO FORGERIES, and they are why this gate runs the function instead of
-# checking a list. The source is IN the agent's image, so a function name is
-# free to guess; what is not free is a payload that actually changes a query.
-echo '{"file":"src/users.py","function":"get_user_by_name","payload":"alice"}' > $A/finding.json
-want $H 0 "a real vulnerable function named with a payload that exploits nothing"
-echo '{"file":"src/users.py","function":"get_user_by_id","payload":"nobody'"'"' OR '"'"'1'"'"'='"'"'1"}' > $A/finding.json
-want $H 0 "a decoy named with a real injection payload"
+# The threat model is part of the contract, not decoration.
+python3 - "$INJ" <<'P'
+import json, sys
+json.dump({"file": "src/users.py", "function": "get_user_by_name", "payload": sys.argv[1]},
+          open("/app/outputs/finding.json", "w"))
+P
+want $H 0 "a working payload with no threat model"
 
-# The four seeded instances, each proven by running it.
-for c in 'src/users.py:get_user_by_name:nobody'"'"' OR '"'"'1'"'"'='"'"'1' \
-         'src/orders.py:search_orders_by_status:x'"'"' OR '"'"'1'"'"'='"'"'1' \
-         'src/search.py:search_products:%'"'"' OR '"'"'1'"'"'='"'"'1' \
-         'src/reports.py:monthly_summary:x'"'"' OR '"'"'1'"'"'='"'"'1'; do
-  f=${c%%:*}; rest=${c#*:}; n=${rest%%:*}; p=${rest#*:}
-  python3 -c "import json,sys;json.dump({'file':sys.argv[1],'function':sys.argv[2],'payload':sys.argv[3]},open('$A/finding.json','w'))" "$f" "$n" "$p"
-  want $H 1 "the seeded instance $f:$n"
-done
+# THE FORGERIES. The source is in the agent's image, so a function NAME is free
+# to guess; a payload that changes a query's meaning is not, and neither is a
+# fix that actually closes it.
+finding "src/users.py" "get_user_by_name" "alice" "$UOLD" "$UNEW"
+want $H 0 "a real vulnerable function named with a payload that exploits nothing"
+finding "src/users.py" "get_user_by_id" "$INJ" "$UOLD" "$UNEW"
+want $H 0 "a decoy named with a real injection payload"
+finding "src/users.py" "get_user_by_name" "$INJ" "    return run_query(conn, sql)" "    return run_query(conn, sql)  # reviewed"
+want $H 0 "a fix that changes nothing the payload cares about"
+finding "src/users.py" "get_user_by_name" "$INJ" "def get_user_by_name(conn, username):" "def get_user_by_name(conn, username):  # noqa"
+want $H 0 "a fix that edits a signature and leaves the hole open"
+
+# The whole contract, satisfied.
+finding "src/users.py" "get_user_by_name" "$INJ" "$UOLD" "$UNEW"
+want $H 1 "grounded, proven, threat-modelled, and the fix flips it"
 
 # ---- report gate ----
 rm -f $A/report.json $A/finding.json
@@ -76,7 +102,7 @@ mv /gate/ground_truth.off /gate/ground_truth.json
 
 
 # ---- validate gate: the adversary is scored against the machine ----
-I=/app/inputs/0
+I=/app/inputs/hunt-a
 V=/gate/validate_check.py
 rm -rf /app/inputs && mkdir -p $I
 real='{"file":"src/users.py","function":"get_user_by_name","payload":"nobody'"'"' OR '"'"'1'"'"'='"'"'1"}'
@@ -98,26 +124,41 @@ echo '{"file":"src/users.py","function":"get_user_by_id","verdict":"confirmed"}'
 want $V 0 "the adversary rubber-stamps a decoy"
 rm -f $A/verdict.json
 
-# ---- dedupe gate: collapse without inventing or dropping ----
+# ---- dedupe gate: a partition, so semantic collapsing is allowed ----
 D=/gate/dedupe_check.py
-rm -rf /app/inputs && mkdir -p /app/inputs/0 /app/inputs/1 /app/inputs/2
-echo '{"file":"src/users.py","function":"get_user_by_name"}'  > /app/inputs/0/finding.json
-echo '{"file":"src/users.py","function":"get_user_by_name"}'  > /app/inputs/1/finding.json
-echo '{"file":"src/orders.py","function":"search_orders_by_status"}' > /app/inputs/2/finding.json
-echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/orders.py","function":"search_orders_by_status"}]}' > $A/deduped.json
-want $D 1 "three findings, one duplicate, collapsed to two"
-echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/users.py","function":"get_user_by_name"}]}' > $A/deduped.json
-want $D 0 "the output still contains a duplicate"
-echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"}]}' > $A/deduped.json
-want $D 0 "dedupe dropped a distinct finding instead of collapsing one"
-echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/orders.py","function":"search_orders_by_status"},{"file":"src/search.py","function":"search_products"}]}' > $A/deduped.json
-want $D 0 "dedupe invented a finding that was never handed in"
+rm -rf /app/inputs && mkdir -p /app/inputs/hunt-a /app/inputs/hunt-b /app/inputs/hunt-c
+echo '{"file":"src/users.py","function":"get_user_by_name"}'  > /app/inputs/hunt-a/finding.json
+echo '{"file":"src/users.py","function":"get_user_by_name"}'  > /app/inputs/hunt-b/finding.json
+echo '{"file":"src/orders.py","function":"search_orders_by_status"}' > /app/inputs/hunt-c/finding.json
+
+U='{"file":"src/users.py","function":"get_user_by_name","absorbed":[{"file":"src/users.py","function":"get_user_by_name"}]}'
+O='{"file":"src/orders.py","function":"search_orders_by_status","absorbed":[{"file":"src/orders.py","function":"search_orders_by_status"}]}'
+echo "{\"findings\":[$U,$O]}" > $A/deduped.json
+want $D 1 "three reports, one duplicate, partitioned into two"
+
+# THE CASE THE OLD GATE GOT BACKWARDS: collapsing two DIFFERENT functions the
+# agent judged to be one bug. Cloudflare's dedupe collapses semantically
+# equivalent findings; the first version of this gate failed exactly that.
+BOTH='{"file":"src/users.py","function":"get_user_by_name","absorbed":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/orders.py","function":"search_orders_by_status"}]}'
+echo "{\"findings\":[$BOTH]}" > $A/deduped.json
+want $D 1 "two distinct functions collapsed into one finding, declared"
+
+echo "{\"findings\":[$U]}" > $A/deduped.json
+want $D 0 "a finding absorbed by nobody: work silently dropped"
+BAD='{"file":"src/search.py","function":"search_products","absorbed":[{"file":"src/search.py","function":"search_products"}]}'
+echo "{\"findings\":[$U,$O,$BAD]}" > $A/deduped.json
+want $D 0 "absorbs a finding that was never handed in"
+TWICE='{"file":"src/orders.py","function":"search_orders_by_status","absorbed":[{"file":"src/users.py","function":"get_user_by_name"},{"file":"src/orders.py","function":"search_orders_by_status"}]}'
+echo "{\"findings\":[$U,$TWICE]}" > $A/deduped.json
+want $D 0 "one input absorbed by two keepers: not a partition"
+echo "{\"findings\":[{\"file\":\"src/users.py\",\"function\":\"get_user_by_name\"}]}" > $A/deduped.json
+want $D 0 "a kept finding that declares no absorbed list"
 rm -f $A/deduped.json
 
 # ---- trace gate: every hop is a real call edge ----
 T=/gate/trace_check.py
-rm -rf /app/inputs && mkdir -p /app/inputs/0
-echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"}]}' > /app/inputs/0/deduped.json
+rm -rf /app/inputs && mkdir -p /app/inputs/dedupe
+echo '{"findings":[{"file":"src/users.py","function":"get_user_by_name"}]}' > /app/inputs/dedupe/deduped.json
 echo '{"traces":[{"function":"get_user_by_name","path":["handle_user_lookup","get_user_by_name"]}]}' > $A/trace.json
 want $T 1 "a path whose every hop is a real call edge"
 # THE FORGERY: a plausible path through functions that never call each other.

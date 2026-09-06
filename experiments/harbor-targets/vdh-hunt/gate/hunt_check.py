@@ -16,12 +16,12 @@ import pathlib
 import sys
 
 sys.path.insert(0, "/gate")
-from oracle import call, canary, database, load
+from oracle import call, canary, database, load, patched
 
 POV = pathlib.Path("/app/outputs/finding.json")
 LOGS = pathlib.Path("/logs/verifier")
 BENIGN = "zzz-matches-nothing"
-METRICS = {"proven": 0}
+METRICS = {"proven": 0, "threat_model": 0, "fix_flips": 0}
 
 
 def fail(reason):
@@ -45,6 +45,18 @@ def main():
     if not payload:
         return fail("the payload is empty")
 
+    # The threat model, schema-checked. Cloudflare's harness requires a
+    # finding to name "attacker identity, boundary crossed" alongside its PoC;
+    # a payload that works while nobody can say WHO would send it or WHAT it
+    # crosses is a curiosity, not a finding.
+    threat = f.get("threat")
+    if not isinstance(threat, dict):
+        return fail("a finding needs a 'threat' object")
+    for k in ("attacker", "boundary"):
+        if not isinstance(threat.get(k), str) or len(threat[k].strip()) < 12:
+            return fail(f"threat.{k} must say something: got {threat.get(k)!r}")
+    METRICS["threat_model"] = 1
+
     mod = load(rel)
     if mod is None:
         return fail(f"{rel!r} is not a module in this target")
@@ -65,6 +77,30 @@ def main():
 
     METRICS["proven"] = 1
     print(f"PROVEN: {name} returned a row the payload had no right to reach")
+
+    # THE FIX, and its flip. A finding that cannot say how to close the hole is
+    # half a finding, and a proposed fix is the most checkable thing in the
+    # whole artifact: apply it to the gate's OWN copy and replay the very same
+    # payload. Cloudflare's Fixer demands "a clean fail→pass flip on the target
+    # test"; this is that, with the exploit as the test.
+    fix = f.get("fix")
+    if not isinstance(fix, dict) or not all(isinstance(fix.get(k), str) for k in ("old", "new")):
+        return fail("a finding needs a 'fix' with string 'old' and 'new'")
+    if not fix["old"].strip():
+        return fail("the fix replaces nothing")
+    root, reason = patched(rel, fix["old"], fix["new"])
+    if reason:
+        return fail(reason)
+    fixed = getattr(load(rel, root=root) or object, name, None)
+    if not callable(fixed):
+        return fail("the fixed module does not import, or no longer defines that function")
+    mark = str(canary())
+    if mark in call(fixed, database(int(mark)), payload):
+        return fail("the payload still reaches the canary after the fix: it closes nothing")
+    if not call(fixed, database(int(mark)), BENIGN) and call(fn, database(int(mark)), BENIGN):
+        return fail("the fix breaks the function for ordinary input")
+    METRICS["fix_flips"] = 1
+    print("FIXED: the same payload no longer reaches it, and ordinary input still works")
     return 1
 
 

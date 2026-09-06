@@ -693,6 +693,7 @@ func TestStageInputsAreBakedIntoTheNextStagesImage(t *testing.T) {
 	}
 	upstream := Result{
 		State:        Passed,
+		Stage:        "make",
 		Manifest:     Manifest{{Name: "finding.json", Digest: "sha256:0"}},
 		artifactsDir: produced,
 	}
@@ -706,7 +707,7 @@ func TestStageInputsAreBakedIntoTheNextStagesImage(t *testing.T) {
 		t.Fatalf("writeTask: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(dir, "environment", "inputs", "0", "finding.json"))
+	got, err := os.ReadFile(filepath.Join(dir, "environment", "inputs", "make", "finding.json"))
 	if err != nil || string(got) != `{"x":1}` {
 		t.Fatalf("input bytes did not reach the build context: %q, %v", got, err)
 	}
@@ -727,7 +728,7 @@ func TestStageInputsAreBakedIntoTheNextStagesImage(t *testing.T) {
 	if strings.Contains(string(toml), "docker_image = "+strconv.Quote(string(stage.Env))) {
 		t.Error("task.toml still names the prebuilt image: it would win over the Dockerfile and the inputs would never arrive")
 	}
-	if !strings.Contains(instruction(stage), inputDir+"/0/finding.json") {
+	if !strings.Contains(instruction(stage), inputDir+"/make/finding.json") {
 		t.Error("the agent is never told where its inputs are")
 	}
 }
@@ -761,7 +762,7 @@ func TestTheGateSeesTheStagesInputs(t *testing.T) {
 	stage := Stage{
 		ID: "validate", Agent: ClaudeCode, Env: Image("e@sha256:" + strings.Repeat("a", 64)),
 		Prompt: "disprove it", Outputs: []string{"verdict.json"},
-		Inputs: []Result{{Manifest: Manifest{{Name: "finding.json", Digest: "sha256:0"}}, artifactsDir: produced}},
+		Inputs: []Result{{Stage: "hunt", Manifest: Manifest{{Name: "finding.json", Digest: "sha256:0"}}, artifactsDir: produced}},
 		Gate:   SoundGate(pinned),
 	}
 	dir := t.TempDir()
@@ -772,7 +773,7 @@ func TestTheGateSeesTheStagesInputs(t *testing.T) {
 	if root == "" || tag == pinned {
 		t.Fatal("a gated stage with inputs got no derived gate: it would run blind")
 	}
-	got, err := os.ReadFile(filepath.Join(root, "inputs", "0", "finding.json"))
+	got, err := os.ReadFile(filepath.Join(root, "inputs", "hunt", "finding.json"))
 	if err != nil || string(got) != `{"f":1}` {
 		t.Fatalf("the input never reached the gate's build context: %q, %v", got, err)
 	}

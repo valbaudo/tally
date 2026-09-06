@@ -21,6 +21,7 @@ note: the artifact supplies DATA to a procedure it cannot alter.
 import importlib.util
 import pathlib
 import secrets
+import shutil
 import sqlite3
 import sys
 
@@ -82,20 +83,50 @@ def database(mark):
     return conn
 
 
-def load(rel):
-    """Import one module from the GATE's own copy of the source."""
-    path = SRC / pathlib.Path(rel).name
+def load(rel, root=None):
+    """Import one module from the GATE's own copy of the source.
+
+    root lets a caller load from a PATCHED copy instead, which is how a
+    proposed fix is checked: the same payload is replayed against the same
+    function in a tree where one line has been replaced. Cached modules are
+    dropped first so the patched tree's imports resolve to the patched tree.
+    """
+    root = pathlib.Path(root or SRC)
+    path = root / pathlib.Path(rel).name
     if not path.is_file() or path.suffix != ".py":
         return None
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    mod = importlib.util.module_from_spec(spec)
+    for name in [p.stem for p in root.glob("*.py")]:
+        sys.modules.pop(name, None)
+    sys.path.insert(0, str(root))
     try:
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        return mod
     except Exception:
         return None
-    return mod
+    finally:
+        sys.path.remove(str(root))
+
+
+def patched(rel, old, new):
+    """A scratch copy of the target with exactly one line replaced.
+
+    Returns the root, or a reason it could not be built. The replacement must
+    match ONCE: a fix that matches nothing did not touch the code, and one that
+    matches twice is not the minimal change it claims to be.
+    """
+    src = SRC / pathlib.Path(rel).name
+    if not src.is_file():
+        return None, f"{rel!r} is not a module in this target"
+    body = src.read_text()
+    if body.count(old) != 1:
+        return None, f"the fix's 'old' text appears {body.count(old)} times in {rel}, not once"
+    root = pathlib.Path("/tmp/vdh-fixed")
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.copytree(SRC, root)
+    (root / src.name).write_text(body.replace(old, new, 1))
+    return root, None
 
 
 def call(fn, conn, payload):
