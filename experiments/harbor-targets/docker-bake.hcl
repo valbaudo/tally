@@ -71,3 +71,19 @@ target "vdh-adyen-gate" {
 group "vdh-adyen" {
   targets = ["vdh-adyen-env", "vdh-adyen-gate"]
 }
+
+target "mdash-env" {
+  inherits = ["reproducible"]
+  context  = "mdash/environment"
+  tags     = ["dawn-mdash-env"]
+}
+
+target "mdash-gate" {
+  inherits = ["reproducible"]
+  context  = "mdash/gate"
+  tags     = ["dawn-mdash-gate"]
+}
+
+group "mdash" {
+  targets = ["mdash-env", "mdash-gate"]
+}
