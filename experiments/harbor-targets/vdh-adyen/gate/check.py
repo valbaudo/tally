@@ -73,6 +73,14 @@ SOURCE = {
 assert len(SOURCE) > 100, f"the gate's own plugin source is missing from {REPO}"
 
 
+# Numbers the gate hands back beside its reward. The verifier contract has
+# always allowed this and this gate was not using it, so a report could say an
+# attempt was rejected and nothing about why — and nothing at all about whether
+# the live probe even happened. These are the gate's own counts, written
+# through reward.json; dawn parses no output to obtain them.
+METRICS = {"grounded": 0, "requests": 0}
+
+
 def fail(reason):
     print("REJECT: " + reason)
     return 0
@@ -165,6 +173,7 @@ def main():
 
     if reason := grounded(pov):
         return fail(reason)
+    METRICS["grounded"] = 1
     print(f"GROUNDED: {pov['file']}:{pov['line']} — {pov.get('class')!r}")
 
     exploit, reason = build(pov.get("exploit"), "exploit")
@@ -195,7 +204,14 @@ def main():
                 return fail(f"marker appears in the {what} request: a reflected value proves nothing")
 
     ebody, estatus = fetch(exploit, "exploit")
+    METRICS["requests"] += 1
     cbody, cstatus = fetch(control, "control")
+    METRICS["requests"] += 1
+    METRICS.update({
+        "exploit_status": estatus, "control_status": cstatus,
+        "exploit_bytes": len(ebody), "control_bytes": len(cbody),
+        "authz_proof": 1 if proof == "authz" else 0,
+    })
     print(f"exploit -> {estatus}, {len(ebody)}B   control -> {cstatus}, {len(cbody)}B")
 
     # Which discriminator this finding claims. Declared, not guessed: the gate
@@ -235,4 +251,4 @@ print(f"VERDICT: {reward} (grounded citation AND the declared discriminator)")
 # own baked source missing, the target unreachable — there is no verdict at all,
 # which is infra_error, not a 0. A gate that could not check must not vote.
 LOGS.mkdir(parents=True, exist_ok=True)
-(LOGS / "reward.json").write_text(json.dumps({"reward": reward}))
+(LOGS / "reward.json").write_text(json.dumps({"reward": reward, **METRICS}))

@@ -7,8 +7,13 @@
 # gate reads, the citation check, and the refusals — and the live half is
 # proven once, by a recorded run, not by every build.
 set -uo pipefail
-want() { python3 /gate/check.py >/dev/null 2>&1; r=$(cat /logs/verifier/reward.json 2>/dev/null); rm -rf /logs
-         [ "$r" = "{\"reward\": $1}" ] || { echo "SELFTEST FAILED: $2 -> ${r:-no reward.json}"; exit 1; }; }
+# Compares the REWARD, not the whole file: the gate also writes metrics beside
+# it, and a string match on the file made this fail the moment it started
+# saying something useful.
+want() { python3 /gate/check.py >/dev/null 2>&1
+         r=$(python3 -c 'import json;print(json.load(open("/logs/verifier/reward.json"))["reward"])' 2>/dev/null)
+         raw=$(cat /logs/verifier/reward.json 2>/dev/null); rm -rf /logs
+         [ "$r" = "$1" ] || { echo "SELFTEST FAILED: $2 -> ${raw:-no reward.json}"; exit 1; }; }
 abstain() { python3 /gate/check.py >/dev/null 2>&1; r=$(ls /logs/verifier/reward.json 2>/dev/null); rm -rf /logs
             [ -z "$r" ] || { echo "SELFTEST FAILED: $1 -> wrote reward.json, expected none"; exit 1; }; }
 mkdir -p /app/outputs

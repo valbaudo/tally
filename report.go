@@ -35,6 +35,18 @@ type receipt struct {
 	State   State              `json:"state"`
 	Metrics map[string]float64 `json:"metrics,omitempty"` // everything the gate wrote
 	Drew    *draw              `json:"drew"`              // null: Harbor wrote no agent_result
+	// Handed is what the attempt actually produced: the declared outputs and
+	// their digests. It is the PRODUCT of the work, and the receipt dropped it
+	// for six tickets because the first protocol was pr-ci, where "passed,
+	// reward 1" is the whole finding. It is not, for a search: there the
+	// artifact IS the finding, and a report that lists what an attempt cost
+	// without saying what it produced is a spend receipt wearing the word.
+	Handed Manifest `json:"handed,omitempty"`
+	// Evidence is where the rest lives — the generated task, harbor's log, the
+	// trial, the collected artifact, the gate's own stdout. dawn parses none of
+	// it and never will; it points, so a reader is one cd away from the thing
+	// the digest above names.
+	Evidence string `json:"evidence"`
 }
 
 // writeReceipt writes one attempt's receipt.json into its evidence
@@ -51,19 +63,21 @@ type receipt struct {
 // record.
 func writeReceipt(evidence string, s Stage, attempt int, r Result) {
 	rec := receipt{
-		Stage:   s.ID,
-		Attempt: attempt,
-		ID:      attemptID(s, attempt),
-		Agent:   s.Agent.name,
-		Model:   s.Agent.model,
-		Effort:  s.Agent.effort,
-		Gate:    s.Gate.kind(),
-		Image:   s.Gate.image,
-		Reason:  s.Gate.reason,
-		Hosts:   s.Gate.hosts,
-		State:   r.State,
-		Metrics: r.metrics,
-		Drew:    r.drew,
+		Stage:    s.ID,
+		Attempt:  attempt,
+		ID:       attemptID(s, attempt),
+		Agent:    s.Agent.name,
+		Model:    s.Agent.model,
+		Effort:   s.Agent.effort,
+		Gate:     s.Gate.kind(),
+		Image:    s.Gate.image,
+		Reason:   s.Gate.reason,
+		Hosts:    s.Gate.hosts,
+		State:    r.State,
+		Handed:   r.Manifest,
+		Evidence: evidence,
+		Metrics:  r.metrics,
+		Drew:     r.drew,
 	}
 	b, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
@@ -175,16 +189,32 @@ func renderStage(b *strings.Builder, rs []receipt) {
 		fmt.Fprintf(b, "## %s — no gate\nreason: %s\n\n", head.Stage, head.Reason)
 	}
 
-	b.WriteString("| attempt | state | metrics | agent | model | input | cache | output | cost_usd (est.) |\n")
-	b.WriteString("|--:|---|---|---|---|--:|--:|--:|--:|\n")
+	// What each attempt PRODUCED, first, because for anything but a
+	// single-shot fix that is the finding. The gate's own numbers ride in the
+	// same row: the verifier contract has always allowed a gate to write
+	// metrics beside its reward, and a gate that writes only "reward" leaves a
+	// reader nothing to reconstruct WHY. dawn parses no gate output to get
+	// this — these are numbers the gate handed over through reward.json.
+	b.WriteString("| attempt | state | handed over | gate said | agent | model |\n")
+	b.WriteString("|--:|---|---|---|---|---|\n")
 	for _, r := range rs {
-		fmt.Fprintf(b, "| %d | %s | %s | %s | %s | %s | %s | %s | %s |\n",
-			r.Attempt, r.State, renderMetrics(r.Metrics), r.Agent, renderModelCell(r.Model, r.Effort),
+		fmt.Fprintf(b, "| %d | %s | %s | %s | %s | %s |\n",
+			r.Attempt, r.State, renderHanded(r.Handed), renderMetrics(r.Metrics),
+			r.Agent, renderModelCell(r.Model, r.Effort))
+	}
+	b.WriteString("\n")
+
+	// Spend second, and separately, so a reader looking for the result does
+	// not have to read past four columns of token counts to find it.
+	b.WriteString("| attempt | input | cache | output | cost_usd (est.) | evidence |\n")
+	b.WriteString("|--:|--:|--:|--:|--:|---|\n")
+	for _, r := range rs {
+		fmt.Fprintf(b, "| %d | %s | %s | %s | %s | `%s` |\n", r.Attempt,
 			drawCell(r.Drew, func(d *draw) string { return strconv.Itoa(d.InputTokens) }),
 			drawCell(r.Drew, func(d *draw) string { return strconv.Itoa(d.CacheTokens) }),
 			drawCell(r.Drew, func(d *draw) string { return strconv.Itoa(d.OutputTokens) }),
 			drawCell(r.Drew, func(d *draw) string { return strconv.FormatFloat(d.CostUSD, 'f', 4, 64) }),
-		)
+			r.Evidence)
 	}
 	b.WriteString("\n")
 }
@@ -212,6 +242,25 @@ func drawCell(d *draw, f func(*draw) string) string {
 		return "unknown"
 	}
 	return f(d)
+}
+
+// renderHanded names what the attempt actually produced: each declared output
+// and a short prefix of its digest. "—" means the attempt declared outputs and
+// produced none, which is why it is not a verdict; an attempt that declares no
+// outputs at all renders the same way and its state says the rest.
+func renderHanded(m Manifest) string {
+	if len(m) == 0 {
+		return "—"
+	}
+	parts := make([]string, len(m))
+	for i, a := range m {
+		d := strings.TrimPrefix(a.Digest, "sha256:")
+		if len(d) > 12 {
+			d = d[:12]
+		}
+		parts[i] = a.Name + " `" + d + "`"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // renderMetrics formats a gate's written metrics deterministically: sorted by
