@@ -900,3 +900,45 @@ func TestResumeKeepsTheStateItsReceiptRecorded(t *testing.T) {
 		}
 	}
 }
+
+// contentDigest hashes Gate.image and nothing else about the gate, so the
+// three gate constructors over ONE image are byte-identical attempts. Only a
+// SoundGate may reach Passed, so a FormatOnlyGate flipped to a SoundGate
+// between runs let a resume serve the old attempt's result under the new
+// gate's meaning. Hosts had no check at all — LiveGate's comment rests the
+// whole safeguard on the author remembering to change Stage.ID.
+//
+// The first assertion in each case is the point: the ids MUST collide, or the
+// test is exercising the rec.ID guard instead of this one.
+func TestResumeRefusesEvidenceFromADifferentGate(t *testing.T) {
+	img := Image("g@sha256:" + strings.Repeat("b", 64))
+	for _, tc := range []struct{ name string; ran, now Gate }{
+		{"format-only promoted to sound", FormatOnlyGate(img), SoundGate(img)},
+		{"sound demoted to format-only", SoundGate(img), FormatOnlyGate(img)},
+		{"live gate's scope widened", LiveGate(img, "a.example.com"), LiveGate(img, "a.example.com", "b.example.com")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Prompt: "do it", Gate: tc.ran}
+			b := a
+			b.Gate = tc.now
+			if attemptID(a, 1) != attemptID(b, 1) {
+				t.Fatal("test setup broken: a and b must share an attemptID for this to exercise the gate guard")
+			}
+
+			f := &fake{script: []State{Passed}} // wrong on purpose: must never be reached
+			r, _ := testRun(t, f)
+			s := r.root(Dispatching(1, time.Minute))
+
+			evidence := filepath.Join(r.dir, "attempts", "s", "1")
+			writeCompletedTrial(t, evidence)
+			writeReceipt(evidence, a, 1, Result{State: Unverified})
+
+			if msg := caughtBug(t, func() { s.Run(b) }); msg == "" {
+				t.Fatal("resuming over evidence from a different gate did not unwind")
+			}
+			if f.calls != 0 {
+				t.Fatalf("dispatcher called %d times, want 0", f.calls)
+			}
+		})
+	}
+}

@@ -11,14 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
+	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -463,7 +461,7 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 			// Held only across the charge+dispatch below, never across the
 			// backoff sleep, so a flaky child doesn't sit on a slot while it
 			// waits to retry.
-			release := acquireAgentGate(stage.Agent, stage.Env)
+			release := acquireAgentGate(stage.Agent)
 			if !s.charge() {
 				release()
 				if retry == 0 && bugOnFirstCharge {
@@ -559,6 +557,28 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	case rec.Model != s.Agent.model || rec.Effort != s.Agent.effort:
 		bug("evidence %s ran on model %q effort %q, this stage pins %q %q: the profile changed since it ran",
 			evidence, rec.Model, rec.Effort, s.Agent.model, s.Agent.effort)
+	// The gate's KIND and its hosts, for the identical reason and by the
+	// identical route. contentDigest hashes Gate.image and nothing else about
+	// the gate, so SoundGate(img), FormatOnlyGate(img) and LiveGate(img,
+	// hosts...) over one image are byte-identical attempts. Only a SoundGate
+	// may reach Passed, so flipping FormatOnlyGate to SoundGate between runs
+	// let a resume serve an old attempt's result under the new gate's
+	// meaning — a passed whose gate established nothing. Hosts had no check
+	// at all: LiveGate's comment pins the whole safeguard on the author
+	// remembering to change Stage.ID, and nothing verified they had.
+	//
+	// Both facts are already on disk, written by writeReceipt on every
+	// attempt since the receipt existed. Nothing is added to contentDigest,
+	// and that is not squeamishness about a re-key: bug() unwinds the WHOLE
+	// run to Cancelled, and resumeResult runs first thing in every attempt,
+	// so widening the hash would kill every resumable run already on disk —
+	// including runs whose gate never changed — on the day the binary
+	// changes, with a message reading like a protocol bug when it is version
+	// skew. The struct's shape is frozen permanently; this switch is the
+	// designed place for every identity fact discovered after it.
+	case rec.Gate != s.Gate.kind() || !slices.Equal(rec.Hosts, s.Gate.hosts):
+		bug("evidence %s ran under a %s gate over hosts %v, this stage declares %s over %v: the gate changed since it ran",
+			evidence, rec.Gate, rec.Hosts, s.Gate.kind(), s.Gate.hosts)
 	}
 	var t trial
 	if err := t.read(filepath.Join(evidence, "jobs"), s.Outputs); err != nil {
@@ -589,99 +609,52 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	return r, true
 }
 
-// fanWidth is the Q2 concurrency formula: clamp(1, NumCPU, 80% of host
-// memory / one attempt's image size). Plain NumCPU has no idea an image is
-// heavy: 12-wide against pr-ci's 1.94 GB image asks ~23 GB of a 9.4 GB VM.
-// Verifier containers run concurrently with agent containers, and dawn's own
-// process plus the Docker daemon share that same pool, so usable is 80% of
-// the total, not 100% — turning the clamp into a target is how a concurrency
-// knob becomes an OOM knob. An attempt OOM-killed mid-trial writes no
-// result.json, so dawn classifies it infra_error and burns the lease
-// retrying into the same wall — a config mistake wearing a flakiness
-// costume.
+// maxConcurrent is how wide a fanning agent may go: DAWN_MAX_CONCURRENT, or
+// 1. There is no formula, and deleting the one that was here is the point.
 //
-// A docker inspect failure, or an unreadable host memory figure, fails
-// CLOSED to 1 — never to NumCPU(). "Overcapacity is queueing, never an
-// error" has to mean the failure mode is safe, not fast: serial-by-default
-// is the only answer that cannot OOM.
+// It computed clamp(1, NumCPU, 80% of the Docker VM's memory / the env
+// image's on-disk size) off two `docker` shell-outs. Both halves were wrong.
+// On-disk layer bytes are not a container's working set, so the quantity only
+// resembled what it claimed to bound. And the timing was fatal: the size was
+// read ONCE, when an agent name first dispatched, from `docker image
+// inspect` — which never pulls. Harbor pulls the image later, from the
+// generated task.toml. So on any host where the image was not already cached
+// the inspect failed, the formula failed closed to 1, and agentGates cached
+// that 1 for the life of the process, with nothing anywhere distinguishing
+// "sized to 1 on purpose" from "sizing failed and nobody noticed". Every fan
+// on a cold host was serial.
 //
-// DAWN_MAX_CONCURRENT wins outright when set, mirroring DAWN_RUN_ROOT.
-func fanWidth(env Image) int {
-	return width(env, hostMemoryBytes, imageSizeBytes, runtime.NumCPU())
-}
-
-// width is fanWidth's arithmetic, parameterised on how to read host memory,
-// one image's size, and the CPU count, so the formula is fully deterministic
-// in a test — without Docker, a real host, or a dependency on how many cores
-// happen to run the test.
-func width(env Image, hostMem func() (int64, bool), imageSize func(Image) (int64, bool), cpu int) int {
+// NumCPU is not the replacement, and that is measured rather than argued:
+// the incident this formula was built for WAS NumCPU — 12 wide against a
+// 1.94 GB image, ~23 GB asked of a 9.4 GB Docker VM, and an OOM-killed
+// attempt writes no result.json, so dawn filed it infra_error and burned the
+// lease retrying into the same wall. Defaulting to NumCPU would replay the
+// incident on the machine it was measured on.
+//
+// The honest cap is not unknowable — but it is unknowable from INSIDE dawn.
+// Every fix this formula ever got was a human measuring their own host by
+// hand and hardcoding another exec.Command; the algorithm never once adapted
+// on its own. That is guesswork wearing a formula's clothes. The operator who
+// already has to know their VM's memory and their image's real footprint is
+// the one who can state the number, so they state it, in the variable that
+// already won outright over everything else. Unset means 1: serial cannot
+// OOM, and nothing is left that can silently fail closed to it while
+// pretending otherwise.
+func maxConcurrent() int {
 	if v, ok := os.LookupEnv("DAWN_MAX_CONCURRENT"); ok {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
-	mem, ok := hostMem()
-	if !ok {
-		return 1
-	}
-	size, ok := imageSize(env)
-	if !ok || size <= 0 {
-		return 1
-	}
-	n := int(mem * 80 / 100 / size)
-	if n < 1 {
-		n = 1
-	}
-	if n > cpu {
-		n = cpu
-	}
-	return n
-}
-
-// hostMemoryBytes reads total physical memory on the host dawn's own process
-// runs on — the same pool the Docker daemon and every container draw from.
-// ok is false on any unsupported OS or read failure, which is exactly the
-// "unreadable host memory" case fanWidth fails closed on.
-func hostMemoryBytes() (int64, bool) {
-	// The memory that bounds concurrency is the DOCKER DAEMON's, not this
-	// machine's. Containers run inside a VM on macOS, and the two numbers
-	// differ by more than the safety factor: measured here, sysctl reports
-	// 19.3 GB while the VM the trials actually run in has 9.4 GB. Sizing
-	// against the host would allow 7 concurrent copies of a 1.94 GB image —
-	// 13.6 GB into a 9.4 GB VM — which is the OOM this whole formula exists
-	// to prevent, arrived at by a longer route.
-	//
-	// docker is already a dependency this file shells to for image size, so
-	// asking it for the pool its own containers draw from adds no new
-	// surface, and it is right on Linux too, where the daemon is bounded by
-	// whatever cgroup it runs under rather than by /proc/meminfo.
-	out, err := exec.Command("docker", "info", "--format", "{{.MemTotal}}").Output()
-	if err != nil {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	return n, err == nil && n > 0
-}
-
-// imageSizeBytes shells out to docker — already a dependency Harbor drives —
-// to size one pinned image. ok is false on any inspect failure: an image
-// dawn cannot size is an image dawn cannot safely fan.
-func imageSizeBytes(env Image) (int64, bool) {
-	out, err := exec.Command("docker", "image", "inspect", string(env), "--format", "{{.Size}}").Output()
-	if err != nil {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	return n, err == nil && n > 0
+	return 1
 }
 
 // agentGates is one semaphore per agent NAME, built lazily on first use and
 // never rebuilt — the structural form of Codex's cap of 1. Capacity is 1
-// when the profile cannot fan (Agent.fanOut == false), otherwise fanWidth's
-// memory-aware limit, sized against whichever stage first dispatches that
-// agent name: a fan is homogeneous, so that is mk(0)'s Env for a Fan call
-// (Fan sizes it before spawning a single child) and simply the one Env
-// there is for a plain Run.
+// when the profile cannot fan (Agent.fanOut == false), otherwise
+// maxConcurrent. Codex's cap of 1 is the structural one: it holds whatever
+// DAWN_MAX_CONCURRENT says, because it comes from the profile, not the
+// operator.
 //
 // Every dispatch acquires it, in dispatchAttempt above, fanned or not — which
 // is what makes the cap hold structurally rather than by convention:
@@ -699,13 +672,13 @@ var (
 // acquireAgentGate blocks until a slot for a's name is free and returns the
 // release func. See agentGates for why this is keyed by name alone and built
 // only once.
-func acquireAgentGate(a Agent, env Image) func() {
+func acquireAgentGate(a Agent) func() {
 	agentGatesMu.Lock()
 	g, ok := agentGates[a.name]
 	if !ok {
 		n := 1
 		if a.fanOut {
-			n = fanWidth(env)
+			n = maxConcurrent()
 		}
 		g = make(chan struct{}, n)
 		agentGates[a.name] = g
@@ -765,12 +738,6 @@ func (s *Scope) attemptClock() time.Duration {
 func (s *Scope) Fan(n int, mk func(i int) Stage) []Result {
 	if n < 0 {
 		bug("scope %s Fan called with negative n=%d", s.id, n)
-	}
-	if n > 0 {
-		// Build (and size) this agent's gate against the fan's own image
-		// before any child races to do it implicitly.
-		first := mk(0)
-		acquireAgentGate(first.Agent, first.Env)()
 	}
 	results := make([]Result, n)
 	var wg sync.WaitGroup

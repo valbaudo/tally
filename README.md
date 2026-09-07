@@ -74,6 +74,15 @@ Run directories are gitignored.
 attempts are reconstructed from disk rather than re-dispatched, and actuators that
 already fired do not fire again.
 
+`DAWN_MAX_CONCURRENT=<n>` is how wide a fanning agent runs. **Unset means 1**, so a
+`Fan` is serial until you say otherwise. dawn does not guess this: sizing it from
+image bytes and host memory was tried, and it read the image's on-disk size — not a
+container's working set — from a `docker image inspect` that runs *before* Harbor
+pulls the image, so on any host without that image already cached every fan silently
+collapsed to 1 anyway, with nothing to say so. You know your Docker VM's memory and
+what one attempt of your image actually costs; dawn does not. An agent profile that
+cannot fan at all (`codex`) stays capped at 1 regardless of this variable.
+
 ### If you skip step 2
 
 The failure is honest but the wording is Docker's, not dawn's. Measured, with a gate

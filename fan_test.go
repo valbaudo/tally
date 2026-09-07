@@ -3,63 +3,41 @@ package dawn
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// --- Q2: the memory-aware width formula (runtime.go's width/fanWidth) ---
+// --- how wide a fanning agent may go (runtime.go's maxConcurrent) ---
 
-// TestWidthFormula pins clamp(1, cpu, 80% of mem / size) with hand-computed
-// numbers, and cpu is INJECTED rather than read from runtime.NumCPU() so the
-// expected values do not depend on how many cores happen to run the test.
-func TestWidthFormula(t *testing.T) {
-	memOf := func(n int64, ok bool) func() (int64, bool) {
-		return func() (int64, bool) { return n, ok }
-	}
-	sizeOf := func(n int64, ok bool) func(Image) (int64, bool) {
-		return func(Image) (int64, bool) { return n, ok }
-	}
-
-	for _, tc := range []struct {
-		name string
-		mem  func() (int64, bool)
-		size func(Image) (int64, bool)
-		cpu  int
-		want int
-	}{
-		// 80% of 1000 is 800; 800/200 = 4, comfortably under the 10-core
-		// ceiling — chosen so a mutant using 100% (which would give 5)
-		// cannot hide behind the cpu clamp.
-		{"80 percent of memory, not 100", memOf(1000, true), sizeOf(200, true), 10, 4},
-		// 80% of 1000 is 800; 800/100 = 8, exactly at the cpu ceiling —
-		// the boundary must not be clamped down further (> cpu, not >=).
-		{"exact division landing on the cpu ceiling", memOf(1000, true), sizeOf(100, true), 8, 8},
-		// Same bytes, tighter cpu ceiling clamps it down.
-		{"clamped to NumCPU", memOf(10000, true), sizeOf(10, true), 3, 3},
-		// 80% of 100 is 80; 80/1000 floors to 0, floored back up to 1.
-		{"floored to 1, never 0", memOf(100, true), sizeOf(1000, true), 8, 1},
-		// Inspect failure fails CLOSED to 1, never to NumCPU.
-		{"docker inspect failure fails closed to 1", memOf(1000, true), sizeOf(0, false), 8, 1},
-		// Unreadable host memory fails CLOSED to 1, never to NumCPU.
-		{"unreadable host memory fails closed to 1", memOf(0, false), sizeOf(100, true), 8, 1},
+// The memory-aware formula this replaces is gone; see maxConcurrent's own
+// comment for why. What is left has exactly two answers, and both are pinned
+// here because "unset means 1" is a real behavioural claim, not a default
+// nobody exercises.
+func TestMaxConcurrent(t *testing.T) {
+	for _, tc := range []struct{ set, want string }{
+		{"", "1"}, {"7", "7"}, {"1", "1"},
+		// A value dawn cannot use is not a licence to guess a better one.
+		{"0", "1"}, {"-3", "1"}, {"lots", "1"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := width("img@sha256:0", tc.mem, tc.size, tc.cpu); got != tc.want {
-				t.Errorf("width() = %d, want %d", got, tc.want)
+		name := tc.set
+		if name == "" {
+			name = "unset"
+		}
+		t.Run(name, func(t *testing.T) {
+			if tc.set == "" {
+				t.Setenv("DAWN_MAX_CONCURRENT", "")
+				os.Unsetenv("DAWN_MAX_CONCURRENT")
+			} else {
+				t.Setenv("DAWN_MAX_CONCURRENT", tc.set)
+			}
+			want, _ := strconv.Atoi(tc.want)
+			if got := maxConcurrent(); got != want {
+				t.Errorf("maxConcurrent() = %d, want %d", got, want)
 			}
 		})
-	}
-}
-
-// DAWN_MAX_CONCURRENT wins outright, mirroring DAWN_RUN_ROOT: it is trusted
-// even when the real formula would have failed closed to 1.
-func TestWidthDAWNMaxConcurrentWinsOutright(t *testing.T) {
-	t.Setenv("DAWN_MAX_CONCURRENT", "7")
-	failingMem := func() (int64, bool) { return 0, false }
-	failingSize := func(Image) (int64, bool) { return 0, false }
-	if got := width("img@sha256:0", failingMem, failingSize, 2); got != 7 {
-		t.Errorf("width() = %d, want 7: the env override must win outright", got)
 	}
 }
 
