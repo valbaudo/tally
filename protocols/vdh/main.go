@@ -33,13 +33,38 @@
 // nest a fan but this protocol does not use it. The fan is three wide where
 // VDH runs fifty to two hundred, and that is spend policy, not capability.
 //
-// MEASURED ACROSS TWO RUNS, and it is the reason the Validate stage exists.
-// Nine adversaries per run, each told its sole job was to DISPROVE the finding
-// it was handed. Both runs: nine verdicts, nine "confirmed", ZERO refutations.
-// Their apparent accuracy went 3/9 → 8/9 between runs while their behaviour
-// did not change at all — only the share of findings that happened to be real
-// did. An adversarial pass that never refutes is not adversarial, and dawn can
-// say so because its gate replays the payload instead of believing the verdict.
+// MEASURED ACROSS THREE RUNS AND TWO VENDORS, and it is the reason the Validate
+// stage exists. Nine adversaries per run, each told its sole job was to
+// DISPROVE the finding it was handed. All three runs: nine verdicts, nine
+// "confirmed", ZERO refutations. Apparent accuracy moved 3/9 → 8/9 → 8/9 while
+// the behaviour did not change at all — only the share of findings that
+// happened to be real did. An adversarial pass that never refutes is not
+// adversarial, and dawn can say so because its gate replays the payload
+// instead of believing the verdict.
+//
+// The third run is the one that settles what causes it. Validate ran on
+// dawn.Codex (gpt-5.6-luna, max effort) while every other stage stayed
+// ClaudeCode, holding the prompt, the gate and the target constant and
+// changing only the CLI on PATH. The result was 9 confirmed, 0 refuted, same
+// as both single-vendor runs. Better still, that run produced the one input an
+// adversary could honestly reject: hunt-r2-0's finding was REJECTED by the
+// hunt gate (fix_flips 0, proven 0), and the codex adversary handed it
+// confirmed it anyway, with fluent and largely accurate prose about why the
+// FUNCTION is injectable — which it is, having been confirmed in round 0. It
+// answered a question it was not asked and the gate scored it wrong.
+//
+// So the never-refuting behaviour survives a vendor swap at maximum reasoning
+// effort. It is not a model disposition; it is this stage's prompt, and that
+// is the version of the problem that can actually be fixed.
+//
+// ALSO MEASURED, and unrelated to vendors: the loops buy almost no coverage.
+// Nine hunter attempts across the three rounds found FOUR distinct functions —
+// three of them in round 0. Round 1 returned one new finding and two repeats
+// (all three hunters converged on the same function), and round 2 returned
+// three repeats and nothing new, ignoring a feedback queue that correctly
+// named four untouched siblings. Both loops emit good queues; the hunters do
+// not follow them. Six of nine hunt attempts, plus their six adversaries, were
+// redundant spend.
 //
 // recon, gapfill and feedback emit plans rather than claims, so they are
 // ungated and dawn clamps them to unverified. Their effect is measured
