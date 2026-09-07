@@ -130,7 +130,7 @@ func TestFanSerialisesCodex(t *testing.T) {
 		t.Fatalf("dispatcher calls = %d, want 4", got)
 	}
 	if got := atomic.LoadInt32(&f.maxSeen); got > 1 {
-		t.Fatalf("max concurrent Codex dispatches = %d, want at most 1: FanOut==false must be structural", got)
+		t.Fatalf("max concurrent Codex dispatches = %d, want at most 1: fanOut==false must be structural", got)
 	}
 }
 
@@ -155,7 +155,7 @@ func (f reorderingFake) Dispatch(ctx context.Context, stage Stage, evidence stri
 // Fan DRAINS and returns every child in INDEX order regardless of dispatch or
 // completion order (decision: "Fan returns results in index order regardless
 // of dispatch order, so wait-order never matters"). DAWN_MAX_CONCURRENT
-// forces real overlap on a synthetic FanOut agent without touching Docker.
+// forces real overlap on a synthetic fanning agent without touching Docker.
 func TestFanReturnsResultsInIndexOrderRegardlessOfCompletionOrder(t *testing.T) {
 	t.Setenv("DAWN_MAX_CONCURRENT", "5")
 	const n = 10
@@ -163,7 +163,7 @@ func TestFanReturnsResultsInIndexOrderRegardlessOfCompletionOrder(t *testing.T) 
 	root := testFanRun(t, f).root(Dispatching(n, time.Minute))
 
 	mk := func(i int) Stage {
-		return Stage{ID: fmt.Sprintf("order-%d", i), Agent: Agent{name: "fan-order-test", FanOut: true}, Env: "e@sha256:0", Gate: NoGate("test")}
+		return Stage{ID: fmt.Sprintf("order-%d", i), Agent: Agent{name: "fan-order-test", fanOut: true}, Env: "e@sha256:0", Gate: NoGate("test")}
 	}
 	results := root.Fan(n, mk)
 
@@ -192,7 +192,7 @@ func TestFanChildThatCannotChargeReturnsInfraErrorWithoutAbortingSiblings(t *tes
 	root := testFanRun(t, f).root(Lease{Attempts: 2, WallClock: time.Hour, AttemptWallClock: time.Minute})
 
 	mk := func(i int) Stage {
-		return Stage{ID: fmt.Sprintf("spent-%d", i), Agent: Agent{name: "fan-spent-test", FanOut: true}, Env: "e@sha256:0", Gate: NoGate("test")}
+		return Stage{ID: fmt.Sprintf("spent-%d", i), Agent: Agent{name: "fan-spent-test", fanOut: true}, Env: "e@sha256:0", Gate: NoGate("test")}
 	}
 	results := root.Fan(5, mk)
 

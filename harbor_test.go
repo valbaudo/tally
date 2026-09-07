@@ -206,7 +206,7 @@ func TestFanOverlapsRealHarborTrials(t *testing.T) {
 	stage := func(id string) Stage {
 		return Stage{
 			ID:      id,
-			Agent:   Agent{name: "nop", FanOut: true},
+			Agent:   Agent{name: "nop", fanOut: true},
 			Env:     env,
 			Prompt:  "Fix calc.py in /app/repo and write the diff as fix.patch.",
 			Outputs: []string{"fix.patch"},
@@ -794,5 +794,48 @@ func TestTheGateSeesTheStagesInputs(t *testing.T) {
 	plain.Inputs = nil
 	if tag, root, _ := gateContext(t.TempDir(), plain); tag != pinned || root != "" {
 		t.Errorf("an input-free stage got a derived gate: %s %s", tag, root)
+	}
+}
+
+// digest is the ONE place agent-controlled bytes enter dawn, and it used
+// os.Stat, which resolves symlinks. A declared output that is a symlink was
+// digested through to whatever it pointed at, so the agent chose which HOST
+// file became its Manifest — and that Manifest is mounted into the next
+// stage's inputs and baked into the derived gate image, as the agent's own
+// artifact. The forgery never touches a gate, so no gate can see it.
+func TestDigestRefusesAnythingButARegularFile(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "host-secret")
+	if err := os.WriteFile(secret, []byte("bytes the agent never wrote"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "honest.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "stolen.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"stolen.json", "adir", "missing.json"} {
+		m, ok, err := digest(root, []string{"honest.json", name})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ok {
+			t.Errorf("declared output %q was collected; only a regular file may be", name)
+		}
+		// Two doc comments promise there is no such thing as half a Manifest,
+		// and this returned the names it had hashed before the bad one.
+		if m != nil {
+			t.Errorf("%s: partial Manifest %v returned; a refused collection has no Manifest", name, m)
+		}
+	}
+
+	m, ok, err := digest(root, []string{"honest.json"})
+	if err != nil || !ok || len(m) != 1 {
+		t.Fatalf("honest regular file: got %v, ok=%v, err=%v; want it collected", m, ok, err)
 	}
 }

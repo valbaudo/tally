@@ -724,20 +724,35 @@ func readJSON(path string, v any) error {
 // therefore a record of contract compliance — did the agent write what dawn
 // told it to write — never a filesystem audit of everything it left behind.
 //
-// present is false the instant any declared name is missing, is a directory,
-// or exceeds maxOutputBytes; there is no partial credit; the whole trial's
-// declared output set is either fully and honestly collected or it isn't
-// (Rule 2 in the State doc, via trial.Present).
+// present is false the instant any declared name is missing, is not a regular
+// file, or exceeds maxOutputBytes; there is no partial credit; the whole
+// trial's declared output set is either fully and honestly collected or it
+// isn't (Rule 2 in the State doc, via trial.Present).
+//
+// Lstat, not Stat, and IsRegular, not !IsDir. This is the one place
+// agent-controlled bytes enter dawn, and Stat RESOLVES SYMLINKS: a declared
+// output that is a symlink was digested through, so the agent chose which
+// host file became its Manifest — and that Manifest is mounted into the next
+// stage's inputs and baked into the derived gate image, as the agent's
+// artifact. The agent picking its own evidence is the same forgery shape
+// SoundGate names, arriving by a path no gate can see. IsRegular is one
+// predicate for symlink, directory, fifo and device alike, which is why the
+// separate IsDir branch is gone rather than joined by three more.
+//
+// A partial Manifest is returned by nobody: every refusal below returns nil.
+// Two doc comments already promised there is no such thing as half a
+// Manifest, and this returned `m` — the names it happened to hash before the
+// first bad one — which classify then copied onto an infra_error Result.
 func digest(root string, names []string) (Manifest, bool, error) {
 	m := make(Manifest, 0, len(names))
 	for _, name := range names {
-		info, err := os.Stat(filepath.Join(root, name))
-		if err != nil || info.IsDir() || info.Size() > maxOutputBytes {
-			return m, false, nil
+		info, err := os.Lstat(filepath.Join(root, name))
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxOutputBytes {
+			return nil, false, nil
 		}
 		d, err := digestFile(filepath.Join(root, name))
 		if err != nil {
-			return m, false, err
+			return nil, false, err
 		}
 		m = append(m, Artifact{Name: name, Digest: d})
 	}

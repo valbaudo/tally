@@ -125,18 +125,23 @@ type Image string
 // receipt to say so. Pinning them here is what lets the receipt record what
 // dawn told Harbor to run rather than nothing at all — see harborArgs.
 //
-// The name, model and effort are dawn's own knowledge, so they are
-// unexported: a protocol selects a profile, it never reads one apart. FanOut
-// is the single exception, and only because the per-agent cap is a
-// correctness fact a protocol is obliged to state in its caveats.
+// EVERY field is dawn's own knowledge, so all of them are unexported: a
+// protocol selects a profile, it never reads one apart and it certainly never
+// writes one. fanOut was exported once, on the theory that a protocol would
+// read it to state in its caveats that a fan is single-vendor. No protocol
+// ever did. What the export bought instead was the opposite of the paragraph
+// above: ClaudeCode and Codex are package-level vars, so `dawn.Codex.fanOut =
+// true` — or a copy with the name kept and the bool flipped — resized codex's
+// semaphore from 1 to the whole pool. A field exported so an author could
+// STATE a correctness fact let the author OVERRIDE it.
 type Agent struct {
 	name   string
 	model  string // verbatim to `harbor -m`; "" means dawn pins nothing (oracle, nop)
 	effort string // verbatim to `--ak reasoning_effort=`; same rule
-	// FanOut reports whether this profile may run more than one attempt at a
-	// time. Readable so a protocol can say in source that a fan is
-	// single-vendor and its blind spots are therefore correlated.
-	FanOut bool
+	// fanOut reports whether this profile may run more than one attempt at a
+	// time. Read only by acquireAgentGate, which sizes the per-agent
+	// semaphore from it.
+	fanOut bool
 }
 
 // The profiles dawn ships. Only ClaudeCode may fan out. ClaudeCode's model is
@@ -147,8 +152,8 @@ type Agent struct {
 // dawn has not measured; dawn will honestly record that it pinned nothing.
 // Neither profile pins an effort yet, for the identical reason.
 var (
-	ClaudeCode = Agent{name: "claude-code", model: "claude-sonnet-5", FanOut: true}
-	Codex      = Agent{name: "codex", FanOut: false}
+	ClaudeCode = Agent{name: "claude-code", model: "claude-sonnet-5", fanOut: true}
+	Codex      = Agent{name: "codex", fanOut: false}
 )
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or

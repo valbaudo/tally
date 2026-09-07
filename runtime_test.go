@@ -874,3 +874,29 @@ func TestResumeDropsDawnsOwnVerdict(t *testing.T) {
 		t.Error("resumed run inherited a previous invocation's protocol_bug")
 	}
 }
+
+// A resumed timeout must stay Exhausted. classify's first two rules read
+// t.Cancelled and t.TimedOut, which are ctx facts of the process that
+// dispatched, so a resumed trial reads them false and the two states dawn
+// owns directly were unreachable here — a real timeout came back InfraError,
+// which dispatchAttempt RETRIES, into the same clock Exhausted exists to stop
+// dawn retrying into. The receipt already recorded the live verdict; this is
+// the check that it is taken.
+func TestResumeKeepsTheStateItsReceiptRecorded(t *testing.T) {
+	for _, want := range []State{Exhausted, Cancelled, Rejected} {
+		f := &fake{script: []State{Passed}} // wrong on purpose: must never be reached
+		r, _ := testRun(t, f)
+		s := r.root(Dispatching(1, time.Minute))
+
+		evidence := filepath.Join(r.dir, "attempts", okStage.ID, "1")
+		writeCompletedTrial(t, evidence)
+		writeReceipt(evidence, okStage, 1, Result{State: want})
+
+		if got := s.Run(okStage); got.State != want {
+			t.Errorf("resumed state = %s, want %s: the receipt recorded it and the resume must not re-derive it", got.State, want)
+		}
+		if f.calls != 0 {
+			t.Errorf("dispatcher called %d times for a resumed %s, want 0", f.calls, want)
+		}
+	}
+}

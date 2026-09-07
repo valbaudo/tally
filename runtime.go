@@ -542,6 +542,7 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	var rec receipt
 	switch err := readJSON(filepath.Join(evidence, "receipt.json"), &rec); {
 	case errors.Is(err, os.ErrNotExist):
+		rec.State = ""
 	case err != nil:
 		bug("receipt at %s unreadable: %v — refusing to resume over it", evidence, err)
 	case rec.ID != attemptID(s, attempt):
@@ -563,7 +564,29 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	if err := t.read(filepath.Join(evidence, "jobs"), s.Outputs); err != nil {
 		return Result{}, false
 	}
-	return classify(s, t), true
+	// classify reconstructs everything the trial's own bytes decide — the
+	// Manifest, the metrics, the artifact directory — but NOT the state, and
+	// that had to be taken back off the receipt.
+	//
+	// classify's first two rules branch on t.Cancelled and t.TimedOut, and
+	// those are ctx facts (clockOutcome) that live only in the process that
+	// dispatched. A resumed trial always reads them false, so the two states
+	// dawn owns DIRECTLY were unreachable on this path: a run resumed after a
+	// real 20-minute timeout got InfraError — the one state dispatchAttempt
+	// RETRIES — and writeReceipt then rewrote the receipt to say so, erasing
+	// the Exhausted that the live run had correctly assigned. Retrying into
+	// the same clock is exactly what Exhausted exists to prevent, so the bug
+	// re-armed the failure that state was added to stop.
+	//
+	// The receipt already holds the state that was assigned while those facts
+	// were still observable. Taking it is not a second opinion; it is the only
+	// opinion, restored. An attempt with no receipt keeps deriving, because
+	// there is nothing to restore.
+	r := classify(s, t)
+	if rec.State != "" {
+		r.State = rec.State
+	}
+	return r, true
 }
 
 // fanWidth is the Q2 concurrency formula: clamp(1, NumCPU, 80% of host
@@ -654,7 +677,7 @@ func imageSizeBytes(env Image) (int64, bool) {
 
 // agentGates is one semaphore per agent NAME, built lazily on first use and
 // never rebuilt — the structural form of Codex's cap of 1. Capacity is 1
-// when the profile cannot fan (Agent.FanOut == false), otherwise fanWidth's
+// when the profile cannot fan (Agent.fanOut == false), otherwise fanWidth's
 // memory-aware limit, sized against whichever stage first dispatches that
 // agent name: a fan is homogeneous, so that is mk(0)'s Env for a Fan call
 // (Fan sizes it before spawning a single child) and simply the one Env
@@ -666,7 +689,7 @@ func imageSizeBytes(env Image) (int64, bool) {
 // instead of overlapping, and that is safe because Dispatching's WallClock
 // already funds the fully-serial worst case.
 //
-// FanOut is a bool and can only express "1" or "the pool" — a future agent
+// fanOut is a bool and can only express "1" or "the pool" — a future agent
 // with, say, a cap of 3 would need the field widened past a bool.
 var (
 	agentGatesMu sync.Mutex
@@ -681,7 +704,7 @@ func acquireAgentGate(a Agent, env Image) func() {
 	g, ok := agentGates[a.name]
 	if !ok {
 		n := 1
-		if a.FanOut {
+		if a.fanOut {
 			n = fanWidth(env)
 		}
 		g = make(chan struct{}, n)
