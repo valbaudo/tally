@@ -321,3 +321,55 @@ you have n=5 by next week. Both beat another month of building against n=1.
 - You keep saying *"the mechasuit"* rather than the framework or the platform. Six weeks
   and 213+ commits in, you have not once described dawn by its features. That is a person
   building toward a shape they can already see.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES_OPEN | 6 issues, 1 critical gap |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+**Load-bearing finding.** Harbor 0.22.0 — the pinned dependency — already ships
+multi-stage sequencing. `trial/multi_step.py` defines `MultiStepTrial`; `StepConfig`
+(`models/task/config.py:759`) carries a per-step verifier, `min_reward` ("abort remaining
+steps"), and per-step artifacts into `steps/{name}/artifacts/`; and
+`models/task/verifier_mode.py:31-64` resolves a SEPARATE verifier image on ANY step, not
+only the last. Premise 2's "nobody ships the combination" is substantially false: the
+dependency ships four of the five parts. Open Question 1's checkpoint fired before D
+started, which by this document's own rule is a stop-and-rethink.
+
+**What survives, verified against source.** Multi-vendor across stages (`trial.py:967`
+builds `self.agent` once per trial; `StepConfig.agent` carries only timeout, user and
+network policy — no vendor field); a runtime-computed stage graph (dawn protocols are Go
+programs with loops, Harbor's `steps` is a static TOML list); resume across process
+restarts; actuation; the six-state model. Premise 6's second half is now the whole
+differentiator rather than half of one — and no protocol exercises it: all five use
+`dawn.ClaudeCode`, `dawn.Codex` appears in none, and codex has never authenticated inside
+a dawn run.
+
+**Decisions taken in review.** Translate `vdh` end to end (all 8 stages) into a Harbor
+`[[steps]]` task.toml, unboxed, with no kill criterion. Fold a Codex stage in at
+`validate` — the adversarial stage that produced 9 verdicts, 9 "confirmed", 0 refutations
+across two measured runs — so one experiment yields both the Harbor comparison and the
+first multi-vendor evidence. Run The Assignment in parallel rather than before or after.
+Verify codex auth by hand-running the pinned image once, rather than adding a preflight.
+
+**CROSS-MODEL:** outside voice ran as a Claude subagent (Codex CLI unusable:
+`~/.codex/config.toml` pins `model = "gpt-6-astra"`, rejected by the account). It caught a
+real risk this review missed — `docs/research/oauth-cli-in-container.md:154` says Codex
+"must not be fanned out", and `validate` is a fan. Its date was stale: the recorded
+`exp` of 2026-09-07 was measured on 2026-09-04 and the laptop has auto-refreshed since.
+Re-measured 2026-09-07: `exp 2026-09-17T07:58:02Z`, 234.7h out, window open. A ~16-minute
+vdh run cannot straddle it. Re-measure before every run; the recorded date is never the
+live one.
+
+**VERDICT:** ENG REVIEWED — 6 issues raised, all 6 decided; 1 critical gap mitigated
+operationally rather than fixed in code.
+
+**UNRESOLVED DECISIONS:**
+- A Codex auth failure still classifies as `infra_error`, the one state dawn retries, so
+  it burns against vdh's 26-attempt lease instead of failing loudly. The review chose a
+  manual pre-run check over reclassifying it in `classify()`; the code path is unchanged.
