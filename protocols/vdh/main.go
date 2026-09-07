@@ -53,18 +53,37 @@
 // FUNCTION is injectable — which it is, having been confirmed in round 0. It
 // answered a question it was not asked and the gate scored it wrong.
 //
-// So the never-refuting behaviour survives a vendor swap at maximum reasoning
-// effort. It is not a model disposition; it is this stage's prompt, and that
-// is the version of the problem that can actually be fixed.
+// So the never-refuting behaviour survived a vendor swap at maximum reasoning
+// effort. It was not a model disposition; it was this stage's prompt.
 //
-// ALSO MEASURED, and unrelated to vendors: the loops buy almost no coverage.
-// Nine hunter attempts across the three rounds found FOUR distinct functions —
-// three of them in round 0. Round 1 returned one new finding and two repeats
-// (all three hunters converged on the same function), and round 2 returned
-// three repeats and nothing new, ignoring a feedback queue that correctly
-// named four untouched siblings. Both loops emit good queues; the hunters do
-// not follow them. Six of nine hunt attempts, plus their six adversaries, were
-// redundant spend.
+// AND THEN IT WAS FIXED, which is the fourth run and the reason the paragraph
+// above is written in the past tense. Same vendor, same model, same effort,
+// same gate — only the prose changed, to state the accepting condition the gate
+// actually computes and hand over a harness that reproduces it. Nine
+// adversaries: six confirmed, THREE REFUTED, and all nine correct, which is the
+// first perfect adversary score any run has produced (7/9, then 8/9, then 9/9).
+// Every one of the nine reported a concrete run, against 0 of 9 the run before.
+// One of them refused a null payload and said why it trusted the negative:
+// "Harness controls worked: customer 1 returned two ordinary orders and
+// customer N returned the planted canary row." It checked that the canary was
+// reachable at all before believing an empty result, which is the difference
+// between refuting and merely failing to reproduce.
+//
+// The queue check landed in the same run and did what it was for. All three
+// round-2 hunters took the entry they were assigned, against none of three the
+// run before, and hunter coverage went from four distinct functions to seven of
+// the eight this target has.
+//
+// What that bought is worth stating exactly, because it is not more findings.
+// This target seeds four vulnerable functions and four safe siblings, and
+// rounds 0 and 1 find all four vulnerable ones. So feedback correctly routes
+// round 2 to the only untouched ground left, which is safe by construction, and
+// the hunters correctly report that nothing is there. The protocol has no way to
+// say that: a hunter with no finding hands back a null payload and is scored
+// `rejected`, indistinguishable in the record from one that tried to forge a
+// payload. The loop is not wasteful because the hunters are bad. It is wasteful
+// because this target is too small to have anything left for it, and dawn cannot
+// tell an empty result from a failed one.
 //
 // recon, gapfill and feedback emit plans rather than claims, so they are
 // ungated and dawn clamps them to unverified. Their effect is measured
