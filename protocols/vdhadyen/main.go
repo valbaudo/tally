@@ -70,7 +70,7 @@ const target = "shopware.hacktics.net"
 // against bytes the agent never had a chance to edit.
 const (
 	env  dawn.Image = "dawn-vdh-adyen-env@sha256:a88c3ede0385bd8c0cec45a9be825650fe7d13306ec07530a90e9d079e63a705"
-	gate dawn.Image = "dawn-vdh-adyen-gate@sha256:ebca74b86e82c9591c85760565f947a2e3ca0895d25030231bf521ff2cf0a5c3"
+	gate dawn.Image = "dawn-vdh-adyen-gate@sha256:0ca943cc5028c2921bb65b5e3054f59a64f89ae272ef7a1c75afdeef2433f2ea"
 )
 
 // The prompt is part of the integrity argument: it is the only thing telling

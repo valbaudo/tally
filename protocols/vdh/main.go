@@ -53,13 +53,19 @@ import (
 	"github.com/valbaudo/dawn"
 )
 
+// codexEnv is env with codex baked instead of claude-code, built from
+// vdh-hunt/environment/Dockerfile.codex. Its ONLY difference from env is the
+// vendor of the CLI on PATH, which is what makes a per-stage vendor claim
+// checkable rather than asserted: validate runs the identical surface under a
+// different model, against the same pinned gate bytes either way.
 const (
-	env          dawn.Image = "dawn-vdh-hunt-env@sha256:4a0b273153cac34a551d282e6a58d0a15463c20ea2f2e8a457d5f5090650fbea"
-	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:699430537bc9b2868ad49ab0e41484b623df99fdd13baf539fd7426d698a84d2"
-	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:86af3d545527fe52c249e4097496d4fa5ff0eae47092142fdbeff12d124bd419"
-	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:b1f66f063ac9456e0973dc6d3b619ac3ef732d4cf944e37e89c4ca19b4c2c70b"
-	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:9d4b028c8d691f883df4a9b276ce7ef54a580471b0ef4c357dea4d1b843ced55"
-	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:1915664a7e9cc773621e3977d9a29f3d7f8f294054a033ff6a97201c62b80078"
+	env          dawn.Image = "dawn-vdh-hunt-env@sha256:49f379ebc783f05a6efd07675f3b9ea09f8bbf7c44fef75518d0885ab20541c3"
+	codexEnv     dawn.Image = "dawn-vdh-hunt-env-codex@sha256:d04bdc8609b68cf90461a9079b5300f9bb78a8ca439bf340a29a359a70cc8dd0"
+	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:8d9a2c9fa24581c76cc062b2cbfb2d9f0012209ee232b71fea3b69af27b7a9b7"
+	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:8920f43f31512977b2d58ae698256ca8f4c6bf729f7ac6537a54485f4946a28a"
+	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:dd0472f55516f4d972cc9cbeaa47d13a8fbf7f492492c647cbd3d6e5f53b7772"
+	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:321cfdd7662c1d9f1f7f0b22207cd8e604fdc337f6b9a76f2d4c46207e9bc1ad"
+	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:cce0530330d78ff60006ed17775f9d3c5d7ad0e4e64e7552e81415d355fbba65"
 )
 
 // The fan width and the number of gapfill rounds. Both are spend policy, not

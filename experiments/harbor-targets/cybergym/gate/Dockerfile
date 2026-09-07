@@ -1,6 +1,13 @@
 # A tag is not bytes; the pin is a claim about bytes, and it was undefined
 # one level down.
 FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+# This build RUNs the target's own code, and CPython writes __pycache__ beside
+# every module it imports. Those .pyc files embed the source mtime, so the layer
+# differed on every rebuild and the pinned digest was a fact about one build
+# rather than about this tree — measured: five identical --no-cache builds of the
+# vdh gates produced five different digests. This is the line that makes
+# docker-bake.hcl's opening claim true for images that execute Python.
+ENV PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/* \

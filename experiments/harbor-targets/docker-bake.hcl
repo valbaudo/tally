@@ -108,6 +108,13 @@ target "vdh-hunt-env" {
   tags     = ["dawn-vdh-hunt-env"]
 }
 
+target "vdh-hunt-env-codex" {
+  inherits   = ["reproducible"]
+  context    = "vdh-hunt"
+  dockerfile = "environment/Dockerfile.codex"
+  tags       = ["dawn-vdh-hunt-env-codex"]
+}
+
 target "vdh-hunt-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
@@ -145,6 +152,7 @@ target "vdh-trace-gate" {
 }
 
 group "vdh-hunt" {
-  targets = ["vdh-hunt-env", "vdh-hunt-gate", "vdh-report-gate",
-             "vdh-validate-gate", "vdh-dedupe-gate", "vdh-trace-gate"]
+  targets = ["vdh-hunt-env", "vdh-hunt-env-codex", "vdh-hunt-gate",
+             "vdh-report-gate", "vdh-validate-gate", "vdh-dedupe-gate",
+             "vdh-trace-gate"]
 }

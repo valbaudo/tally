@@ -39,7 +39,7 @@ import (
 // /tests/test.sh; the agent never sees the patched build or the patch.
 const (
 	env  dawn.Image = "dawn-cybergym-env@sha256:8fb2fa2d9d6db10b4e1fb359bc05382dd04a187c37e263496a2d8fa75959468e"
-	gate dawn.Image = "dawn-cybergym-gate@sha256:6195d3ff2c3f2a78c29a7bcd6fe0b0f1575aba4a06f13cd845ee5e1f88e98582"
+	gate dawn.Image = "dawn-cybergym-gate@sha256:ce6c53e053b47445696c670b249cc62101937b3afa4ca69c0b5c786369c5e171"
 )
 
 // The prompt states the contract the gate actually enforces, and nothing else.

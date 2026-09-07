@@ -1,0 +1,14 @@
+# Every Dockerfile in this context does `COPY src/`, and Python writes
+# __pycache__ next to the source the moment anything imports it — including
+# the gate's own selftest run locally. Those .pyc files are gitignored, so
+# without this they were in the BUILD context but not in the tree: the image
+# carried bytes a fresh clone does not have, and the digest a protocol pins
+# stopped being a fact about this repository and became a fact about one
+# laptop. docker-bake.hcl's first line claims the build is a pure function of
+# this tree; this is what makes that true for this context.
+# Leading **/ is load-bearing: .dockerignore is NOT gitignore. A bare
+# `__pycache__/` matches only a TOP-LEVEL entry, and these live at
+# src/__pycache__ and gate/__pycache__, so the bare form silently matched
+# nothing and the .pyc files kept shipping.
+**/__pycache__
+**/*.pyc

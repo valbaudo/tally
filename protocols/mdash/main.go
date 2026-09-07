@@ -44,7 +44,7 @@ import (
 // same shape as cybergym's patched build.
 const (
 	env  dawn.Image = "dawn-mdash-env@sha256:1690f11bcfb42c0fb877f463194ff7562f2de346a6a8985bf1cca69e6f08cd24"
-	gate dawn.Image = "dawn-mdash-gate@sha256:520a95cdf523ecba1d07961f8adec1122232edaf9dfcd2da2ec26a990321f0d1"
+	gate dawn.Image = "dawn-mdash-gate@sha256:f8ac4c31b2423afdf49ef398083f88620e23b4b992d42cdfa5247b174cc49f72"
 )
 
 // The prompt states the contract the gate actually enforces and nothing else.
