@@ -365,17 +365,67 @@ func validate(run *dawn.Scope, round int, hunted []dawn.Result) (kept, verdicts 
 	verdicts = run.Fan(len(live), func(i int) dawn.Stage {
 		return dawn.Stage{
 			ID: fmt.Sprintf("validate-r%d-%d", round, i), Agent: dawn.Codex, Env: codexEnv,
-			Prompt: `Your input is ONE hunter's finding. Your job is to DISPROVE it.
+			Prompt: `Your input is ONE hunter's finding: a file, a function, and a payload
+claiming to exploit it. Decide whether THAT PAYLOAD works. Confirming and
+refuting are worth exactly the same, and either can be wrong.
 
-Read /app/src and attack the claim: is the input really attacker-controlled, does
-it really reach SQL text unsanitized, does the payload really change the query's
-meaning rather than merely returning rows?
+The verifier settles this by running, not by reading, and this is what it runs.
+It builds a throwaway database with the ordinary rows from src/db.py's
+init_schema, then plants one extra row in EVERY table carrying the same fresh
+nine-digit number N, both as the key and inside the text "zz-canary-N". N is
+generated after you have finished, so nothing you write can name it. Then it
+calls the function twice against that database:
+
+    with the finding's payload,  the digits of N must come back
+    with "zzz-matches-nothing",  they must not
+
+It compares by flattening: every cell of every row through str(), joined with
+spaces, then asks whether the digits of N appear anywhere in that string. So
+any column of the canary row betrays it, including a name or a total dragged
+across tables by a UNION.
+
+"confirmed" is right exactly when both conditions hold. "refuted" is right
+exactly when they do not. The question is narrower than it looks, and this is
+where verdicts have actually gone wrong: whether the function is injectable IN
+GENERAL is not what is asked. A function you could break with some other
+payload is still refuted if THIS payload does not separate from the benign
+string. A payload that pivots to one row it already names, like adding
+OR name='root', reaches that row and never reaches the canary. Meanwhile a
+payload that widens the result set at all, like OR is_admin=1, sweeps the
+canary in and proves. And a payload that does separate is confirmed however
+thin the finding's prose, threat model or proposed fix.
+
+Run it before you answer. /app/src and a Python interpreter are right there.
+Read the payload out of the finding file rather than retyping it: it is
+quote-laden, and one transcription slip means you tested something else.
+
+    import json, glob, sqlite3, sys
+    sys.path.insert(0, "/app/src")
+    from db import init_schema
+    finding = json.load(open(glob.glob("/app/inputs/*/finding.json")[0]))
+    N = 123456789
+    def flat(payload):
+        c = sqlite3.connect(":memory:"); init_schema(c)
+        t = "zz-canary-" + str(N)
+        c.execute("INSERT INTO users VALUES (?,?,?)",    (N, t, 1))
+        c.execute("INSERT INTO orders VALUES (?,?,?)",   (N, N, t))
+        c.execute("INSERT INTO products VALUES (?,?)",   (N, t))
+        c.execute("INSERT INTO sales VALUES (?,?,?)",    (N, t, N))
+        rows = THE_FUNCTION(c, payload)
+        return " ".join(str(x) for row in rows or [] for x in row)
+    hit, benign = flat(finding["payload"]), flat("zzz-matches-nothing")
+    print(str(N) in hit, str(N) in benign)
+
+If that raises, or returns nothing for both calls, that is your harness and not
+evidence. Fix it and run again. Never report "refuted" off a run you did not
+see work.
 
 You may not report a finding of your own. Your verdict is about THIS finding and
 this one only, and the verifier refuses a verdict naming anything else.
 
 Write one JSON object, echoing the file and function you were given:
-  {"file": "...", "function": "...", "verdict": "confirmed" | "refuted", "why": "..."}`,
+  {"file": "...", "function": "...", "verdict": "confirmed" | "refuted",
+   "why": "what you ran and what came back"}`,
 			Inputs:  []dawn.Result{live[i]},
 			Outputs: []string{"verdict.json"},
 			Gate:    dawn.SoundGate(validateGate),
