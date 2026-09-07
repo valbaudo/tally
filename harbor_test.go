@@ -145,15 +145,21 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
 		t.Skip("set DAWN_HARBOR_E2E=1 (needs harbor, docker, rc-pr-ci images)")
 	}
-	got, err := runTrial(context.Background(), Stage{
+	// A deadline, not context.Background(): runTrial no longer re-applies the
+	// attempt as a timeout of its own — the ctx it is handed carries it, which
+	// is the shape Dispatch guarantees (it refuses to dispatch without one).
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	got, err := runTrial(ctx, Stage{
 		ID:     "rc-pr-ci",
 		Agent:  Agent{name: "nop"},
 		Env:    Image(os.Getenv("DAWN_E2E_ENV")),
 		Prompt: "Fix calc.py in /app/repo and write the diff as fix.patch.",
 		Gate:   SoundGate(Image(os.Getenv("DAWN_E2E_GATE"))),
-	}, 10*time.Minute, t.TempDir())
+	}, 10*time.Minute, dir)
 	if err != nil {
-		t.Fatalf("%v (see %s/harbor.log)", err, got.Dir)
+		t.Fatalf("%v (see %s/harbor.log)", err, dir)
 	}
 	if !got.Rewarded || got.Rewards["reward"] != 0 {
 		t.Errorf("gate should have written reward 0, got %v rewarded=%v", got.Rewards, got.Rewarded)
@@ -161,7 +167,7 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 	if len(got.Outputs) != 0 {
 		t.Errorf("nop hands nothing over, got %v", got.Outputs)
 	}
-	t.Logf("dir=%s rewards=%v present=%v outputs=%v", got.Dir, got.Rewards, got.Present, got.Outputs)
+	t.Logf("dir=%s rewards=%v present=%v outputs=%v", dir, got.Rewards, got.Present, got.Outputs)
 }
 
 // TestFanOverlapsRealHarborTrials is Q2 proven for real, not against a fake:

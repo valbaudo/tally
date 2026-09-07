@@ -399,13 +399,16 @@ type Stage struct {
 	// name instead of walking the output tree, so a file the agent invented
 	// and never declared cannot enter the Manifest.
 	//
-	// This is not pedantry. Today Artifact.Name is filepath.Rel's echo of
-	// whatever the agent chose to call its file — harmless only because
-	// nothing yet treats that string as a path. The moment Stage.Inputs
-	// materialises a PRIOR stage's manifest into a new container, that
-	// string becomes a mount path, and an agent in a container it never
-	// runs in would control a path inside it. A declared name is fixed here,
-	// in Go source, before either container exists.
+	// This is not pedantry, and it stopped being hypothetical. Stage.Inputs
+	// now materialises a PRIOR stage's manifest into a new container, so
+	// Artifact.Name IS a path inside two containers — the next stage's
+	// environment and the gate image derived from it. Were the name the
+	// agent's echo of whatever it chose to call its file, an agent would be
+	// choosing a path in a container it never runs in. It is not: digest
+	// iterates THESE declared strings, so every Artifact.Name is fixed here,
+	// in Go source, before either container exists. An earlier draft of this
+	// comment described that as a danger to come and credited filepath.Rel,
+	// which appears nowhere in this package.
 	Outputs []string
 	// Inputs are earlier results whose artifacts this stage reads. This is the
 	// only way anything crosses an attempt boundary: every attempt is a fresh
@@ -547,15 +550,4 @@ func inputDigest(inputs []Result) string {
 func sha256hex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
-}
-
-// anyDecided reports whether any child of a fan produced an outcome from the
-// work. Unexported: it is a loop over State.Decided, not surface.
-func anyDecided(rs []Result) bool {
-	for _, r := range rs {
-		if r.State.Decided() {
-			return true
-		}
-	}
-	return false
 }

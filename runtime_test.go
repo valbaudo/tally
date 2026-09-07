@@ -912,7 +912,10 @@ func TestResumeKeepsTheStateItsReceiptRecorded(t *testing.T) {
 // test is exercising the rec.ID guard instead of this one.
 func TestResumeRefusesEvidenceFromADifferentGate(t *testing.T) {
 	img := Image("g@sha256:" + strings.Repeat("b", 64))
-	for _, tc := range []struct{ name string; ran, now Gate }{
+	for _, tc := range []struct {
+		name     string
+		ran, now Gate
+	}{
 		{"format-only promoted to sound", FormatOnlyGate(img), SoundGate(img)},
 		{"sound demoted to format-only", SoundGate(img), FormatOnlyGate(img)},
 		{"live gate's scope widened", LiveGate(img, "a.example.com"), LiveGate(img, "a.example.com", "b.example.com")},

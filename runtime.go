@@ -419,8 +419,8 @@ var stageID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // dispatchAttempt is Run's body — compiles the stage into a task.toml dawn
 // owns entirely (artifacts list, separate no-network verifier, digest-pinned
-// verifier image, agent-phase allowlist) and dispatches it — parameterised on
-// whether a spent scope on the very FIRST charge is a protocol bug.
+// verifier image) and dispatches it — parameterised on whether a spent scope
+// on the very FIRST charge is a protocol bug.
 //
 // bugOnFirstCharge is true for every caller except Fan's own children. A
 // plain Run against an already-spent scope is a caller that skipped More(),

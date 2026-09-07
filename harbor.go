@@ -260,9 +260,6 @@ func clockOutcome(err error) (timedOut, cancelled bool) {
 // Everything a classifier needs to reach one of the six states is here, and
 // nothing here has already reached one.
 type trial struct {
-	// Dir is the run directory: generated task, harbor log, job output. Kept
-	// after the trial because the gate's published bytes live under it.
-	Dir string
 	// Rewards is what the gate wrote to /logs/verifier/reward.json, as Harbor
 	// parsed it. Empty and Rewarded false when no valid reward was written —
 	// a crashed gate emits no verdict, which is the honest answer.
@@ -603,16 +600,13 @@ func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return trial{}, err
 	}
-	t := trial{Dir: dir}
+	var t trial
 	taskDir := taskDirFor(dir)
 	if err := writeTask(ctx, taskDir, s, attempt); err != nil {
 		return t, err
 	}
 
 	args := harborArgs(s, taskDir, filepath.Join(dir, "jobs"))
-
-	ctx, cancel := context.WithTimeout(ctx, attempt)
-	defer cancel()
 
 	// Redirect, never pipe: a pipe in the middle would mask harbor's exit
 	// status, and the exit status is the only thing that distinguishes "the

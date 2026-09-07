@@ -41,12 +41,6 @@ func TestDecided(t *testing.T) {
 			t.Errorf("%q.Decided() = %v", s, !want)
 		}
 	}
-	if !anyDecided([]Result{{State: InfraError}, {State: Rejected}}) {
-		t.Error("anyDecided missed a rejected child")
-	}
-	if anyDecided([]Result{{State: InfraError}, {State: Exhausted}}) {
-		t.Error("anyDecided voted on a fan where nothing voted")
-	}
 }
 
 // LiveGate is a sound gate, not a format-only one: it must report "live" from
