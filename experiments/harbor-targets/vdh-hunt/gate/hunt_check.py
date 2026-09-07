@@ -19,9 +19,10 @@ sys.path.insert(0, "/gate")
 from oracle import call, canary, database, load, patched
 
 POV = pathlib.Path("/app/outputs/finding.json")
+INPUTS = pathlib.Path("/app/inputs")
 LOGS = pathlib.Path("/logs/verifier")
 BENIGN = "zzz-matches-nothing"
-METRICS = {"proven": 0, "threat_model": 0, "fix_flips": 0}
+METRICS = {"proven": 0, "threat_model": 0, "fix_flips": 0, "on_queue": 0}
 
 
 def fail(reason):
@@ -64,6 +65,53 @@ def main():
     if not callable(fn):
         return fail(f"{rel}:{name} is not a callable in this target")
     print(f"CITED: {rel}:{name} with payload {payload!r}")
+
+    # THE ENTRY IT WAS SENT TO. The queue is the hunter's assignment, and until
+    # now nothing read it: the prose said "take ENTRY i" and the gate could not
+    # tell whether the hunter had. Measured in vdh-20260907T153150Z it had not.
+    # All three round-2 hunters were handed a queue naming four untouched
+    # functions, and all three went back to one confirmed two rounds earlier,
+    # so six of nine hunt attempts and their six paired adversaries bought
+    # nothing. A prose instruction the gate cannot see is a request the agent
+    # may decline, and this one was declined every time it mattered.
+    #
+    # This is a SCOPE check, not an oracle, and that distinction is the one this
+    # module's header draws. The queue is the agent side's own plan, written by
+    # an ungated stage. It is not ground truth and says nothing about which
+    # functions are really weak, so consulting it cannot become the format
+    # check wearing an oracle's clothes that the header warns against. It asks
+    # only "did you hunt where you were sent", exactly as the validate gate
+    # asks "is this verdict about the finding you were given".
+    #
+    # What it does NOT do, said plainly so the metric is not over-read: it
+    # cannot stop two hunters choosing the SAME entry. This gate sees one
+    # attempt and never its siblings, and a hunter's own number reaches it
+    # through no channel the hunter cannot alter. Round 1 of that same run,
+    # where all three hunters took entry 0, still passes.
+    entries = []
+    for q in sorted(INPUTS.glob("*/map.json")):
+        try:
+            entries += json.loads(q.read_text()).get("queue", [])
+        except Exception:
+            continue
+    if not entries:
+        # dawn wiring, not the agent's doing: there is nothing to check against,
+        # and a gate that cannot check must not vote.
+        sys.exit("no verdict: no hunting queue was mounted for this stage")
+
+    at = f.get("queue_entry")
+    if not isinstance(at, int) or isinstance(at, bool) or not 0 <= at < len(entries):
+        return fail(f"queue_entry {at!r} is not an index into the {len(entries)}-entry queue")
+    sent = entries[at]
+    if rel != sent.get("file"):
+        return fail(f"queue entry {at} sent you to {sent.get('file')!r}, and this finding is in {rel!r}")
+    named = sent.get("functions") or []
+    # An entry naming no functions is the whole file, which recon and gapfill
+    # both emit for a module they want swept rather than probed.
+    if named and name not in named:
+        return fail(f"queue entry {at} named {named}, and this finding is about {name!r}")
+    METRICS["on_queue"] = 1
+    print(f"ON QUEUE: entry {at} sent this hunter to {rel}, and that is where the finding is")
 
     mark = str(canary())
     exploit = call(fn, database(int(mark)), payload)

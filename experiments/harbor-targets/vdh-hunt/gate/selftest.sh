@@ -17,12 +17,27 @@ H=/gate/hunt_check.py
 R=/gate/report_check.py
 mkdir -p $A
 
+# The hunting queue the gate now reads. A hunter is SENT to one entry, and the
+# gate refuses a finding somewhere else -- the same shape as the validate
+# gate's "is this verdict about the finding you were given". Entry 0 names both
+# users.py functions so the decoy case below still fails for the reason its
+# label claims (a payload that exploits nothing) rather than for being off
+# queue. Entry 2 names no functions, which is how recon and gapfill say "sweep
+# this whole module".
+mkdir -p /app/inputs/recon
+cat > /app/inputs/recon/map.json <<'Q'
+{"queue": [{"file": "src/users.py", "functions": ["get_user_by_name", "get_user_by_id"]},
+           {"file": "src/orders.py", "functions": ["search_orders_by_status"]},
+           {"file": "src/search.py", "functions": []}]}
+Q
+
 # ---- hunt gate: grounded + proven + threat model + a fix that flips ----
 # A complete finding is written by this helper; each case below breaks exactly
 # one part of it, so a failure names the part.
 finding() { python3 - "$@" > $A/finding.json <<'P'
 import json, sys
 f = {"file": sys.argv[1], "function": sys.argv[2], "payload": sys.argv[3],
+     "queue_entry": int(sys.argv[6]) if len(sys.argv) > 6 else 0,
      "why": "user input is spliced into the SQL text instead of bound",
      "threat": {"attacker": "any caller who can reach the request handler",
                 "boundary": "the database query's meaning, crossed by unescaped input"},
@@ -50,7 +65,8 @@ want $H 0 "the cited module is not in this target"
 # The threat model is part of the contract, not decoration.
 python3 - "$INJ" <<'P'
 import json, sys
-json.dump({"file": "src/users.py", "function": "get_user_by_name", "payload": sys.argv[1]},
+json.dump({"file": "src/users.py", "function": "get_user_by_name",
+           "payload": sys.argv[1], "queue_entry": 0},
           open("/app/outputs/finding.json", "w"))
 P
 want $H 0 "a working payload with no threat model"
@@ -67,9 +83,31 @@ want $H 0 "a fix that changes nothing the payload cares about"
 finding "src/users.py" "get_user_by_name" "$INJ" "def get_user_by_name(conn, username):" "def get_user_by_name(conn, username):  # noqa"
 want $H 0 "a fix that edits a signature and leaves the hole open"
 
+# THE QUEUE, which is the assignment. Everything below proves a real payload
+# and a flipping fix, so the only thing left to fail on is where it hunted.
+finding "src/users.py" "get_user_by_name" "$INJ" "$UOLD" "$UNEW" 1
+want $H 0 "a proven finding declaring an entry that sent it to another file"
+finding "src/users.py" "get_user_by_name" "$INJ" "$UOLD" "$UNEW" 99
+want $H 0 "an entry index that is not in the queue"
+python3 - "$INJ" <<'P'
+import json, sys
+json.dump({"file": "src/users.py", "function": "get_user_by_name", "payload": sys.argv[1],
+           "why": "x", "threat": {"attacker": "any caller who can reach it",
+                                  "boundary": "the query's meaning, crossed by input"},
+           "fix": {"old": "a", "new": "b"}},
+          open("/app/outputs/finding.json", "w"))
+P
+want $H 0 "a finding that never says which entry it worked"
+
 # The whole contract, satisfied.
 finding "src/users.py" "get_user_by_name" "$INJ" "$UOLD" "$UNEW"
-want $H 1 "grounded, proven, threat-modelled, and the fix flips it"
+want $H 1 "grounded, proven, threat-modelled, on its queue entry, and the fix flips it"
+
+# A gate that cannot check must not vote, and the queue is now something it
+# checks: with no queue mounted there is no assignment to judge against.
+mv /app/inputs /app/inputs.off
+abstain $H "the hunting queue is not mounted at all"
+mv /app/inputs.off /app/inputs
 
 # ---- report gate ----
 rm -f $A/report.json $A/finding.json

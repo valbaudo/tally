@@ -86,11 +86,11 @@ import (
 const (
 	env          dawn.Image = "dawn-vdh-hunt-env@sha256:49f379ebc783f05a6efd07675f3b9ea09f8bbf7c44fef75518d0885ab20541c3"
 	codexEnv     dawn.Image = "dawn-vdh-hunt-env-codex@sha256:d04bdc8609b68cf90461a9079b5300f9bb78a8ca439bf340a29a359a70cc8dd0"
-	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:8d9a2c9fa24581c76cc062b2cbfb2d9f0012209ee232b71fea3b69af27b7a9b7"
-	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:8920f43f31512977b2d58ae698256ca8f4c6bf729f7ac6537a54485f4946a28a"
-	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:dd0472f55516f4d972cc9cbeaa47d13a8fbf7f492492c647cbd3d6e5f53b7772"
-	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:321cfdd7662c1d9f1f7f0b22207cd8e604fdc337f6b9a76f2d4c46207e9bc1ad"
-	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:cce0530330d78ff60006ed17775f9d3c5d7ad0e4e64e7552e81415d355fbba65"
+	huntGate     dawn.Image = "dawn-vdh-hunt-gate@sha256:fe7fd04c7690104d23f7ad2994b156b0a7a58edb391a242bf41f423aa354b155"
+	validateGate dawn.Image = "dawn-vdh-validate-gate@sha256:0c60c1fb27bad6c3549489f41b61234cfaf9f2cd7ac893651be674ed17b6b063"
+	dedupeGate   dawn.Image = "dawn-vdh-dedupe-gate@sha256:0458da3b982a83dfb7589f42c8197299e144267d6eb767000c1cc9c2e8d76fa0"
+	traceGate    dawn.Image = "dawn-vdh-trace-gate@sha256:5053a71076996a4c077c3a9c0db7e92143f86d7f67ed408de0015946ebdfda2c"
+	reportGate   dawn.Image = "dawn-vdh-report-gate@sha256:aa7c7614b883b471f69080781d22b42e95768e15e1f160f386a74e9d2a7a9e24"
 )
 
 // The fan width and the number of gapfill rounds. Both are spend policy, not
@@ -300,8 +300,14 @@ func hunt(run *dawn.Scope, round int, queue dawn.Result) []dawn.Result {
 			Prompt: fmt.Sprintf(`You are hunter %d of %d in a hunt over the Python package at /app/src.
 
 Your input is the hunting queue. Take ENTRY %d from its "queue" list (zero-based)
-and hunt what it names. If the queue is shorter than that, take an area no other
-entry covers.
+and hunt what it names. If the queue has fewer entries than that, take entry
+%d modulo the queue length, so which entry is yours stays determined and is
+never your choice.
+
+The verifier reads that same queue. It refuses a finding whose file is not the
+one your declared entry names, so hunt where you were sent, and declare the
+entry you worked. Going back to a function an earlier round already confirmed
+is the failure this check exists to stop.
 
 You hunt ONE class: user input reaching SQL text through string building —
 f-string, %%-formatting, .format(), or concatenation — instead of a bound
@@ -319,6 +325,7 @@ string — the bug is one hop further in, and that is where a finding belongs.
 A finding is not just a payload. Hand back all four parts:
 
   {"file": "src/....py", "function": "...", "payload": "...",
+   "queue_entry": <the zero-based index of the entry you worked>,
    "why":    "how the input reaches the SQL text",
    "threat": {"attacker": "who can send this", "boundary": "what it crosses"},
    "fix":    {"old": "the exact source text to replace, verbatim",
@@ -326,7 +333,7 @@ A finding is not just a payload. Hand back all four parts:
 
 The verifier applies your fix to ITS OWN copy and replays the same payload: it
 must no longer reach anything, and ordinary input must still work. "old" has to
-appear exactly once in the file, so include enough lines to be unambiguous.`, i+1, hunters, i),
+appear exactly once in the file, so include enough lines to be unambiguous.`, i+1, hunters, i, i),
 			Inputs:  []dawn.Result{queue},
 			Outputs: []string{"finding.json"},
 			Gate:    dawn.SoundGate(huntGate),
