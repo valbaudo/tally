@@ -1,0 +1,43 @@
+#!/bin/sh
+# Rebuild every pinned image and write its new digest back into protocol source.
+#
+# The digest in a protocol is only a fact if the build behind it is a pure
+# function of this tree (see experiments/harbor-targets/docker-bake.hcl), and
+# it stops being one the moment an image is rebuilt without re-pinning. This
+# closes that gap; it changes no guarantee. Pins stay in Go source, where the
+# author reads them, and dispatch still refuses anything that is not a digest.
+#
+# There is no target-to-source table here, because the source IS the table: a
+# pin is "<name>@sha256:<64 hex>", <name> is the docker tag, and the tag is
+# what docker was asked to build. So a new image re-pins itself forever after
+# its first pin is written by hand, and an image nothing pins is left alone.
+#
+# Any argument is passed to bake, so `./repin mdash` re-pins one group.
+set -eu
+cd "$(dirname "$0")"
+root=$(pwd)
+
+# Bake from the directory that owns the file: every context in it is
+# relative to that directory, not to wherever this was invoked.
+(cd experiments/harbor-targets && docker buildx bake "$@")
+
+for name in $(grep -rhoE '"[a-z0-9-]+@sha256:[0-9a-f]{64}"' protocols/ |
+	cut -d'"' -f2 | cut -d@ -f1 | sort -u); do
+	# Select the RepoDigest for THIS name, never index 0: an image carrying
+	# several tags lists one entry per tag, and index 0 picked a different
+	# name with the same manifest — dawn-cybergym-env resolved to cc-cg-env,
+	# silently rewriting the pin to an older experiment's name.
+	pin=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+		"$name" | grep "^$name@sha256:")
+	for f in $(grep -rlE "\"$name@sha256:" protocols/); do
+		# Rewrite through a temp file rather than sed -i, whose spelling
+		# differs between BSD and GNU. Nothing here needs to know which.
+		sed -E "s|\"$name@sha256:[0-9a-f]{64}\"|\"$pin\"|g" "$f" >"$f.repin"
+		mv "$f.repin" "$f"
+	done
+	echo "$pin"
+done
+
+# The check: a mangled rewrite is a Go syntax error, and this is where it
+# surfaces — not three commands later on a run that was going to cost money.
+cd "$root" && go build ./...

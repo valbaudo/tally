@@ -19,6 +19,12 @@ target "reproducible" {
   output = ["type=image,rewrite-timestamp=true,unpack=false"]
 }
 
+# Every image the protocols pin, so `docker buildx bake` with no argument
+# builds the whole set — which is what repin at the repo root relies on.
+group "default" {
+  targets = ["pr-ci", "cybergym", "vdh-adyen", "mdash", "vdh-hunt"]
+}
+
 target "pr-ci-env" {
   inherits = ["reproducible"]
   context  = "pr-ci/environment"
