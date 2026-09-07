@@ -221,7 +221,7 @@ func TestFanOverlapsRealHarborTrials(t *testing.T) {
 	}
 	mk := func(i int) Stage { return stage(fmt.Sprintf("rc-pr-ci-fan-%d", i)) }
 
-	r := &run{dir: t.TempDir(), ctx: context.Background(), dispatch: dispatcher, sleep: time.Sleep, values: map[string]any{}, actuations: map[string]string{}}
+	r := &run{dir: t.TempDir(), ctx: context.Background(), dispatch: harborRunner{}, sleep: time.Sleep, values: map[string]any{}, actuations: map[string]string{}}
 
 	// Baseline: one real trial, timed alone, on its own stage id so its
 	// evidence directory never collides with a fan child's.
@@ -643,7 +643,7 @@ func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 // call would fail rather than return nil, so this passes for the right reason
 // and needs no docker of its own.
 func TestProveGateSkipsGatesThatClaimNothing(t *testing.T) {
-	proven = map[Image]error{}
+	proven = map[Image]bool{}
 	for _, g := range []Gate{
 		FormatOnlyGate("dawn-no-such-image-should-never-be-run"),
 		NoGate("nothing to check here"),
@@ -661,7 +661,7 @@ func TestProveGateRefusesAGateThatShipsNoProof(t *testing.T) {
 	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
 		t.Skip("set DAWN_HARBOR_E2E=1 (needs docker and the built gate images)")
 	}
-	proven = map[Image]error{}
+	proven = map[Image]bool{}
 	dir := t.TempDir()
 
 	// A real gate carries /gate/selftest.sh and passes it.
@@ -679,9 +679,17 @@ func TestProveGateRefusesAGateThatShipsNoProof(t *testing.T) {
 		t.Fatal("a gate with no /gate/selftest.sh proved itself; SoundGate would mean nothing")
 	}
 
-	// Memoised: the answer is a property of pinned bytes, not of the call.
-	if _, ok := proven[bare]; !ok {
-		t.Fatal("the refusal was not memoised")
+	// Success is memoised, because identical pinned bytes cannot prove
+	// themselves twice differently. A REFUSAL is not: the map held the error
+	// too, so a docker hiccup or a ctx cancelled mid-selftest was cached as a
+	// permanent property of the gate's bytes — and provenMu is held across the
+	// docker run, so in a Fan one child's transient failure poisoned every
+	// sibling for the life of the process.
+	if !proven[real] {
+		t.Error("a gate that proved itself was not memoised; every attempt will re-run the container")
+	}
+	if proven[bare] {
+		t.Error("a refusal was memoised; a transient docker failure would be cached as a fact about the image")
 	}
 }
 
@@ -698,7 +706,7 @@ func TestStageInputsAreBakedIntoTheNextStagesImage(t *testing.T) {
 	}
 	upstream := Result{
 		State:        Passed,
-		Stage:        "make",
+		stage:        "make",
 		Manifest:     Manifest{{Name: "finding.json", Digest: "sha256:0"}},
 		artifactsDir: produced,
 	}
@@ -767,7 +775,7 @@ func TestTheGateSeesTheStagesInputs(t *testing.T) {
 	stage := Stage{
 		ID: "validate", Agent: ClaudeCode, Env: Image("e@sha256:" + strings.Repeat("a", 64)),
 		Prompt: "disprove it", Outputs: []string{"verdict.json"},
-		Inputs: []Result{{Stage: "hunt", Manifest: Manifest{{Name: "finding.json", Digest: "sha256:0"}}, artifactsDir: produced}},
+		Inputs: []Result{{stage: "hunt", Manifest: Manifest{{Name: "finding.json", Digest: "sha256:0"}}, artifactsDir: produced}},
 		Gate:   SoundGate(pinned),
 	}
 	dir := t.TempDir()
@@ -844,4 +852,44 @@ func TestDigestRefusesAnythingButARegularFile(t *testing.T) {
 	if err != nil || !ok || len(m) != 1 {
 		t.Fatalf("honest regular file: got %v, ok=%v, err=%v; want it collected", m, ok, err)
 	}
+}
+
+// A clock that fired before harbor produced anything is not an infra failure.
+// Every error out of Dispatch becomes InfraError in the scope, and InfraError
+// is the ONE state dispatchAttempt retries — so a run cancelled from outside,
+// or one out of clock before harbor even started, was retried: cancelled work
+// resumed, and a timeout re-dispatched into the same wall. Same bug as the
+// resumed path, on the live one.
+//
+// Both cases enter through the pre-exec path (an unpullable image makes
+// proveGate fail), which is the half where no trial exists to carry the fact.
+func TestDispatchDoesNotLaunderTheClockIntoInfraError(t *testing.T) {
+	s := Stage{ID: "clock", Agent: ClaudeCode, Env: Image("e@sha256:" + strings.Repeat("a", 64)),
+		Prompt: "p", Gate: SoundGate(Image("dawn-no-such-image@sha256:" + strings.Repeat("c", 64)))}
+
+	t.Run("expired clock is exhausted, not retryable", func(t *testing.T) {
+		proven = map[Image]bool{}
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		got, err := harborRunner{}.Dispatch(ctx, s, t.TempDir())
+		if err != nil {
+			t.Fatalf("Dispatch returned an error (%v); the scope turns that into the one state it retries", err)
+		}
+		if got.State != Exhausted {
+			t.Errorf("state = %s, want exhausted", got.State)
+		}
+	})
+
+	t.Run("cancellation is cancelled, not retryable", func(t *testing.T) {
+		proven = map[Image]bool{}
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Hour))
+		cancel()
+		got, err := harborRunner{}.Dispatch(ctx, s, t.TempDir())
+		if err != nil {
+			t.Fatalf("Dispatch returned an error (%v); a cancelled run must not be retried", err)
+		}
+		if got.State != Cancelled {
+			t.Errorf("state = %s, want cancelled", got.State)
+		}
+	})
 }

@@ -363,9 +363,19 @@ type Artifact struct {
 // the agent left there (see digest in harbor.go). A declared output that is
 // missing, uncollectable, or over maxOutputBytes is infra_error, always; a
 // stage that declares no outputs at all gets an empty Manifest, and that is
-// present and valid. A receiving stage gets the declared files read-only at
-// a fixed path plus this record; a protocol reads the digests to decide
-// whether anything actually changed.
+// present and valid. A receiving stage gets the declared files at a fixed
+// path plus this record; a protocol reads the digests to decide whether
+// anything actually changed.
+//
+// NOT read-only, which this claimed for as long as Stage.Inputs has worked.
+// The files are baked with COPY and the agent runs as root, so it can
+// overwrite them and it can delete and replace them - measured, not assumed.
+// chmod would not change that; root ignores the bits, and the transport
+// bakes rather than mounts, so there is nothing to mount ro. The claim was
+// harmless and false: what a receiving stage does to its own copy reaches
+// nothing, because deriveGate builds the GATE's copy from dawn's own host
+// bytes, which no agent has touched. Harmless is not a reason to keep
+// telling the agent something untrue.
 type Manifest []Artifact
 
 // Stage is one runner call: one agent, one environment, one instruction, one
@@ -439,7 +449,19 @@ type Result struct {
 	// State is the verdict. It is the whole branching vocabulary a protocol
 	// has; there is nothing else to switch on.
 	State State
-	// Stage is the Stage.ID that produced this result, and downstream it is
+	// stage is the Stage.ID that produced this result, and downstream it is
+	// the directory an input lands under: /app/inputs/<stage>/<name>. Set by
+	// classify from the already-validated Stage.ID and read only inside this
+	// package — copyInputs, gateContext's cache key, and the instruction.
+	//
+	// It was exported once, on the rationale that it "is the only thing that
+	// makes a multi-input stage legible". That legibility comes from dawn
+	// writing the field and dawn reading it; no protocol ever read it. What
+	// the export did buy was a protocol's ability to WRITE it, and since it
+	// becomes a directory name in two containers, copyInputs had to re-check
+	// it against the stage-id grammar — a guard that could only ever fire for
+	// a Result a protocol built by hand.
+	stage string
 	// this result's DIRECTORY NAME under /app/inputs.
 	//
 	// It is exported because it is the only thing that makes a multi-input

@@ -115,12 +115,24 @@ const inputDir = "/app/inputs"
 // recorded run rather than by every build.
 const gateSelftest = "/gate/selftest.sh"
 
-// proven memoises the selftest per image, because the image is pinned by
-// digest: the same bytes cannot prove themselves twice differently, and a
-// search that samples ten times should pay for this once.
+// proven memoises SUCCESS per image, and only success. The image is pinned by
+// digest, so identical bytes cannot prove themselves twice differently and a
+// search that samples ten times pays for a passing selftest once.
+//
+// A failure is not cached, and the asymmetry is the whole point. This map held
+// the error too, so a docker daemon hiccup, a ctx cancelled mid-selftest and a
+// genuinely broken gate all landed in it identically — and provenMu is held
+// across the docker run, so in a Fan the first child's transient failure
+// blocked its siblings and then poisoned them for the life of the process,
+// under a comment that only ever justified caching a verdict. Re-running costs
+// one bounded container per attempt on a gate that is failing anyway, and dawn
+// refuses to dispatch on that gate regardless — so the retry buys a fresh
+// gate-selftest.log per attempt rather than one from whenever the first
+// failure happened. Telling "docker never ran it" from "it ran and said no"
+// would be guesswork; not caching either is not.
 var (
 	provenMu sync.Mutex
-	proven   = map[Image]error{}
+	proven   = map[Image]bool{}
 )
 
 // proveGate runs the gate's own selftest in the pinned gate image and requires
@@ -137,8 +149,8 @@ func proveGate(ctx context.Context, g Gate, evidence string) error {
 	}
 	provenMu.Lock()
 	defer provenMu.Unlock()
-	if err, ok := proven[g.image]; ok {
-		return err
+	if proven[g.image] {
+		return nil
 	}
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network=none",
 		string(g.image), gateSelftest)
@@ -150,7 +162,7 @@ func proveGate(ctx context.Context, g Gate, evidence string) error {
 	if mkErr := os.MkdirAll(evidence, 0o755); mkErr == nil {
 		os.WriteFile(filepath.Join(evidence, "gate-selftest.log"), out, 0o644)
 	}
-	proven[g.image] = err
+	proven[g.image] = err == nil
 	return err
 }
 
@@ -443,22 +455,19 @@ func copyInputs(root string, s Stage) error {
 		if in.artifactsDir == "" {
 			return fmt.Errorf("dawn: stage %s: input %d handed back no artifacts to mount", s.ID, i)
 		}
-		// Result.Stage is exported, so a protocol can set it to anything; it
-		// becomes a directory name in two containers, which makes it the same
-		// trust boundary cleanName guards. The grammar it must satisfy is the
-		// one Stage.ID already has.
-		if !stageID.MatchString(in.Stage) {
-			return fmt.Errorf("dawn: stage %s: input %d has no usable stage name (%q)", s.ID, i, in.Stage)
+		// No grammar re-check: in.stage is classify's copy of a Stage.ID that
+		// dispatchAttempt already matched against stageID before anything ran.
+		// The duplicate check stays — two inputs CAN legitimately come from
+		// one stage id, and one would bury the other.
+		if seen[in.stage] {
+			return fmt.Errorf("dawn: stage %s: two inputs both named %q; one would bury the other", s.ID, in.stage)
 		}
-		if seen[in.Stage] {
-			return fmt.Errorf("dawn: stage %s: two inputs both named %q; one would bury the other", s.ID, in.Stage)
-		}
-		seen[in.Stage] = true
+		seen[in.stage] = true
 		for _, a := range in.Manifest {
 			if err := cleanName(a.Name); err != nil {
 				return err
 			}
-			dst := filepath.Join(root, in.Stage, a.Name)
+			dst := filepath.Join(root, in.stage, a.Name)
 			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 				return err
 			}
@@ -522,7 +531,7 @@ func gateContext(dir string, s Stage) (tag Image, root string, err error) {
 		Inputs []Manifest
 	}{Gate: s.Gate.image}
 	for _, in := range s.Inputs {
-		key.Stages = append(key.Stages, in.Stage)
+		key.Stages = append(key.Stages, in.stage)
 		key.Inputs = append(key.Inputs, in.Manifest)
 	}
 	b, _ := json.Marshal(key)
@@ -566,10 +575,10 @@ func instruction(s Stage) string {
 	// dawn owns where bytes live.
 	if len(s.Inputs) > 0 {
 		fmt.Fprintf(&b, "Earlier stages of this run handed you %d input(s), "+
-			"baked into this container read-only:\n\n", len(s.Inputs))
+			"baked into this container at:\n\n", len(s.Inputs))
 		for _, in := range s.Inputs {
 			for _, a := range in.Manifest {
-				fmt.Fprintf(&b, "  - `%s/%s/%s`\n", inputDir, in.Stage, a.Name)
+				fmt.Fprintf(&b, "  - `%s/%s/%s`\n", inputDir, in.stage, a.Name)
 			}
 		}
 		b.WriteString("\n")
@@ -740,6 +749,14 @@ func readJSON(path string, v any) error {
 func digest(root string, names []string) (Manifest, bool, error) {
 	m := make(Manifest, 0, len(names))
 	for _, name := range names {
+		// The declared names are author-supplied, and cleanName is already
+		// applied one function away to the structurally identical case — a
+		// prior stage's Manifest names in copyInputs. Here rather than in
+		// writeTask because resumeResult reaches this through t.read without
+		// ever calling writeTask, so a guard there would miss every resume.
+		if err := cleanName(name); err != nil {
+			return nil, false, err
+		}
 		info, err := os.Lstat(filepath.Join(root, name))
 		if err != nil || !info.Mode().IsRegular() || info.Size() > maxOutputBytes {
 			return nil, false, nil
@@ -768,13 +785,17 @@ func digestFile(path string) (string, error) {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// harborRunner is dawn's one runner. It is registered as THE dispatcher at
-// package init because there is exactly one — a second implementation would be
-// a second answer to "what does a trial mean", and the six states are only
-// trustworthy while that answer has one author.
+// harborRunner is dawn's one runner. There is exactly one — a second
+// implementation would be a second answer to "what does a trial mean", and
+// the six states are only trustworthy while that answer has one author.
+//
+// Main names it directly. It was registered into a package-level `dispatcher`
+// var by an init(), guarded in Main by a nil check that could not fire: the
+// init is unconditional and in this same package, so the var was never nil
+// and the guard was a runtime answer to a question the compiler settles. The
+// runner interface stays — tests substitute a fake through run.dispatch,
+// which is the seam that was doing the work all along.
 type harborRunner struct{}
-
-func init() { dispatcher = harborRunner{} }
 
 // Dispatch runs one trial and classifies it. The attempt clock arrives on the
 // ctx — the scope decided it — and is also what the task's [agent] timeout_sec
@@ -787,10 +808,35 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 	// Before the expensive half. A gate that cannot prove itself never gets an
 	// agent run spent on it.
 	if err := proveGate(ctx, s.Gate, evidence); err != nil {
+		if timedOut, cancelled := clockOutcome(ctx.Err()); timedOut || cancelled {
+			return classify(s, trial{TimedOut: timedOut, Cancelled: cancelled}), nil
+		}
 		return Result{}, err
 	}
 	t, err := runTrial(ctx, s, time.Until(d), evidence)
 	if err != nil {
+		// The clock is not an infra failure, and this is where saying so
+		// belongs. Every error here becomes InfraError in the scope — the ONE
+		// state dispatchAttempt retries — so a run cancelled from outside, or
+		// one that ran out of clock before harbor even started, was retried:
+		// cancelled work resumed, and a timeout re-dispatched into the same
+		// wall. That is the identical bug already fixed on the resumed path,
+		// arriving on the live one, and by the same route — a state derived
+		// from the wreckage instead of from the fact dawn already had.
+		//
+		// runTrial has already observed the fact (clockOutcome, on the same
+		// ctx this function holds, now that nothing re-wraps it in between);
+		// on the pre-exec paths — writeTask, deriveGate — it has not run yet,
+		// so ask the ctx directly. Either way the answer goes to classify.
+		// That is deliberately not a second author for state: it is a second
+		// CALL SITE of the one function that owns the decision, whose first
+		// two rules exist for exactly these two facts.
+		if !t.TimedOut && !t.Cancelled {
+			t.TimedOut, t.Cancelled = clockOutcome(ctx.Err())
+		}
+		if t.TimedOut || t.Cancelled {
+			return classify(s, trial{TimedOut: t.TimedOut, Cancelled: t.Cancelled}), nil
+		}
 		// dawn failed to obtain a verdict at all. The scope turns this into
 		// InfraError and retries it against its own counter; saying so here
 		// as well would be a second opinion on the same fact.
@@ -804,7 +850,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 // agent output. It is a pure function of a Stage and a trial precisely so that
 // the rules can be read in one place and tested without Docker.
 func classify(s Stage, t trial) Result {
-	r := Result{Stage: s.ID, Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir,
+	r := Result{stage: s.ID, Manifest: t.Outputs, metrics: t.Rewards, publishDir: t.PublishDir,
 		artifactsDir: t.ArtifactsDir, drew: t.Drew}
 	gated := s.Gate.image != ""
 	switch {

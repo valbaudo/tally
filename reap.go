@@ -5,10 +5,20 @@ package dawn
 // LocalTaskId.get_name() takes that basename verbatim as the seed for
 // trial_name ("{name[:32]}__{shortuuid7}"), and every compose project a
 // trial's environments open suffix off that name ("…__env",
-// "…__verifier__<key>"). So every container dawn ever creates carries a
+// "…__verifier__<key>"). So every container a dawn TRIAL creates carries a
 // com.docker.compose.project label starting with "dawn__" — one string, no
 // new state, riding a naming mechanism Harbor already has rather than
 // inventing a label of dawn's own.
+//
+// A trial's containers, and only those. dawn makes two docker calls of its
+// own, outside Harbor and so outside compose: proveGate's gate selftest
+// (docker run --rm --network=none) and deriveGate's build. Neither carries a
+// compose project, so neither is in the reap set, and this said "every
+// container dawn ever creates" as though they were. Both are --rm or
+// build-scoped, so only a hard kill of dawn's own process mid-call leaks
+// one, and proveGate memoises per image, which bounds even that. Labelling
+// them would mean fabricating a compose project for a container that has no
+// compose file, to sweep a leak narrower than the races documented below.
 //
 // This is a STRING MATCH, not a cryptographic tag: a Harbor task directory
 // named "dawn" by anything other than this package would pollute the reap

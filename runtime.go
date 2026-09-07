@@ -181,10 +181,6 @@ type runner interface {
 	Dispatch(ctx context.Context, stage Stage, evidence string) (Result, error)
 }
 
-// dispatcher is the runner every run uses. harbor.go registers the Harbor
-// implementation; there is exactly one, and Main refuses to start without it.
-var dispatcher runner
-
 // run is one process-wide run: the record on disk, the runner, and the lock
 // that makes the scope counters safe for a fan.
 //
@@ -240,9 +236,6 @@ func bug(format string, args ...any) { panic(protocolBug{fmt.Sprintf(format, arg
 // why every protocol spends care on the difference between a measurement and
 // a catastrophe that produced the same artifacts.
 func Main(name string, root Lease, protocol func(*Scope) State) {
-	if dispatcher == nil {
-		panic("dawn: no runner registered")
-	}
 	dir, err := resolveRunDir(name)
 	if err != nil {
 		panic(fmt.Sprintf("dawn: %v", err))
@@ -261,7 +254,7 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	// apart from an operator asking the whole run to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	r := newRun(dir, ctx, dispatcher)
+	r := newRun(dir, ctx, harborRunner{})
 	state := r.protocol(root, protocol)
 	r.mu.Lock()
 	r.values["state"] = string(state)
