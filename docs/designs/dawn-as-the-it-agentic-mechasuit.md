@@ -48,7 +48,7 @@ Three real alternatives, all in use today:
 | What | Who uses it | What it costs |
 |---|---|---|
 | Bespoke harness | Cloudflare, Microsoft, and the founder | Weeks of build, then silent failure modes nobody sees without reading the code |
-| Harbor directly | Benchmark and eval teams; NVIDIA NeMo ships a runner | Runs *one* task well: container, agent adapters, verifier-emits-reward. Sequencing many is yours to write |
+| Harbor directly | Benchmark and eval teams; NVIDIA NeMo ships a runner | Runs a multi-STEP task: container, agent adapters, a verifier in its own image per step, `min_reward` gating, artifact transport. **Corrected 2026-09-07** — an earlier draft said sequencing many was yours to write. It is not. What is yours is fan, loops, branching and a second vendor |
 | Temporal / LangGraph + glue | Teams that need durability or a graph | Durable multi-step and sandboxed agents (Temporal × OpenAI Agents SDK, GA March 2026), but **no verifier concept at all** — the composition is still yours to write |
 
 **Sourcing, applied evenly.** Exactly one claim in this table is backed by primary
@@ -87,11 +87,28 @@ the inferred Cloudflare/Microsoft engineers. That gap is what The Assignment att
 ## Premises
 
 1. **The orchestration primitives are commoditized.** Harbor does container + agent
-   adapters + verifier-emits-reward. Temporal does durable multi-step with sandboxed
-   agents. dawn's value cannot be "we orchestrate." *(accepted)*
-2. **The unoccupied position is the composition:** multi-stage, per-stage isolated
+   adapters + verifier-emits-reward, **and sequential multi-step tasks with a separate
+   verifier image per step**. Temporal does durable multi-step with sandboxed agents.
+   dawn's value cannot be "we orchestrate." *(accepted, and stronger than when written)*
+2. ~~**The unoccupied position is the composition:** multi-stage, per-stage isolated
    verification where only a sound gate reaches success, plus artifact transport, resume,
-   and spend limits. Nobody ships the combination. *(accepted)*
+   and spend limits. Nobody ships the combination.~~ **Substantially false — measured
+   2026-09-07.** Harbor 0.22.0, the pinned version, ships four of those five: `[[steps]]`,
+   a separate verifier image resolvable per step, `min_reward` aborting the remaining
+   steps, and per-step artifacts. `experiments/harbor-targets/vdh-steps/` is vdh expressed
+   as one multi-step task and **validated against Harbor's own `TaskConfig`** — 24 steps
+   accepted, five distinct gate images resolved.
+
+   The revised claim, which the same experiment supports: **a Harbor task is a static,
+   single-vendor, straight-line list; a dawn protocol is a program.** What does not
+   survive translation is fan (8 stage kinds unroll to 24 steps, 6 of them speculative),
+   loops, conditional stages, input selection by name, branching on a gate's metrics, the
+   attempt lease, resume across restarts, actuation — and the vendor.
+
+   The sharpest one was unforeseen: `verifier.disable` is trial-level, so vdh's three
+   ungated stages resolve to `environment_mode = "shared"`, a verifier running **inside
+   the agent's own container**. Harbor cannot express "this stage has no gate" without
+   either an unsound gate or disabling every sound one. *(revised)*
 3. **Demand is n=1 plus two inferred cases never spoken to.** *(accepted)*
 4. ~~The gate is the differentiator.~~ **Rejected, and then answered.** *(resolved)*
    The founder held the gate is a component, not the pitch; the facilitator held it was
@@ -108,8 +125,10 @@ the inferred Cloudflare/Microsoft engineers. That gap is what The Assignment att
      isolated container, one agent CLI, and a verdict from a verifier in a SEPARATE
      container. LangGraph's unit is a function; Temporal's is an activity. Neither has a
      unit of work that can be wrong about its own success. Both can shell out to
-     `harbor run` — and then the task.toml generation, artifact transport, verdict-to-state
-     mapping, digest pinning and receipts are yours to write. That is dawn, written again.
+     `harbor run` — and then the task.toml generation, verdict-to-state mapping, digest
+     pinning and receipts are yours to write. (Artifact transport is struck from that
+     list: Harbor does it natively, per step. Measured, not assumed.) That is dawn,
+     written again.
    - **Multi-vendor composition is a correctness property, not a feature.** dawn holds
      per-vendor facts the runtime enforces: `Codex.fanOut` is false because its OAuth
      refresh token is single-use and a fan would log the operator out of their own
@@ -186,12 +205,18 @@ produces a framework shaped like vulnerability hunting with "generic" written on
 
 ## Open Questions
 
-1. **Is Harbor a dependency or a competitor?** dawn is 1,260 lines of code over a runner
-   that already does containers, adapters, and per-task verification. If Harbor grows
-   multi-stage sequencing, what is left? Unanswered, and it decides the moat.
-   **Checkpoint:** read Harbor's changelog and open issues before starting D, and again
-   at D's midpoint. Multi-stage sequencing appearing upstream is a stop-and-rethink, not
-   a feature to race — it collapses premise 2, on which the whole moat now rests.
+1. ~~**Is Harbor a dependency or a competitor?**~~ **Answered 2026-09-07: a dependency,
+   for a narrower reason than the question assumed.** Harbor did not "grow" multi-stage
+   sequencing — it already had it, in the pinned version, so the checkpoint fired before
+   D started rather than at its midpoint. See premise 2 and
+   `experiments/harbor-targets/vdh-steps/README.md`.
+
+   The moat is not that nobody sequences. It is that a Harbor task is a static,
+   single-vendor, straight-line TOML list: `StepConfig.agent` carries exactly
+   `network_mode`, `allowed_hosts`, `timeout_sec` and `user` — no vendor field — and
+   `Trial` builds `self.agent` once. One Harbor trial is one agent CLI, at any width.
+   Premise 6's second half is therefore the whole moat rather than half of one, which
+   raises the stakes on it being live rather than asserted.
 2. ~~What is the differentiator, if not the gate?~~ **Answered — see premise 6.**
    Harbor as the unit of work, composed across vendors. The remaining risk is not that
    the answer is vague; it is that the answer is a composition over a dependency, which
@@ -238,9 +263,13 @@ roadmap.
 
 - **Harbor 0.22.0** — carries containers, agent adapters, and per-task verification.
   Everything dawn does sits on it.
-- **A second agent vendor** — the codex environment image is built and pinned
-  (`dawn-mdash-env-codex@sha256:7003829e…`) but no protocol drives `dawn.Codex` yet, and
-  codex has never authenticated inside a dawn run.
+- **A second agent vendor** — **live as of 2026-09-07.** `protocols/vdh/main.go` runs its
+  `validate` stage on `dawn.Codex` against `dawn-vdh-hunt-env-codex`, making vdh the first
+  multi-vendor protocol, and codex authenticates inside that image at `--network=none`
+  ("Logged in using ChatGPT" from a 0600 seed). Two caveats worth carrying: the credential
+  reaches Harbor through `CODEX_AUTH_JSON_PATH` read **on the host**, never inside the
+  container, and codex's refresh token is single-use — re-measure the access token's JWT
+  `exp` before a run rather than trusting a recorded date.
 **"Acceptance protocol"** means one of the four dawn set out to run as proof it works
 (CyberGym, MDASH, VDH, PR-makes-CI-pass — issue #13). Live status differs per protocol:
 
