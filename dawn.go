@@ -147,13 +147,20 @@ type Agent struct {
 // The profiles dawn ships. Only ClaudeCode may fan out. ClaudeCode's model is
 // pinned to what every run has actually been doing — measured off Harbor's
 // raw agent logs, since nothing before this recorded it — so the pin is
-// behaviour-neutral. Codex's model stays "": the CLI prints no effective
-// default anywhere dawn can read, and guessing one would be inventing a fact
-// dawn has not measured; dawn will honestly record that it pinned nothing.
-// Neither profile pins an effort yet, for the identical reason.
+// behaviour-neutral.
+//
+// Codex's model was "" on the principle that guessing a default would be
+// inventing a fact dawn has not measured. That principle stands; it simply no
+// longer applies. The operator named the model, and the identifier is checked
+// against the CLI's OWN list rather than assumed: codex's models_cache.json
+// carries gpt-5.6-luna, and "max" is in its supported_reasoning_levels. So
+// this pin is a decision with a source, which is the thing the empty string
+// was protecting against the absence of. Harbor passes effort through
+// verbatim as `-c model_reasoning_effort=` and validates nothing, which is
+// the other reason to check the value here rather than trust the round trip.
 var (
 	ClaudeCode = Agent{name: "claude-code", model: "claude-sonnet-5", fanOut: true}
-	Codex      = Agent{name: "codex", fanOut: false}
+	Codex      = Agent{name: "codex", model: "gpt-5.6-luna", effort: "max", fanOut: false}
 )
 
 // Gate is a stage's verifier. Build one with SoundGate, FormatOnlyGate or

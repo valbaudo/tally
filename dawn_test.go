@@ -83,6 +83,29 @@ func TestContentDigestIgnoresModelAndEffort(t *testing.T) {
 	}
 }
 
+// The complement, and the one the pair above left unguarded: Agent.NAME is the
+// vendor, and it MUST move the digest. vdh's validate stage now runs Codex
+// while every other stage runs ClaudeCode, so a name that did not re-key would
+// let a resumed run hand back a ClaudeCode adversary's verdict as though Codex
+// had produced it — the two are being compared, so that is the one confusion
+// this protocol cannot tolerate. It is also the only contentDigest ingredient
+// whose sensitivity nothing asserted before.
+func TestContentDigestMovesWithAgentName(t *testing.T) {
+	base := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Prompt: "do it"}
+	otherVendor := base
+	otherVendor.Agent = Codex
+	if contentDigest(base) == contentDigest(otherVendor) {
+		t.Error("contentDigest did not move when Agent.name changed: the vendor must be part of attempt identity")
+	}
+	// And it is the NAME doing it, not the model/effort that ride along on the
+	// real profiles — otherwise this would pass for the wrong reason.
+	renamedOnly := base
+	renamedOnly.Agent = Agent{name: Codex.name, model: ClaudeCode.model, effort: ClaudeCode.effort}
+	if contentDigest(base) == contentDigest(renamedOnly) {
+		t.Error("contentDigest did not move when ONLY Agent.name changed")
+	}
+}
+
 // attempt_id is stable for the same attempt and moves when any of its three
 // stated ingredients does — stage content, resolved inputs, or attempt
 // number — because a later ticket silently changing what feeds it is exactly

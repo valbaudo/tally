@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -199,5 +200,79 @@ func TestFanChildThatCannotChargeReturnsInfraErrorWithoutAbortingSiblings(t *tes
 	}
 	if root.used != 2 {
 		t.Errorf("root.used = %d, want 2: a failed charge must not book against the scope", root.used)
+	}
+}
+
+// perAgentFake tracks peak in-flight dispatches SEPARATELY per agent name, so
+// a test can tell "these two never overlapped with each other" apart from
+// "nothing overlapped at all" — the distinction a single global counter
+// cannot make, and the whole question when one scope runs two vendors.
+type perAgentFake struct {
+	sleep    time.Duration
+	mu       sync.Mutex
+	inFlight map[string]int
+	maxSeen  map[string]int
+}
+
+func (f *perAgentFake) Dispatch(ctx context.Context, stage Stage, evidence string) (Result, error) {
+	name := stage.Agent.name
+	f.mu.Lock()
+	f.inFlight[name]++
+	if f.inFlight[name] > f.maxSeen[name] {
+		f.maxSeen[name] = f.inFlight[name]
+	}
+	f.mu.Unlock()
+
+	time.Sleep(f.sleep)
+
+	f.mu.Lock()
+	f.inFlight[name]--
+	f.mu.Unlock()
+	return Result{State: Unverified}, nil
+}
+
+// agentGates is keyed by agent NAME, and until vdh's validate stage moved to
+// Codex no protocol had ever put two names in one run — so nothing proved the
+// semaphores were per-name rather than one shared admission gate. A single
+// global gate would satisfy every prior test (Codex still never overlaps
+// itself) while silently serialising a fanning vendor behind a capped one.
+//
+// Fresh names on purpose: agentGates is a package-level map built lazily and
+// never rebuilt, so naming the real profiles would make this test's result
+// depend on which test happened to create their gate first, and at what
+// DAWN_MAX_CONCURRENT.
+func TestAgentGatesAreIndependentPerName(t *testing.T) {
+	t.Setenv("DAWN_MAX_CONCURRENT", "4")
+	fanning := Agent{name: "mixed-fanning-test", fanOut: true}
+	capped := Agent{name: "mixed-capped-test", fanOut: false}
+
+	f := &perAgentFake{
+		sleep:    20 * time.Millisecond,
+		inFlight: map[string]int{},
+		maxSeen:  map[string]int{},
+	}
+	root := testFanRun(t, f).root(Dispatching(8, time.Minute))
+
+	// One scope, both vendors, interleaved — the shape vdh now has.
+	results := root.Fan(8, func(i int) Stage {
+		a := fanning
+		if i%2 == 1 {
+			a = capped
+		}
+		return Stage{ID: fmt.Sprintf("mixed-%d", i), Agent: a, Env: "e@sha256:0", Gate: NoGate("test")}
+	})
+
+	if len(results) != 8 {
+		t.Fatalf("len(results) = %d, want 8", len(results))
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := f.maxSeen[capped.name]; got != 1 {
+		t.Errorf("max concurrent %s = %d, want exactly 1: fanOut==false must hold even beside another vendor", capped.name, got)
+	}
+	// The load-bearing half: the capped vendor must not have throttled the
+	// fanning one. If both gates were the same channel this is 1.
+	if got := f.maxSeen[fanning.name]; got < 2 {
+		t.Errorf("max concurrent %s = %d, want at least 2: a capped vendor in the same scope must not serialise a fanning one", fanning.name, got)
 	}
 }

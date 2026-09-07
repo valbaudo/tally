@@ -122,10 +122,17 @@ func TestReportRendersLiveGateHostsAndCaveat(t *testing.T) {
 // A receipt carrying a model renders it; one carrying none renders
 // "unpinned" — a claim dawn is entitled to make ("I set nothing"), not
 // drawCell's "unknown" ("nothing was reported to me").
+//
+// The unpinned side is a bare Agent rather than a shipped profile on purpose.
+// It used to be Codex, which pinned no model until vdh's validate stage needed
+// one; the test then failed for a reason that had nothing to do with what it
+// asserts. What is under test is how a receipt with an EMPTY model renders, so
+// the fixture says that directly instead of borrowing a profile that happens
+// to be empty today.
 func TestReportRendersModelOrUnpinned(t *testing.T) {
 	dir := t.TempDir()
 	withModel := Stage{ID: "a", Agent: ClaudeCode, Gate: NoGate("test")}
-	withoutModel := Stage{ID: "b", Agent: Codex, Gate: NoGate("test")}
+	withoutModel := Stage{ID: "b", Agent: Agent{name: "nop"}, Gate: NoGate("test")}
 	for _, s := range []Stage{withModel, withoutModel} {
 		evidence := filepath.Join(dir, "attempts", s.ID, "1")
 		if err := os.MkdirAll(evidence, 0o755); err != nil {

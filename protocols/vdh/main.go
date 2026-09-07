@@ -313,6 +313,25 @@ appear exactly once in the file, so include enough lines to be unambiguous.`, i+
 // DISPROVE. dawn scores whether the adversary was right — the gate replays the
 // payload itself — so neither rubber-stamping nor blanket refusal survives.
 // Returns the findings whose adversary was correct AND confirmed them.
+//
+// THIS STAGE RUNS A DIFFERENT VENDOR, and it is the only stage that does. The
+// header records the measurement that motivates it: across two runs, nine
+// adversaries each, every single verdict came back "confirmed" and not one was
+// a refutation, while their accuracy moved 3/9 → 8/9 purely because the share
+// of real findings changed. That is consistent with two very different causes
+// — a prompt that does not actually elicit refusal, or a model disinclined to
+// contradict what it is handed — and running the identical prompt, the
+// identical gate and the identical target under another vendor is what
+// separates them. Everything but the CLI on PATH is held constant: codexEnv
+// differs from env in exactly that.
+//
+// It also makes dawn's per-vendor rules load-bearing for the first time.
+// Codex.fanOut is false, so acquireAgentGate hands this fan a semaphore of 1
+// and the adversaries run one at a time no matter how wide the fan is — which
+// is the point, because codex's refresh token is single-use and two concurrent
+// trials straddling a refresh would burn the operator's own login. The fan
+// still spawns len(live) goroutines; they serialise, and Dispatching's
+// WallClock already funds the fully-serial worst case.
 func validate(run *dawn.Scope, round int, hunted []dawn.Result) (kept, verdicts []dawn.Result, correct int) {
 	live := withArtifacts(hunted)
 	if len(live) == 0 {
@@ -320,7 +339,7 @@ func validate(run *dawn.Scope, round int, hunted []dawn.Result) (kept, verdicts 
 	}
 	verdicts = run.Fan(len(live), func(i int) dawn.Stage {
 		return dawn.Stage{
-			ID: fmt.Sprintf("validate-r%d-%d", round, i), Agent: dawn.ClaudeCode, Env: env,
+			ID: fmt.Sprintf("validate-r%d-%d", round, i), Agent: dawn.Codex, Env: codexEnv,
 			Prompt: `Your input is ONE hunter's finding. Your job is to DISPROVE it.
 
 Read /app/src and attack the claim: is the input really attacker-controlled, does
