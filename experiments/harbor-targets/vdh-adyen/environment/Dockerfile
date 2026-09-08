@@ -14,6 +14,6 @@ COPY --from=cli /usr/local/bin/node /usr/local/bin/node
 COPY --from=cli /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
 
 # adyen-shopware6 at e3b9bdfa1fb31d704619346a3d38598ade29d92c (2026-08-19).
-# Pinned by commit in the README; the image digest is what dawn pins.
+# Pinned by commit in the README; the image digest is what tally pins.
 COPY repo /app/repo
 RUN mkdir -p /app/outputs && chmod 0777 /app/outputs

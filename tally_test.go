@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 import (
 	"strings"

@@ -52,7 +52,7 @@ def main():
     findings = sorted(INPUTS.glob("*/finding.json"))
     if len(findings) != 1:
         # The stage is dispatched with exactly one finding to attack. More or
-        # fewer is dawn wiring the protocol wrong, not the agent's doing, so
+        # fewer is tally wiring the protocol wrong, not the agent's doing, so
         # there is nothing here to score.
         sys.exit(f"no verdict: expected exactly one input finding, found {len(findings)}")
     given = json.loads(findings[0].read_text())

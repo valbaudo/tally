@@ -1,4 +1,4 @@
-# dawn
+# tally
 
 See [AGENTS.md](AGENTS.md) for how to work in this repo and [CONTEXT.md](CONTEXT.md)
 for the glossary. Both are the source of truth; this file only adds skill routing.

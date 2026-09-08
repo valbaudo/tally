@@ -8,8 +8,8 @@ which a selected execution backend may make only when it enforces and records
 them. Do not add `sandbox:`, `network:`, or directory-policy keys to workflow
 YAML.
 
-This assessment checked Dawn at
-[`de67a26`](https://github.com/valbaudo/dawn/tree/de67a26febfaf6ceb3f279c30614cb4d47beb2fc)
+This assessment checked Tally at
+[`de67a26`](https://github.com/valbaudo/tally/tree/de67a26febfaf6ceb3f279c30614cb4d47beb2fc)
 and AWF at
 [`860ca17`](https://github.com/valbaudo/awf/tree/860ca172c13c7a86b679db4993acbcd32f4f7cc0).
 
@@ -17,12 +17,12 @@ and AWF at
 
 | Claim — use this name | Initial local backend | Evidence and boundary |
 | --- | --- | --- |
-| **Accidental workspace-write non-interference** | **Yes** | A workspace invocation materializes its input into a fresh `os.MkdirTemp` directory, has no caller-provided `Dir`, and uses that directory as `cmd.Dir`. [`MkdirTemp`](https://pkg.go.dev/os#MkdirTemp) creates a random, `0o700` directory and avoids concurrent allocation collisions; Dawn also rejects ambiguous workspace inputs before invocation. [Dawn workspace backend](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/backend/claude/workspace.go#L31-L45), [load validation](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/plan/plan.go#L284-L290). This prevents two normal Dawn leaves from being handed the same mutable tree; it does not stop code running as the same user from naming another path. |
-| **Filesystem write confinement** | **No** | `Cmd.Dir` sets a working directory; it is not an access-control boundary. The current workspace adapter invokes Claude with `--dangerously-skip-permissions`, so an absolute path, `..`, or child process can write any path permitted to the invoking user. [Source](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/backend/claude/workspace.go#L126-L134), [specification](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/SPEC.md#L478-L487). |
-| **Read isolation** | **No** | The child has the host user's normal read authority. A captured absolute symlink can also be re-materialized into a downstream workspace. [Dawn specification](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/SPEC.md#L478-L486). |
-| **Credential isolation** | **No** | Dawn does not set `Cmd.Env` for the workspace adapter; Go therefore inherits the current process environment. Host homes and agent configuration are shared ambient state. [`exec.Cmd.Env`](https://pkg.go.dev/os/exec#Cmd), [workspace launch](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/backend/claude/workspace.go#L126-L132). |
-| **Process isolation** | **No** | On Unix Dawn creates a process group and kills it on cancellation. That is bounded process-tree cleanup, not a private PID namespace or a restriction on seeing/signalling host processes; a new session can escape the group. [Process manager](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/proc/proc.go#L1-L70). |
-| **Network isolation** | **No** | There is no network namespace, firewall, proxy, or egress policy in the local launch. Host ports are explicitly named as shared ambient state. [Dawn specification](https://github.com/valbaudo/dawn/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/SPEC.md#L483-L487). |
+| **Accidental workspace-write non-interference** | **Yes** | A workspace invocation materializes its input into a fresh `os.MkdirTemp` directory, has no caller-provided `Dir`, and uses that directory as `cmd.Dir`. [`MkdirTemp`](https://pkg.go.dev/os#MkdirTemp) creates a random, `0o700` directory and avoids concurrent allocation collisions; Tally also rejects ambiguous workspace inputs before invocation. [Tally workspace backend](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/backend/claude/workspace.go#L31-L45), [load validation](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/plan/plan.go#L284-L290). This prevents two normal Tally leaves from being handed the same mutable tree; it does not stop code running as the same user from naming another path. |
+| **Filesystem write confinement** | **No** | `Cmd.Dir` sets a working directory; it is not an access-control boundary. The current workspace adapter invokes Claude with `--dangerously-skip-permissions`, so an absolute path, `..`, or child process can write any path permitted to the invoking user. [Source](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/backend/claude/workspace.go#L126-L134), [specification](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/SPEC.md#L478-L487). |
+| **Read isolation** | **No** | The child has the host user's normal read authority. A captured absolute symlink can also be re-materialized into a downstream workspace. [Tally specification](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/SPEC.md#L478-L486). |
+| **Credential isolation** | **No** | Tally does not set `Cmd.Env` for the workspace adapter; Go therefore inherits the current process environment. Host homes and agent configuration are shared ambient state. [`exec.Cmd.Env`](https://pkg.go.dev/os/exec#Cmd), [workspace launch](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/backend/claude/workspace.go#L126-L132). |
+| **Process isolation** | **No** | On Unix Tally creates a process group and kills it on cancellation. That is bounded process-tree cleanup, not a private PID namespace or a restriction on seeing/signalling host processes; a new session can escape the group. [Process manager](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/proc/proc.go#L1-L70). |
+| **Network isolation** | **No** | There is no network namespace, firewall, proxy, or egress policy in the local launch. Host ports are explicitly named as shared ambient state. [Tally specification](https://github.com/valbaudo/tally/blob/de67a26febfaf6ceb3f279c30614cb4d47beb2fc/SPEC.md#L483-L487). |
 | **Hostile-code containment** | **No** | This is the accepted initial decision. Do not call the local backend “sandboxed,” “contained,” or safe for hostile code. It is suitable only for code and host authority the operator chose to run. |
 
 The first row is a data-flow/allocation guarantee. The other rows are security
@@ -41,7 +41,7 @@ working directory, or a process group.
 | [Cloudflare Computer](https://github.com/cloudflare/computer/blob/main/README.md) | A preview, pluggable execution surface: its Container backend offers full Linux userland and real network, while isolate backends have different semantics. Cloudflare's adjacent [Sandbox SDK](https://developers.cloudflare.com/sandbox/concepts/security/) documents a separate VM per sandbox with filesystem/process/network separation. | Computer itself is not one universal containment contract; its README labels it preview. A Cloudflare adapter must name the selected runtime and policy. In particular, Container internet access is enabled by default unless configured otherwise, and secrets passed into a sandbox remain readable by code in it. [Outbound traffic](https://developers.cloudflare.com/containers/platform-details/outbound-traffic/), [secret handling](https://developers.cloudflare.com/sandbox/concepts/security/#secrets-management). |
 
 AWF demonstrates why this belongs below the language boundary rather than in
-Dawn YAML. Its current native backend contains OS-specific launchers, chooses
+Tally YAML. Its current native backend contains OS-specific launchers, chooses
 and functionally probes `bwrap`, falls back to a Landlock trampoline, and
 records the effective mode; its macOS SBPL profile deliberately supplies
 write-only confinement while allowing host reads. [AWF launcher
@@ -49,7 +49,7 @@ source](https://github.com/valbaudo/awf/blob/860ca172c13c7a86b679db4993acbcd32f4
 [macOS profile](https://github.com/valbaudo/awf/blob/860ca172c13c7a86b679db4993acbcd32f4f7cc0/container/native/sandbox_darwin.go#L43-L185),
 [documented mode/fallback](https://github.com/valbaudo/awf/blob/860ca172c13c7a86b679db4993acbcd32f4f7cc0/man/awf-workflow.5.md#L273-L323).
 That is a useful backend implementation, not a portable language primitive to
-copy into Dawn.
+copy into Tally.
 
 ## Required validation and documentation
 
@@ -75,7 +75,7 @@ copy into Dawn.
 Recommended user-facing wording:
 
 > The local backend creates a fresh workspace for each invocation. This keeps
-> concurrent Dawn steps from accidentally sharing a working tree. It is not a
+> concurrent Tally steps from accidentally sharing a working tree. It is not a
 > sandbox: code runs with the invoking user's host authority and may access
 > host files, credentials, processes, and network resources that user can
 > access. Backends with stronger isolation document and record their effective

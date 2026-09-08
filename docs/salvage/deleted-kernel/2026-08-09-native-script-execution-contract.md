@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build Dawn's clean vNext native `script` executor: literal commands enter through one typed ABI, run in an owned native execution group, and either return one fully captured candidate value or one honest terminal outcome.
+**Goal:** Build Tally's clean vNext native `script` executor: literal commands enter through one typed ABI, run in an owned native execution group, and either return one fully captured candidate value or one honest terminal outcome.
 
-**Architecture:** Add one deep `script.Executor` that owns invocation roots, ABI files, environment construction, native execution, output validation, capture, and cleanup. Put reusable operating-system process lifecycle in `nativeexec`, below both scripts and future CLI-backed agent adapters; expose no current-`dawn.Backend` or AWF compatibility layer. The vNext value runtime supplies immutable artifact materialization and atomic candidate construction through one narrow port.
+**Architecture:** Add one deep `script.Executor` that owns invocation roots, ABI files, environment construction, native execution, output validation, capture, and cleanup. Put reusable operating-system process lifecycle in `nativeexec`, below both scripts and future CLI-backed agent adapters; expose no current-`tally.Backend` or AWF compatibility layer. The vNext value runtime supplies immutable artifact materialization and atomic candidate construction through one narrow port.
 
-**Tech Stack:** Go 1.26 standard library, macOS/Linux process groups and Unix file descriptors, existing Dawn content-addressed storage through the vNext value boundary.
+**Tech Stack:** Go 1.26 standard library, macOS/Linux process groups and Unix file descriptors, existing Tally content-addressed storage through the vNext value boundary.
 
 ## Global Constraints
 
 - Implement `docs/superpowers/specs/2026-08-09-native-script-execution-contract-design.md`.
 - Treat GitHub #5–#9 implementations as prerequisites for scheduler, value, workspace, ledger, effect-key, cancellation, and commit semantics.
-- Do not adapt `script.Executor` to current `dawn.Backend`, `plan.Step`, map-shaped `dawn.Result`, current workspace-only refs, or AWF fields.
+- Do not adapt `script.Executor` to current `tally.Backend`, `plan.Step`, map-shaped `tally.Result`, current workspace-only refs, or AWF fields.
 - Canonical commands are literal argv. `/bin/sh -c` lowering belongs to compilation; the executor never interpolates values or invokes a shell implicitly.
 - The author surface remains command, requested external environment names, and an optional wall deadline.
 - Stdin is closed. Stdout and stderr are diagnostics only.
@@ -58,14 +58,14 @@ The vNext value runtime resolves an input `Value` into `Request.InputJSON` befor
 | `nativeexec/types.go` | Owned-process request, diagnostics, and terminal outcome |
 | `nativeexec/local.go` | Parent-side runner and cancellation protocol |
 | `nativeexec/supervisor_unix.go` | Process group, TERM/KILL sequence, leak detection, reaping |
-| `nativeexec/supervisor_protocol.go` | Private control/result protocol for Dawn re-exec |
+| `nativeexec/supervisor_protocol.go` | Private control/result protocol for Tally re-exec |
 | `script/types.go` | Resolved request, artifact/slot descriptors, executor outcomes |
-| `script/abi.go` | Exact `dawn.script/1` manifest and reserved references |
+| `script/abi.go` | Exact `tally.script/1` manifest and reserved references |
 | `script/invocation.go` | Private roots, materialization, fixed ABI files, cleanup |
 | `script/environment.go` | Native baseline, requested names, diagnostic redaction |
 | `script/executor.go` | Prepare/run/quiesce/validate/capture orchestration |
 | `script/candidate.go` | Output decoding, slot capture, workspace publication |
-| `cmd/dawn/main.go` | Early private re-exec entry for the supervisor |
+| `cmd/tally/main.go` | Early private re-exec entry for the supervisor |
 
 Keep process mechanics in `nativeexec` and typed workflow mechanics in `script`. Do not split ABI preparation, validation, and capture into public packages; they share one invariant and change together.
 
@@ -238,7 +238,7 @@ git commit -m "feat(script): define the native execution boundary"
 
 - [ ] **Step 1: Add failing ABI golden tests**
 
-Construct input containing one PDF and a two-item file list. Assert ABI `dawn.script/1`, workspace and effect key, exact input IDs, static output slots, and dynamic namespace `output:/pages/*`. Compare decoded `DAWN_INPUT` and `DAWN_MANIFEST` with golden values and assert `DAWN_OUTPUT` does not yet exist.
+Construct input containing one PDF and a two-item file list. Assert ABI `tally.script/1`, workspace and effect key, exact input IDs, static output slots, and dynamic namespace `output:/pages/*`. Compare decoded `TALLY_INPUT` and `TALLY_MANIFEST` with golden values and assert `TALLY_OUTPUT` does not yet exist.
 
 Add cases for empty workspace, one base tree, file/tree outputs, logical filenames with spaces, duplicate manifest IDs, and a base of kind `file`. Invalid cases must fail before materialization.
 
@@ -287,7 +287,7 @@ Expected: PASS.
 
 ```bash
 git add script/abi.go script/abi_test.go script/invocation.go script/invocation_test.go
-git commit -m "feat(script): materialize the dawn script ABI"
+git commit -m "feat(script): materialize the tally script ABI"
 ```
 
 ---
@@ -305,7 +305,7 @@ git commit -m "feat(script): materialize the dawn script ABI"
 
 - [ ] **Step 1: Add failing environment tests**
 
-Use injected maps rather than the test process environment. Assert the result contains only the documented baseline, attempt-local `TMPDIR`/`TMP`/`TEMP`, the four fixed Dawn variables, and explicitly requested `API_TOKEN`. Assert missing requested names fail before execution, names are sorted/deduplicated, and values never appear in the manifest.
+Use injected maps rather than the test process environment. Assert the result contains only the documented baseline, attempt-local `TMPDIR`/`TMP`/`TEMP`, the four fixed Tally variables, and explicitly requested `API_TOKEN`. Assert missing requested names fail before execution, names are sorted/deduplicated, and values never appear in the manifest.
 
 Add a redactor test that splits `secret-value` across three writes to both streams. After `Close`, neither stream may contain the value and both must contain `[REDACTED]`. With no external values, bytes must pass unchanged.
 
@@ -319,7 +319,7 @@ Expected: FAIL because environment construction and chunk-safe redaction do not 
 
 - [ ] **Step 3: Implement one baseline and one external-value mechanism**
 
-Read the local baseline only through injected `LookupEnv`; production requests `PATH`, `HOME`, `LANG`, `LC_ALL`, and `LC_CTYPE` when present. Replace temp variables with the attempt temp root. Append fixed Dawn variables and requested names. Reject empty names, names containing `=` or NUL, and missing values as malformed process environment.
+Read the local baseline only through injected `LookupEnv`; production requests `PATH`, `HOME`, `LANG`, `LC_ALL`, and `LC_CTYPE` when present. Replace temp variables with the attempt temp root. Append fixed Tally variables and requested names. Reject empty names, names containing `=` or NUL, and missing values as malformed process environment.
 
 Return one defensive copy of every non-empty injected value as `sensitive`. Implement streaming redaction by retaining the final `maxSecretBytes-1` bytes between writes, replacing every exact value before forwarding, and flushing the suffix on `Close`. Empty external values are valid but are not redaction patterns. Do not claim to detect encodings, hashes, or deliberate exfiltration.
 
@@ -347,8 +347,8 @@ git commit -m "feat(script): build and redact the native environment"
 - Create: `nativeexec/supervisor_unix.go`
 - Create: `nativeexec/local.go`
 - Test: `nativeexec/supervisor_test.go`
-- Modify: `cmd/dawn/main.go`
-- Test: `cmd/dawn/main_test.go`
+- Modify: `cmd/tally/main.go`
+- Test: `cmd/tally/main_test.go`
 
 **Interfaces:**
 - Produces: `nativeexec.Local.Run(context.Context, Request, DiagnosticSink) Outcome`.
@@ -377,10 +377,10 @@ Expected: FAIL because no supervisor protocol or owned runner exists.
 
 - [ ] **Step 4: Implement the private re-exec protocol**
 
-Use the Dawn executable as a supervisor. Parent and supervisor exchange exact-version JSON:
+Use the Tally executable as a supervisor. Parent and supervisor exchange exact-version JSON:
 
 ```go
-const protocol = "dawn.nativeexec/1"
+const protocol = "tally.nativeexec/1"
 type processSpec struct {
 	Protocol string `json:"protocol"`
 	Argv []string `json:"argv"`
@@ -408,7 +408,7 @@ Call `RunSupervisorFromEnvironment` before normal CLI parsing. Protect the priva
 
 ```bash
 go test ./nativeexec -run 'TestLocal|TestCoordinatorLoss' -count=1
-go test ./cmd/dawn -count=1
+go test ./cmd/tally -count=1
 ```
 
 Expected: PASS.
@@ -416,7 +416,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit the supervisor slice**
 
 ```bash
-git add nativeexec/local.go nativeexec/supervisor_protocol.go nativeexec/supervisor_unix.go nativeexec/supervisor_test.go cmd/dawn/main.go cmd/dawn/main_test.go
+git add nativeexec/local.go nativeexec/supervisor_protocol.go nativeexec/supervisor_unix.go nativeexec/supervisor_test.go cmd/tally/main.go cmd/tally/main_test.go
 git commit -m "feat(nativeexec): own process groups across cancellation and crash"
 ```
 
@@ -487,12 +487,12 @@ git commit -m "feat(script): execute and classify native scripts"
 - Test: `script/candidate_test.go`
 
 **Interfaces:**
-- Consumes: `DAWN_OUTPUT`, `Manifest`, `ImmutableValues.CaptureFile`, `ImmutableValues.CaptureTree`, `CandidateBuilder.BuildScriptCandidate`.
+- Consumes: `TALLY_OUTPUT`, `Manifest`, `ImmutableValues.CaptureFile`, `ImmutableValues.CaptureTree`, `CandidateBuilder.BuildScriptCandidate`.
 - Produces: `Executor.buildCandidate(context.Context, *Invocation, Request) (Value, error)`.
 
 - [ ] **Step 1: Add failing JSON and static-slot tests**
 
-Cover absent output, empty output, malformed JSON, two concatenated values, a valid top-level string, valid `null`, and a valid object. Dawn must parse one value and canonicalize through the candidate builder.
+Cover absent output, empty output, malformed JSON, two concatenated values, a valid top-level string, valid `null`, and a valid object. Tally must parse one value and canonicalize through the candidate builder.
 
 For static file output, create one slot containing `report.pdf`; assert `CaptureFile` receives the slot and the returned `Value` is supplied under `output:/report`. Zero files and two files must fail `FailureCapture`. Add an empty tree and a tree containing an executable file and safe internal symlink. Put an exact injected value into JSON, a file, and a tree in three neighboring cases; each must fail before candidate publication under #6's secret boundary.
 
@@ -502,8 +502,8 @@ Write:
 
 ```json
 {"pages":[
-  {"$dawn":"output:/pages/*","member":"0"},
-  {"$dawn":"output:/pages/*","member":"1"}
+  {"$tally":"output:/pages/*","member":"0"},
+  {"$tally":"output:/pages/*","member":"1"}
 ]}
 ```
 
@@ -521,7 +521,7 @@ Expected: FAIL because decoding and capture do not exist.
 
 - [ ] **Step 4: Implement exact decoding and capture**
 
-Use `json.Decoder` with `UseNumber`, decode once, then require EOF. Reserved objects are recognized only at contracted file/tree positions through `CandidateBuilder`; an ordinary object field named `$dawn` stays ordinary.
+Use `json.Decoder` with `UseNumber`, decode once, then require EOF. Reserved objects are recognized only at contracted file/tree positions through `CandidateBuilder`; an ordinary object field named `$tally` stays ordinary.
 
 Resolve static references to `ManifestOutput.Slot`. Resolve dynamic members by joining `Namespace` with a normalized relative member and verifying confinement. Pass the exact non-empty injected values from Task 3 into ordinary-output validation and every file/tree capture. Capture through `ImmutableValues`, collecting invocation-local values by resolved result path.
 
@@ -558,10 +558,10 @@ git commit -m "feat(script): capture one atomic candidate value"
 
 - [ ] **Step 1: Add a failing typed-file chain**
 
-Build test helpers with `go build`. Validator reads `DAWN_INPUT`, resolves a named PDF/text fixture through `DAWN_MANIFEST`, and writes a structured score. Report consumes that score and named files, writes `report.md` into its slot, and returns:
+Build test helpers with `go build`. Validator reads `TALLY_INPUT`, resolves a named PDF/text fixture through `TALLY_MANIFEST`, and writes a structured score. Report consumes that score and named files, writes `report.md` into its slot, and returns:
 
 ```json
-{"summary":"2 findings validated","report":{"$dawn":"output:/report"}}
+{"summary":"2 findings validated","report":{"$tally":"output:/report"}}
 ```
 
 Run both through real subprocesses. Assert each helper's `os.Getwd()` equals the manifest workspace, the second receives only committed immutable values, report content round-trips, effect key reaches each child, and neither stdout nor stderr becomes output. Interrupt a first attempt, wait for its group to die, then run a second attempt with the same `AttemptContext.EffectKey`; assert a new workspace path with byte-identical committed inputs and the same child-visible key.
@@ -633,7 +633,7 @@ git commit -m "test(script): prove the native workflow contract end to end"
 - [ ] **Step 1: Enumerate every legacy caller**
 
 ```bash
-rg -n 'proc\.Command|proc\.WaitDelay|github\.com/valbaudo/dawn/proc' --glob '*.go'
+rg -n 'proc\.Command|proc\.WaitDelay|github\.com/valbaudo/tally/proc' --glob '*.go'
 ```
 
 Expected before cutover: only pre-vNext Claude files and `proc` tests. Any additional caller must move to its proper vNext boundary; do not preserve `proc.Command` as a wrapper.
@@ -658,7 +658,7 @@ Pass literal adapter argv, adapter environment, context, runtime grace, and diag
 
 ```bash
 test ! -d proc
-if rg -n 'proc\.Command|proc\.WaitDelay|github\.com/valbaudo/dawn/proc' --glob '*.go'; then exit 1; fi
+if rg -n 'proc\.Command|proc\.WaitDelay|github\.com/valbaudo/tally/proc' --glob '*.go'; then exit 1; fi
 go test ./... -count=1
 go vet ./...
 ```
@@ -685,7 +685,7 @@ Then verify product constraints mechanically:
 
 ```bash
 if rg -n 'retry_count|retryable_exit|backoff|stdout_as|capture_path|working_directory|sandbox:|docker:' script nativeexec; then exit 1; fi
-if rg -n 'proc\.Command|proc\.WaitDelay|github\.com/valbaudo/dawn/proc' --glob '*.go'; then exit 1; fi
+if rg -n 'proc\.Command|proc\.WaitDelay|github\.com/valbaudo/tally/proc' --glob '*.go'; then exit 1; fi
 ```
 
 Expected: every command exits zero and both searches produce no matches.

@@ -1,18 +1,18 @@
-# Dawn and Prestige: workflow capability review
+# Tally and Prestige: workflow capability review
 
 **Date:** 2026-08-08
 
-**Scope:** Dawn at `de67a26`; Prestige pipeline in `/Users/vabbb/Downloads/prestige-adyen-magento2-export/pipeline`; AWF source in `/Users/vabbb/Documents/GitHub/AgentWorkflowFormat`
+**Scope:** Tally at `de67a26`; Prestige pipeline in `/Users/vabbb/Downloads/prestige-adyen-magento2-export/pipeline`; AWF source in `/Users/vabbb/Documents/GitHub/AgentWorkflowFormat`
 
 **Method:** source inspection, pipeline tracing, `go test ./...`, `go vet ./...`, and validation of the root Prestige workflow with the current AWF source. I did **not** execute Prestige: doing so would launch paid agents and mutate repositories and external services.
 
 ## Executive answer
 
-Dawn is not missing a bag of agent-specific features. It is missing a small workflow algebra around an unusually good existing nucleus.
+Tally is not missing a bag of agent-specific features. It is missing a small workflow algebra around an unusually good existing nucleus.
 
 That nucleus should stay: strict plans, typed references, content-addressed state, a sole durable-state writer, independent judges, fail-closed gates, and rerun-as-resume. The expensive design decision is to add composition **around** `Invocation → Backend → Result`, not to inflate that interface.
 
-To run Prestige—and to become a general native workflow runner—Dawn needs these capabilities:
+To run Prestige—and to become a general native workflow runner—Tally needs these capabilities:
 
 1. **Workflow contracts and real values:** top-level input/output contracts; JSON objects, arrays, numbers, and booleans; named file artifacts; immutable assets.
 2. **Native script steps:** deterministic host processes with structured input/output and captured files.
@@ -24,17 +24,17 @@ To run Prestige—and to become a general native workflow runner—Dawn needs th
 8. **Skill libraries:** content-addressed corpora and a router interface, with deterministic BM25 as the first built-in router.
 9. **Operational truth:** hierarchical node paths, durable map/gate decisions, concurrency pools, token/time accounting, and explicit environment-name allowlists.
 
-Prestige does **not** require Docker in Dawn. Docker, Podman, PDF tools, browsers, document converters, and similar programs are native process dependencies that a script or agent adapter may call. Dawn must stage inputs, capture outputs, cancel the process tree, and report the outcome; it should not own those tools.
+Prestige does **not** require Docker in Tally. Docker, Podman, PDF tools, browsers, document converters, and similar programs are native process dependencies that a script or agent adapter may call. Tally must stage inputs, capture outputs, cancel the process tree, and report the outcome; it should not own those tools.
 
 The product's one sentence should be:
 
-> **Dawn turns a typed workflow into accepted, resumable artifacts, regardless of whether a native agent or script produced them.**
+> **Tally turns a typed workflow into accepted, resumable artifacts, regardless of whether a native agent or script produced them.**
 
-## What Dawn already gets right
+## What Tally already gets right
 
-Dawn's current constraints are intentional, not accidental:
+Tally's current constraints are intentional, not accidental:
 
-- `dawn.Backend` is a deep two-method seam for one agent call. Its comments explicitly keep orchestration out of `Invocation` (`dawn.go:42-55, 106-114`).
+- `tally.Backend` is a deep two-method seam for one agent call. Its comments explicitly keep orchestration out of `Invocation` (`tally.go:42-55, 106-114`).
 - The runner is a strict static DAG, with dependencies carried by data references rather than a second `needs` graph (`plan/plan.go:30-40`).
 - State is committed content-first, pointer-second, so a completed journal entry cannot point at missing bytes (`plan/run.go:291-312`).
 - Rerunning is resuming; there is no special recovery path to rot (`plan/run.go:72-77`).
@@ -44,9 +44,9 @@ Dawn's current constraints are intentional, not accidental:
 
 These are the difficult invariants. The next version should generalize them, not replace them.
 
-## Where Dawn stands today
+## Where Tally stands today
 
-| Capability | Dawn today | Consequence for Prestige |
+| Capability | Tally today | Consequence for Prestige |
 |---|---|---|
 | Leaf execution | Agent invocation only | Cannot clone, route, merge, score, publish, or generate reports with deterministic scripts |
 | Agent adapters | `claude` and `claude-ws` in the CLI factory | Cannot express Claude Code/Droid/Codex roles and adapter-specific controls |
@@ -71,7 +71,7 @@ The root workflow imports five phase workflows and uses a `try/finally` envelope
 
 ### End-to-end chain
 
-| Phase | What it does | Semantics Dawn must supply |
+| Phase | What it does | Semantics Tally must supply |
 |---|---|---|
 | Root setup | Clone/update repo; emit typed reconnaissance | Native `run`, typed output, external-effect/cache policy |
 | Static analysis | Analyze architecture; index skills; plan 15–25 hunts; map up to 7 at once; tolerate partial failure; BM25-route 3 skills; prune to 12; reduce; deduplicate | Arrays/objects, map, stable item identity, concurrency, `min_success`, optional frontier pruning, reduce, skills/assets, agent adapter |
@@ -94,7 +94,7 @@ It emits 11 warnings, not errors:
 - 9 `AWF3002` warnings for agent output schemas that are captured or consumed indirectly rather than referenced as typed fields.
 - 2 `AWF3013` warnings in `validate.awf.yaml` for unquoted string substitutions into shell source, a CWE-78 risk.
 
-Those warnings matter to Dawn's design. General text templating is not a harmless convenience; it creates a second, injection-prone data path. Dawn should pass structured values to scripts through a JSON input file and pass large/untrusted content through staged artifacts.
+Those warnings matter to Tally's design. General text templating is not a harmless convenience; it creates a second, injection-prone data path. Tally should pass structured values to scripts through a JSON input file and pass large/untrusted content through staged artifacts.
 
 ## AWF answers to the explicit questions
 
@@ -102,7 +102,7 @@ Those warnings matter to Dawn's design. General text templating is not a harmles
 
 Yes. A top-level `skills` corpus points at a snapshotted directory asset and selects `router: bm25` (`man/awf-workflow.5.md:39-45, 140-154`). AWF's current router weights `SKILL.md` body tokens 4×, path tokens 2×, and nested text 1×; it uses `k1=1.2`, `b=0.75`, deterministic tie-breaking, and journals `skills.selected` before dispatch (`man/awf-workflow.5.md:896-932`).
 
-Dawn should copy the **separation**, not the incidental container staging:
+Tally should copy the **separation**, not the incidental container staging:
 
 - language: “this step wants skills from this corpus, queried by this typed value”;
 - library: BM25 implementation;
@@ -118,11 +118,11 @@ Two separate things are needed:
 1. **More adapters:** Claude Code, Factory Droid, Codex, direct HTTP/LLM, and test fakes. This is runtime work behind an existing good seam.
 2. **Reusable agent roles:** named, digest-pinned adapter configurations for repeated model, effort, tool, and system-prompt settings.
 
-The core must not learn every harness option. AWF's `with:` is opaque to the adapter (`man/awf-workflow.5.md:728-776`); Dawn should use the same information-hiding boundary. Keep `agent: claude/sonnet` for the simple case, and allow `agent: reviewer` to resolve a declared role when repetition earns the indirection.
+The core must not learn every harness option. AWF's `with:` is opaque to the adapter (`man/awf-workflow.5.md:728-776`); Tally should use the same information-hiding boundary. Keep `agent: claude/sonnet` for the simple case, and allow `agent: reviewer` to resolve a declared role when repetition earns the indirection.
 
 ### Input/output contracts, scripts, gates, and LLM judges?
 
-- **Contracts:** Dawn has per-step schemas internally, but the author-facing type system is string-only and there is no workflow contract. This is partial, not absent.
+- **Contracts:** Tally has per-step schemas internally, but the author-facing type system is string-only and there is no workflow contract. This is partial, not absent.
 - **Scripts:** absent and essential.
 - **Gates:** present and unusually sound, but narrow. The current independent LLM jury should remain as shorthand.
 - **LLM judges:** present. What is missing is a general evaluator subgraph, heterogeneous reviewers, and deterministic aggregation.
@@ -136,7 +136,7 @@ The language should grow to five ideas, not mirror every AWF key.
 
 A workflow and every executable leaf accept typed values plus named artifacts and return typed values plus named artifacts.
 
-- Use JSON Schema 2020-12 rather than inventing a Dawn type language.
+- Use JSON Schema 2020-12 rather than inventing a Tally type language.
 - Preserve today's `string` and enum syntax as shorthand compiled to JSON Schema.
 - Allow an external schema file to keep plans readable.
 - Make artifact kind/media explicit; remove the `workspace` field-name heuristic.
@@ -160,14 +160,14 @@ There are two leaf executors:
 - `agent:` invokes an agent backend.
 - `run:` invokes a native process.
 
-Both receive the same orchestration-owned task contract and produce the same result envelope. `dawn.Backend` should **not** become a script runner; add a sibling process-runner seam and adapt both into a workflow-level leaf dispatcher.
+Both receive the same orchestration-owned task contract and produce the same result envelope. `tally.Backend` should **not** become a script runner; add a sibling process-runner seam and adapt both into a workflow-level leaf dispatcher.
 
-For scripts, Dawn should provide stable files such as:
+For scripts, Tally should provide stable files such as:
 
-- `DAWN_INPUT` — path to canonical JSON containing typed inputs;
-- `DAWN_OUTPUT` — path where the process writes schema-validated JSON;
-- `DAWN_FILES` — directory containing named input artifacts and expected output locations;
-- `DAWN_IDEMPOTENCY_KEY` — stable key for a declared external effect.
+- `TALLY_INPUT` — path to canonical JSON containing typed inputs;
+- `TALLY_OUTPUT` — path where the process writes schema-validated JSON;
+- `TALLY_FILES` — directory containing named input artifacts and expected output locations;
+- `TALLY_IDEMPOTENCY_KEY` — stable key for a declared external effect.
 
 No agent-authored string is interpolated into shell source. The plan's `run:` is trusted code; runtime values are data.
 
@@ -178,7 +178,7 @@ No agent-authored string is interpolated into shell source. The plan's `run:` is
 - `map` fans out over a runtime array, with a stable per-item key, a concurrency bound, a success threshold, and optional `reduce`.
 - `try` scopes typed failure handling and `finally` cleanup.
 
-Do **not** add an authored `parallel` primitive initially. Dawn already launches independent nodes concurrently. Root Prestige's two parallel pairs become ordinary steps whose references express the join. One less construct, identical semantics.
+Do **not** add an authored `parallel` primitive initially. Tally already launches independent nodes concurrently. Root Prestige's two parallel pairs become ordinary steps whose references express the join. One less construct, identical semantics.
 
 A map item must not be addressed only by array index. Use an author-declared `key` such as `finding.id`, falling back to a canonical content hash. That prevents an inserted first item from invalidating or, worse, misaddressing every later cached result.
 
@@ -224,7 +224,7 @@ Policy is metadata on a leaf or scope, not another executor:
 - concurrency pools by adapter/resource class, separate from map fan-out width;
 - environment variable **names** in the definition, with values read at run time and never logged or hashed.
 
-## A Prestige-shaped Dawn plan
+## A Prestige-shaped Tally plan
 
 This is illustrative syntax, not a committed format. It shows how the five ideas keep the common path small.
 
@@ -233,11 +233,11 @@ inputs:
   schema: ./schemas/prestige-input.schema.json
 
 imports:
-  static: ./static.dawn.yaml
-  setup: ./setup.dawn.yaml
-  validate: ./validate.dawn.yaml
-  score: ./score.dawn.yaml
-  remediate: ./remediate.dawn.yaml
+  static: ./static.tally.yaml
+  setup: ./setup.tally.yaml
+  validate: ./validate.tally.yaml
+  score: ./score.tally.yaml
+  remediate: ./remediate.tally.yaml
 
 env: [CLAUDE_CODE_OAUTH_TOKEN, FACTORY_API_KEY, GITHUB_TOKEN]
 
@@ -301,7 +301,7 @@ steps:
 
 `static` and `setup` run concurrently because neither consumes the other. So do `scoring` and `remediation`. The language describes data; the scheduler discovers parallelism.
 
-## Architecture that keeps Dawn deep
+## Architecture that keeps Tally deep
 
 ```text
 YAML source
@@ -316,7 +316,7 @@ Canonical workflow IR
 Interpreter ── sole writer of durable state
    ├── coordinator nodes: call / when / map / gate / try
    └── leaf dispatcher
-         ├── agent adapter ── existing dawn.Backend
+         ├── agent adapter ── existing tally.Backend
          └── process runner ── native command + process-tree cancellation
    │
    ▼
@@ -325,7 +325,7 @@ Value + artifact store ── canonical JSON and content-addressed files/trees
 
 ### Boundaries to preserve
 
-**Keep `dawn.Backend` small.** Adapter configuration is validated while constructing the backend; a single invocation remains unaware of node paths, attempts, calls, and journals.
+**Keep `tally.Backend` small.** Adapter configuration is validated while constructing the backend; a single invocation remains unaware of node paths, attempts, calls, and journals.
 
 **Create one canonical IR.** Imports should compile into hierarchical addresses and execute in the same interpreter. Do not build a second “sub-workflow engine.” Child internals remain private at the source/contract boundary even though the runtime sees one graph.
 
@@ -341,7 +341,7 @@ Value + artifact store ── canonical JSON and content-addressed files/trees
 
 The cut list is part of the design:
 
-- **No Docker/DinD subsystem.** Scripts can call Docker or Podman. Dawn owns process semantics, not container lifecycle syntax.
+- **No Docker/DinD subsystem.** Scripts can call Docker or Podman. Tally owns process semantics, not container lifecycle syntax.
 - **No PDF/image/document step types.** They are named artifacts processed by scripts or capable agents.
 - **No general templating language.** Structured inputs and artifacts cross boundaries; bounded expressions choose control flow.
 - **No arbitrary expression evaluator.** References, literals, comparisons, and boolean operators are enough.
@@ -357,7 +357,7 @@ The cut list is part of the design:
 
 1. Add canonical JSON values and first-class named artifacts; migrate `workspace` to a directory-tree artifact while keeping old plans readable.
 2. Add workflow input/output contracts and external schema files.
-3. Add the native process runner with `DAWN_INPUT`, `DAWN_OUTPUT`, and artifact staging/capture.
+3. Add the native process runner with `TALLY_INPUT`, `TALLY_OUTPUT`, and artifact staging/capture.
 4. Add adapter registry, capabilities, opaque config, named roles, and environment-name allowlists.
 
 **Proof:** a native workflow clones a repo, runs a script, asks one agent to analyze it, validates the typed result, and emits a named Markdown/PDF artifact; rerun reuses only correctly cacheable work.
@@ -367,7 +367,7 @@ The cut list is part of the design:
 1. Compile local imports and typed calls into hierarchical IR.
 2. Add bounded `when` conditions.
 3. Add keyed `map`, concurrency, `min_success`, typed aggregate output, and a script/quorum reducer.
-4. Infer static concurrency exactly as Dawn does today.
+4. Infer static concurrency exactly as Tally does today.
 
 **Proof:** the Prestige static phase plans a runtime task array, routes and runs hunts concurrently, reduces them, and resumes per item without index churn.
 
@@ -388,7 +388,7 @@ The cut list is part of the design:
 4. Add resource-class pools and optional persistent-session capability after a real second workflow demands it.
 5. Add optional durable prune/frontier policy for Prestige cost parity.
 
-**Proof:** the full Prestige definition validates and runs natively with no Dawn container management, and a killed run resumes without repeating committed agent work or changing a previous skill/frontier decision.
+**Proof:** the full Prestige definition validates and runs natively with no Tally container management, and a killed run resumes without repeating committed agent work or changing a previous skill/frontier decision.
 
 ## Required tests before claiming parity
 
@@ -400,7 +400,7 @@ The cut list is part of the design:
 - Gate tests proving evaluator freshness, feedback isolation, mechanical-failure propagation, and accepted-attempt-only commit.
 - Crash points before blob write, between blob and journal pointer, during a map, during jury fan-out, and after an external effect but before receipt commit.
 - Secret values absent from definition digests, logs, traces, and outputs.
-- Compatibility fixtures for existing Dawn plans and `dawn show`.
+- Compatibility fixtures for existing Tally plans and `tally show`.
 - A reduced local Prestige fixture using fake agents and real scripts; full paid/invasive Prestige remains an explicit integration run.
 
 ## Design diagnostics
@@ -412,20 +412,20 @@ The cut list is part of the design:
 | Each module can be described in one sentence | Pass | Packages have clear purposes in README and package comments |
 | Interfaces are simpler than implementations | Pass | `Backend` and `Blobs` are small, deep seams |
 | Implementation can change without caller edits | Partial | Backend/store pass; field-name-based workspace and string-only values leak plan assumptions into binder, preflight, schema, and CLI. Fix with first-class value/artifact contracts |
-| Interface comments describe abstraction, not mechanics | Pass | `dawn.go` documents responsibilities and exclusions unusually well |
+| Interface comments describe abstraction, not mechanics | Pass | `tally.go` documents responsibilities and exclusions unusually well |
 | Design discussion is visibly part of review | Not evidenced | No architecture decision record was found. Record the canonical IR, artifact model, dynamic addressing, and effect semantics before implementation |
 | Each module hides an important decision | Partial | Store/gate do; `plan` currently spans syntax, validation, binding, scheduling, caching, and gate orchestration. Split compiler/IR/interpreter without creating thin temporal wrappers |
 | A newcomer can understand boundaries without implementation | Pass | README/SPEC are excellent, but only for the intentionally narrow product |
 | 10–20% strategic design investment is evidenced | Not evidenced | Use the four milestone proofs and an explicit complexity budget before feature work |
 
-The score is not a criticism of code quality. Dawn's current narrow design is coherent. It measures readiness for the broader promise: arbitrary native agent workflows.
+The score is not a criticism of code quality. Tally's current narrow design is coherent. It measures readiness for the broader promise: arbitrary native agent workflows.
 
-# Design Review: Dawn as a general agent-workflow runner
+# Design Review: Tally as a general agent-workflow runner
 **Verdict:** NOT DONE (score 6/10)
 
 **The One Thing:** Turn a typed workflow into accepted, resumable artifacts, independent of the native agent or script that produced them.
 
-**Keeps its promise?** Dawn keeps its current, narrow static-agent-DAG promise. It cannot yet keep the broader promise because Prestige needs scripts, contracts, calls, runtime-sized fan-out, general evaluation blocks, effects, and artifacts.
+**Keeps its promise?** Tally keeps its current, narrow static-agent-DAG promise. It cannot yet keep the broader promise because Prestige needs scripts, contracts, calls, runtime-sized fan-out, general evaluation blocks, effects, and artifacts.
 
 **Cut list:** Docker/DinD orchestration; special PDF/image node types; unrestricted templating; arbitrary expressions; an explicit static-parallel construct; a separate LLM-judge engine; remote imports; global mutable workspace semantics.
 
@@ -435,17 +435,17 @@ The score is not a criticism of code quality. Dawn's current narrow design is co
 
 ## Bottom line
 
-Dawn should not become “AWF without Docker.” It should become the smaller language that Prestige proves is necessary:
+Tally should not become “AWF without Docker.” It should become the smaller language that Prestige proves is necessary:
 
 > **typed contracts + native leaves + composition + acceptance + policy**
 
 Scripts make the universe of work open-ended. Artifacts make files first-class. Calls and maps make large workflows composable. Gates make stochastic work trustworthy. The journal makes all of it resumable. Skills and BM25 are then a clean library layered on top—not a special case in the interpreter.
 
-That is enough to run Prestige and broad enough for repository work, data/file processing, browser automation, Docker-driving scripts, PDF generation, document analysis, releases, research, and future agent harnesses without teaching Dawn what any of those domains are.
+That is enough to run Prestige and broad enough for repository work, data/file processing, browser automation, Docker-driving scripts, PDF generation, document analysis, releases, research, and future agent harnesses without teaching Tally what any of those domains are.
 
 ## Source map
 
-- Dawn core: `dawn.go:1-114`, `plan/plan.go:1-168`, `plan/run.go:18-120, 252-365, 490-610`, `cmd/dawn/main.go:265-281`, `SPEC.md:1-110, 182-292, 624-687`.
+- Tally core: `tally.go:1-114`, `plan/plan.go:1-168`, `plan/run.go:18-120, 252-365, 490-610`, `cmd/tally/main.go:265-281`, `SPEC.md:1-110, 182-292, 624-687`.
 - AWF format: `/Users/vabbb/Documents/GitHub/AgentWorkflowFormat/man/awf-workflow.5.md:26-177, 646-985, 1164-1670, 1852-2056, 2274-2345`.
 - Prestige root: `/Users/vabbb/Downloads/prestige-adyen-magento2-export/pipeline/prestige.yaml:1-454`.
 - Prestige phases: `static-analysis.awf.yaml:1-501`, `dynamic-setup.awf.yaml:1-509`, `validate.awf.yaml:1-575`, `score.awf.yaml:1-298`, `remediate.awf.yaml:1-640`.

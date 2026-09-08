@@ -13,7 +13,7 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 
 general_settings:
-  database_url: "postgresql://dawn:dawn@127.0.0.1:55432/litellm"
+  database_url: "postgresql://tally:tally@127.0.0.1:55432/litellm"
 
 litellm_settings:
   drop_params: true

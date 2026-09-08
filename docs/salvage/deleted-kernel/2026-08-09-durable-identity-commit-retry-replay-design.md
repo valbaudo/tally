@@ -1,4 +1,4 @@
-# Dawn vNext Durable Identity, Commit, Recovery, and Replay
+# Tally vNext Durable Identity, Commit, Recovery, and Replay
 
 **Issue:** GitHub #8, “Define durable identity, commit, retry, and replay semantics”
 
@@ -10,22 +10,22 @@
 
 **Status:** Design approved on 2026-08-09
 
-**Goal:** Let Dawn resume, derive, and replay arbitrary structured agent workflows without repeating committed work, confusing a run with a global cache, silently changing prior decisions, or exposing journal, identity, provider-recovery, and persistence machinery as workflow-language knobs.
+**Goal:** Let Tally resume, derive, and replay arbitrary structured agent workflows without repeating committed work, confusing a run with a global cache, silently changing prior decisions, or exposing journal, identity, provider-recovery, and persistence machinery as workflow-language knobs.
 
 ## Product Principle
 
 Durability should make workflows more capable without making workflow authors think about durability.
 
-Dawn therefore exposes four execution intents:
+Tally therefore exposes four execution intents:
 
 - `fresh`: execute a new run without importing prior results;
 - `continue`: continue one captured run from its durable boundary;
 - `derive`: create a new run from an earlier run and reuse compatible committed work;
 - `replay`: reconstruct recorded history without executing work.
 
-Cancellation remains an operator action on a run. Everything else in this specification—runtime addresses, fingerprints, attempts, effect keys, commit markers, journal facts, provider handles, lineage, and reuse matching—is runtime machinery derived automatically by Dawn.
+Cancellation remains an operator action on a run. Everything else in this specification—runtime addresses, fingerprints, attempts, effect keys, commit markers, journal facts, provider handles, lineage, and reuse matching—is runtime machinery derived automatically by Tally.
 
-There is no generic retry system. In Dawn, **retry** means only baked-in continuation of the same provider session after an adapter positively recognizes a transient upstream provider failure.
+There is no generic retry system. In Tally, **retry** means only baked-in continuation of the same provider session after an adapter positively recognizes a transient upstream provider failure.
 
 ## Decisions
 
@@ -55,11 +55,11 @@ There is no generic retry system. In Dawn, **retry** means only baked-in continu
 
 Each run has immutable journaled history and commits. Operator intent distinguishes continuation, derivation, fresh execution, and replay. Runtime address identifies an occurrence; a separate work fingerprint identifies reusable work. One deep module hides addressing, journaling, commit, recovery, lineage, and matching behind a small semantic interface.
 
-This design gives Dawn exact continuation and broad reuse while keeping workflow YAML free of persistence concerns.
+This design gives Tally exact continuation and broad reuse while keeping workflow YAML free of persistence concerns.
 
 ### 2. Global content cache
 
-The runtime could hash a node and its inputs and reuse matching entries everywhere. This resembles current Dawn's “rerun is resume” model. It is initially small but conflates same-run recovery with cross-run reuse, cannot explain lineage cleanly, struggles with intentional duplicates and dynamic instances, and gives cancellation and replay no precise history.
+The runtime could hash a node and its inputs and reuse matching entries everywhere. This resembles current Tally's “rerun is resume” model. It is initially small but conflates same-run recovery with cross-run reuse, cannot explain lineage cleanly, struggles with intentional duplicates and dynamic instances, and gives cancellation and replay no precise history.
 
 ### 3. Mutable run plus manual invalidation
 
@@ -67,7 +67,7 @@ The runtime could keep one run record, allow its definition to change, and requi
 
 ## Architecture and Ownership
 
-Dawn adds one internal **run ledger**. Its one-sentence responsibility is:
+Tally adds one internal **run ledger**. Its one-sentence responsibility is:
 
 > Preserve and interpret the durable semantic history of one execution lineage.
 
@@ -138,7 +138,7 @@ Every dynamic discovery fact is durable before its child is launched. Exact byte
 
 A work fingerprint identifies the effective request whose prior result may be reusable. It is independent of run ID and runtime address.
 
-For a leaf it covers all declared and resolved behavior Dawn can know, including:
+For a leaf it covers all declared and resolved behavior Tally can know, including:
 
 - canonical leaf kind and operation;
 - prompt, instruction, or script content;
@@ -147,7 +147,7 @@ For a leaf it covers all declared and resolved behavior Dawn can know, including
 - selected role, skills, tools, adapter, backend, model, and behavior-affecting configuration; and
 - declared execution semantics that can change the produced result.
 
-For a structured scope it covers the canonical scope semantics, its effective child graph, and exact inputs. An unchanged scope may therefore be imported as a unit. When the scope changes, Dawn reevaluates the structure and may still import compatible descendants.
+For a structured scope it covers the canonical scope semantics, its effective child graph, and exact inputs. An unchanged scope may therefore be imported as a unit. When the scope changes, Tally reevaluates the structure and may still import compatible descendants.
 
 The fingerprint excludes:
 
@@ -160,13 +160,13 @@ The fingerprint excludes:
 
 The output contract is checked separately. A prior result is reusable only when it validates against the current contract. This permits compatible contract edits instead of invalidating work merely because contract text changed.
 
-Secret bytes never enter a fingerprint, journal, trace, or committed value, as required by GitHub #6. Credential rotation is not treated as a semantic input change by default. A semantic data choice encoded only in a secret is therefore outside Dawn's compatibility knowledge; an ordinary declared version or selector value can make that distinction visible when desired.
+Secret bytes never enter a fingerprint, journal, trace, or committed value, as required by GitHub #6. Credential rotation is not treated as a semantic input change by default. A semantic data choice encoded only in a secret is therefore outside Tally's compatibility knowledge; an ordinary declared version or selector value can make that distinction visible when desired.
 
-A fingerprint describes declared behavior, not the entire mutable outside world. A provider can change a model behind the same model name, a network service can change, and a script can read undeclared external state. Dawn records what it can know and never presents compatibility as proof of referential transparency. Use `fresh` when current external state or new sampling is the purpose.
+A fingerprint describes declared behavior, not the entire mutable outside world. A provider can change a model behind the same model name, a network service can change, and a script can read undeclared external state. Tally records what it can know and never presents compatibility as proof of referential transparency. Use `fresh` when current external state or new sampling is the purpose.
 
 ### Attempt identity
 
-An attempt identity is the run ID, instance address, and monotonically increasing invocation ordinal. A new ordinal is created only when Dawn starts another logical leaf execution: another native script process, raw model request, or provider session. Adapter transport subprocesses used to poll or continue an existing provider session do not create attempts.
+An attempt identity is the run ID, instance address, and monotonically increasing invocation ordinal. A new ordinal is created only when Tally starts another logical leaf execution: another native script process, raw model request, or provider session. Adapter transport subprocesses used to poll or continue an existing provider session do not create attempts.
 
 - Polling or retrieving an already-submitted provider operation stays in the same attempt.
 - Same-session continuation after a recognized transient upstream failure stays in the same attempt.
@@ -177,7 +177,7 @@ An attempt start without a later terminal fact is reconstructed as interrupted. 
 
 ### Logical effect key
 
-Before the first executable attempt begins, Dawn durably assigns the logical instance an effect key. The key is:
+Before the first executable attempt begins, Tally durably assigns the logical instance an effect key. The key is:
 
 - stable across attempts, process restart, and `continue` for that instance;
 - stable through same-session transient provider continuation;
@@ -187,7 +187,7 @@ Before the first executable attempt begins, Dawn durably assigns the logical ins
 
 The executor context receives the key automatically. Provider adapters use it when an upstream interface accepts an idempotency key. Native scripts receive it through one fixed runtime channel defined by the script-execution ticket. Agent tools may receive it when their interface supports idempotent operations. Workflow authors do not generate, route, or configure it.
 
-An external system may ignore the key. Dawn therefore promises at-least-once execution around uncertain interruption, never exactly-once effects or a transaction spanning Dawn and another system.
+An external system may ignore the key. Tally therefore promises at-least-once execution around uncertain interruption, never exactly-once effects or a transaction spanning Tally and another system.
 
 ### Commit
 
@@ -245,7 +245,7 @@ The journal contains only facts that can affect recovery, reuse, replay, or expl
 
 Ordinary logs, model token streams, stdout/stderr chunks, metrics, traces, and progress notifications are observable diagnostics, not semantic journal facts.
 
-A successful attempt becomes durable through the node commit itself; Dawn does not first write a separate “attempt succeeded” fact that could survive without a committed result. Replay is read-only and likewise appends no semantic fact to the run it reads.
+A successful attempt becomes durable through the node commit itself; Tally does not first write a separate “attempt succeeded” fact that could survive without a committed result. Replay is read-only and likewise appends no semantic fact to the run it reads.
 
 The journal is append-only. A conforming persistence implementation must provide these behavioral guarantees:
 
@@ -293,7 +293,7 @@ The logical instance and effect key remain stable. A failed or cancelled run can
 
 ### `derive` — rerun with reuse
 
-`derive` creates a child run from any prior run while accepting arbitrary workflow and input changes. Dawn does not reject those changes as drift. The parent remains immutable and independently replayable.
+`derive` creates a child run from any prior run while accepting arbitrary workflow and input changes. Tally does not reject those changes as drift. The parent remains immutable and independently replayable.
 
 The derived run evaluates the new workflow and imports reachable compatible commits as follows:
 
@@ -304,11 +304,11 @@ The derived run evaluates the new workflow and imports reachable compatible comm
 5. Write a local import commit that references the source commit and values without duplicating their bytes.
 6. Execute every unmatched reachable instance normally.
 
-One source commit can satisfy at most one instance in a derived run. If the new graph has more compatible duplicate instances than the parent, Dawn imports the available commits and executes only the additional instances. If it has fewer, unused parent commits remain historical parent data.
+One source commit can satisfy at most one instance in a derived run. If the new graph has more compatible duplicate instances than the parent, Tally imports the available commits and executes only the additional instances. If it has fewer, unused parent commits remain historical parent data.
 
-All successful leaf kinds are eligible, including `agent`, `llm`, and `script`. Structured-scope commits are eligible when the entire scope remains compatible. When a scope changes, Dawn reevaluates its control flow and can still reuse compatible descendant commits.
+All successful leaf kinds are eligible, including `agent`, `llm`, and `script`. Structured-scope commits are eligible when the entire scope remains compatible. When a scope changes, Tally reevaluates its control flow and can still reuse compatible descendant commits.
 
-Derived branch selections, map expansions, loop progress, and sub-workflow structure come from the new definition and inputs. Dawn never forces an old control decision into an incompatible new structure merely because both runs share lineage.
+Derived branch selections, map expansions, loop progress, and sub-workflow structure come from the new definition and inputs. Tally never forces an old control decision into an incompatible new structure merely because both runs share lineage.
 
 ### `replay`
 
@@ -327,7 +327,7 @@ Replay never invokes an adapter, model, agent, script, tool, or external service
 
 ## Retry Means Same-Session Upstream Recovery Only
 
-Dawn has no generic retry policy and no default attempt count.
+Tally has no generic retry policy and no default attempt count.
 
 The runtime calls an operation a retry only when all of these are true:
 
@@ -342,9 +342,9 @@ The adapter then:
 3. keeps the existing attempt identity and effect key; and
 4. repeats only this recovery operation until the session succeeds, returns a definitive non-transient failure, or the run is cancelled.
 
-There is no workflow `attempts` field, retry-count default, backoff configuration, retry-condition expression, or maximum imposed by Dawn. Provider-specific classification and continuation stay inside the adapter and are tested by adapter conformance. Generic engine code does not parse arbitrary error strings or know Claude/Codex command syntax.
+There is no workflow `attempts` field, retry-count default, backoff configuration, retry-condition expression, or maximum imposed by Tally. Provider-specific classification and continuation stay inside the adapter and are tested by adapter conformance. Generic engine code does not parse arbitrary error strings or know Claude/Codex command syntax.
 
-If a resumable handle was never obtained, this retry is impossible. Dawn reports the upstream failure rather than secretly starting another session.
+If a resumable handle was never obtained, this retry is impossible. Tally reports the upstream failure rather than secretly starting another session.
 
 The following are explicitly not retries:
 
@@ -364,7 +364,7 @@ Feedback and strategy changes are ordinary workflow control flow. Process and op
 
 Cancellation records intent and stops execution according to GitHub #7; it does not permanently poison a run.
 
-When cancellation is requested, Dawn durably records it before propagating the request. It stops new descendants, settles active work, runs applicable `finally` scopes, and records the resulting normalized outcome.
+When cancellation is requested, Tally durably records it before propagating the request. It stops new descendants, settles active work, runs applicable `finally` scopes, and records the resulting normalized outcome.
 
 If the user later chooses `continue`:
 
@@ -382,13 +382,13 @@ The race between completion, failure, rejection, and cancellation is resolved by
 
 Run history is immutable; user capability is not.
 
-At run creation, Dawn snapshots the canonical workflow, root structured inputs, and every supplied file or tree. Later host edits cannot mutate the run's meaning.
+At run creation, Tally snapshots the canonical workflow, root structured inputs, and every supplied file or tree. Later host edits cannot mutate the run's meaning.
 
 - `continue` faithfully uses that captured material.
 - `derive` accepts current edited material and reuses compatible commits.
 - `fresh` accepts current edited material and imports nothing.
 
-Dawn does not reject an edited workflow as drift. The operation chosen by the user states whether they want faithful continuation, evolution with reuse, or a completely new execution.
+Tally does not reject an edited workflow as drift. The operation chosen by the user states whether they want faithful continuation, evolution with reuse, or a completely new execution.
 
 Resolved adapter and backend behavior is recorded as execution reaches each node rather than pretending every external detail can be known at initial admission. The adapter-capability ticket defines the exact behavior signature supplied to the run ledger.
 
@@ -403,13 +403,13 @@ This specification preserves the GitHub #6 boundary:
 - while the same provider session remains recoverable, its private remote state may remain part of that attempt;
 - when that session is not recoverable, the node begins with a fresh private workspace from committed inputs;
 - leftover local directories, provider file IDs, sessions, and remote containers are never evidence of completion; and
-- Dawn adds no generic private-workspace checkpoint, diff, merge, or restoration system.
+- Tally adds no generic private-workspace checkpoint, diff, merge, or restoration system.
 
 Anything that must cross a node or survive independently of a live recoverable attempt must return through declared outputs or explicit full-workspace publication and commit.
 
 ## Integrity and Retention
 
-A commit is Dawn's evidence that work completed. Reconstruction verifies that every referenced value exists and matches its recorded digest.
+A commit is Tally's evidence that work completed. Reconstruction verifies that every referenced value exists and matches its recorded digest.
 
 - Corrupt or missing committed content is an integrity failure, not an ordinary node failure.
 - `continue` does not silently replace a corrupt commit by re-executing its node.
@@ -546,7 +546,7 @@ Tests verify that:
 
 A representative Prestige workflow must demonstrate:
 
-- long multi-agent execution continuing after repeated Dawn process interruption;
+- long multi-agent execution continuing after repeated Tally process interruption;
 - committed PDF, image, report, and source-tree values surviving executor loss;
 - transient Claude/Codex upstream errors continuing the same session;
 - a changed final-report step using `derive` to reuse expensive upstream agent work;
@@ -555,7 +555,7 @@ A representative Prestige workflow must demonstrate:
 - deterministic reconstruction after concurrent branches; and
 - complete replay while every executable adapter is disabled.
 
-No test preserves legacy Dawn persistence behavior.
+No test preserves legacy Tally persistence behavior.
 
 ## Language and Runtime Surface
 
@@ -640,11 +640,11 @@ The design is complete when a Prestige-class structured workflow can:
 
 This design was checked against:
 
-- Dawn's current content-key plan identity, journal, run, and store implementation;
-- Dawn vNext semantic, value/workspace, and structured-control-flow specifications;
+- Tally's current content-key plan identity, journal, run, and store implementation;
+- Tally vNext semantic, value/workspace, and structured-control-flow specifications;
 - AWF's node-key, commit, run-state, definition-snapshot, rerun, retry-loop, and conformance code;
 - Prestige's watchdog, continuation, validation, and multi-agent retry behavior;
-- `docs/research/dawn-adapter-capability-contract.md`; and
-- `docs/research/dawn-native-workspace-isolation.md`.
+- `docs/research/tally-adapter-capability-contract.md`; and
+- `docs/research/tally-native-workspace-isolation.md`.
 
-AWF demonstrates why node-boundary commits, definition capture, and stable dynamic identities matter. It also demonstrates the complexity cost of path-keyed mutable state and manual invalidation. Prestige demonstrates that expensive agent work must survive orchestration-process failure and that provider overload recovery must stay with the same session. Current Dawn demonstrates useful content-addressed values but conflates run continuation with cross-run cache reuse. The chosen design keeps the proven capabilities while separating their meanings behind one deeper module.
+AWF demonstrates why node-boundary commits, definition capture, and stable dynamic identities matter. It also demonstrates the complexity cost of path-keyed mutable state and manual invalidation. Prestige demonstrates that expensive agent work must survive orchestration-process failure and that provider overload recovery must stay with the same session. Current Tally demonstrates useful content-addressed values but conflates run continuation with cross-run cache reuse. The chosen design keeps the proven capabilities while separating their meanings behind one deeper module.

@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 import (
 	"os"
@@ -109,7 +109,7 @@ func TestReportRendersLiveGateHostsAndCaveat(t *testing.T) {
 	for _, want := range []string{
 		"live gate",
 		"reachable, not reached",
-		"dawn observes no traffic",
+		"tally observes no traffic",
 		"target.example.com, 10.0.0.5",
 		"was exploitable at that moment",
 	} {
@@ -120,7 +120,7 @@ func TestReportRendersLiveGateHostsAndCaveat(t *testing.T) {
 }
 
 // A receipt carrying a model renders it; one carrying none renders
-// "unpinned" — a claim dawn is entitled to make ("I set nothing"), not
+// "unpinned" — a claim tally is entitled to make ("I set nothing"), not
 // drawCell's "unknown" ("nothing was reported to me").
 //
 // The unpinned side is a bare Agent rather than a shipped profile on purpose.

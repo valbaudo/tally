@@ -31,7 +31,7 @@ SRC = pathlib.Path("/gate/src")
 # every load() would return None and the gate would REJECT every finding --
 # a fabricated rejection of an agent nobody checked, which is the one thing
 # the gate contract forbids. Dying here writes no reward.json at all, which
-# dawn reads as infra_error.
+# tally reads as infra_error.
 assert len(list(SRC.glob("*.py"))) >= 5, f"the gate's own copy of the target is missing from {SRC}"
 
 

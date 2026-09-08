@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = ["/app/outputs"]
 
 [task]
-name = "dawn/cybergym-decoy-both"
+name = "tally/cybergym-decoy-both"
 version = "1.0.0"
 description = "Decoy: solution emits a PoV that crashes BOTH builds -- gate must reject"
 keywords = []
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-cybergym-gate@sha256:6195d3ff2c3f2a78c29a7bcd6fe0b0f1575aba4a06f13cd845ee5e1f88e98582"
+docker_image = "tally-cybergym-gate@sha256:6195d3ff2c3f2a78c29a7bcd6fe0b0f1575aba4a06f13cd845ee5e1f88e98582"
 network_mode = "no-network"
 
 [verifier.env]

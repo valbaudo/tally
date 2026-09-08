@@ -1,6 +1,6 @@
 # Why the agent's `reward.json` does not reach a separate verifier — and when it does
 
-Ticket: dawn research #33. Harbor 0.22.0, installed at
+Ticket: tally research #33. Harbor 0.22.0, installed at
 `/Users/vabbb/.local/share/uv/tools/harbor/lib/python3.14/site-packages/harbor/` (`$H` below).
 Every source line and every command output here was re-run and re-read during adjudication.
 
@@ -16,7 +16,7 @@ In shared mode an agent that writes `/logs/verifier/reward.json` sets the trial'
 `Verifier.verify()` prefers `reward.json` over the verifier's own `reward.txt`. In separate mode the
 same agent write vanishes: the verifier sees nothing, and the host trial dir ends holding only
 `reward.txt`. The host path is identical in both modes, so something destroys the file between the
-two phases. The question for dawn was whether that something is load-bearing.
+two phases. The question for tally was whether that something is load-bearing.
 
 ## 2. The source mechanism
 
@@ -105,7 +105,7 @@ about the ordering.
 ## 3. The experiments
 
 Five Harbor trials, `oracle` agent, zero LLM spend. Job dirs under
-`/private/tmp/claude-501/-Users-vabbb-Documents-GitHub-dawn/81887e3f-f7b1-4d77-aed5-c62deed3707c/scratchpad/provision/jobs/`.
+`/private/tmp/claude-501/-Users-vabbb-Documents-GitHub-tally/81887e3f-f7b1-4d77-aed5-c62deed3707c/scratchpad/provision/jobs/`.
 All five trial-level `result.json` files were re-read during adjudication:
 
 | trial | mode | task.toml `artifacts` | verifier writes | result |
@@ -247,16 +247,16 @@ Attempts to refute "separate mode is safe":
   reward filenames from log filters — is never reached here. Other providers untested.
 - Multi-step separate-mode trials. Only single-step trials were run.
 
-## 6. Consequence for dawn
+## 6. Consequence for tally
 
-dawn's own vocabulary (`CONTEXT.md`) already commits the gate to "a separate pinned no-network image
+tally's own vocabulary (`CONTEXT.md`) already commits the gate to "a separate pinned no-network image
 after the agent's container is gone". That is necessary and not sufficient. Two lines of policy,
-both enforced where dawn already writes the task definition — no validation framework, no new
+both enforced where tally already writes the task definition — no validation framework, no new
 config knobs:
 
-1. **dawn emits the `artifacts` list itself, and it never contains a path under `/logs/verifier`.**
+1. **tally emits the `artifacts` list itself, and it never contains a path under `/logs/verifier`.**
    Protocol authors collect debug output from `/logs/artifacts`, which is injected implicitly
-   anyway. This is a constant in dawn's task.toml writer, not an option.
+   anyway. This is a constant in tally's task.toml writer, not an option.
 2. **Every gate image writes `reward.json` unconditionally, as its last act, on every code path** —
    never `reward.txt`, never `if [ ! -f ... ]`. Because the restore happens *before* the tests run
    (`trial.py:704` → `706` → `verify()`), a gate that always writes the highest-precedence file
@@ -264,9 +264,9 @@ config knobs:
    case where the gate crashes or times out before writing.
 
 Corollary that costs nothing: a gate that produced no reward file raises `RewardFileNotFoundError`
-(T2, verified) — dawn maps that to `infra_error`/`unverified`, never to a score. dawn already treats
+(T2, verified) — tally maps that to `infra_error`/`unverified`, never to a score. tally already treats
 the numeric score as a metric and the State as the verdict; keep it that way.
 
-What dawn must *not* do: rely on separate mode alone, or on "the agent can't reach the verifier
+What tally must *not* do: rely on separate mode alone, or on "the agent can't reach the verifier
 directory". It can, through `/logs/artifacts`, whenever the artifact list points anywhere near
 `/logs/verifier`.

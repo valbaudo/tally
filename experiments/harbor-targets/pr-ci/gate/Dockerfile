@@ -16,8 +16,8 @@ COPY calc.py test_calc.py ci.sh check.py /gate/repo/
 RUN chmod +x /gate/repo/ci.sh \
  && cd /gate/repo \
  && git init -q -b main \
- && git config user.email toy@dawn.local \
- && git config user.name  "dawn toy" \
+ && git config user.email toy@tally.local \
+ && git config user.name  "tally toy" \
  && git add -A \
  # Wall clock in the commit hash.
  && GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \

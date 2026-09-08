@@ -95,7 +95,7 @@ def main():
         except Exception:
             continue
     if not entries:
-        # dawn wiring, not the agent's doing: there is nothing to check against,
+        # tally wiring, not the agent's doing: there is nothing to check against,
         # and a gate that cannot check must not vote.
         sys.exit("no verdict: no hunting queue was mounted for this stage")
 

@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = ["/app/outputs"]
 
 [task]
-name = "dawn/vdh"
+name = "tally/vdh"
 version = "1.0.0"
 description = "Toy SQL-injection hunt; gate is a citation/format check, not a correctness oracle"
 keywords = []
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756"
+docker_image = "tally-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756"
 network_mode = "no-network"
 
 [verifier.env]

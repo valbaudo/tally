@@ -25,7 +25,7 @@ for name in $(grep -rhoE '"[a-z0-9-]+@sha256:[0-9a-f]{64}"' protocols/ |
 	cut -d'"' -f2 | cut -d@ -f1 | sort -u); do
 	# Select the RepoDigest for THIS name, never index 0: an image carrying
 	# several tags lists one entry per tag, and index 0 picked a different
-	# name with the same manifest — dawn-cybergym-env resolved to cc-cg-env,
+	# name with the same manifest — tally-cybergym-env resolved to cc-cg-env,
 	# silently rewriting the pin to an older experiment's name.
 	pin=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
 		"$name" | grep "^$name@sha256:")

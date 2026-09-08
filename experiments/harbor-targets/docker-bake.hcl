@@ -15,7 +15,7 @@ target "reproducible" {
   # COPY/RUN layers otherwise carry build-time directory mtimes. OrbStack's
   # containerd exporter refuses rewrite-timestamp together with its default
   # unpack, so the image is unpacked on first run instead; it runs, resolves
-  # as name@sha256, and reports the same Size dawn's fan sizing reads.
+  # as name@sha256, and reports the same Size tally's fan sizing reads.
   output = ["type=image,rewrite-timestamp=true,unpack=false"]
 }
 
@@ -28,13 +28,13 @@ group "default" {
 target "pr-ci-env" {
   inherits = ["reproducible"]
   context  = "pr-ci/environment"
-  tags     = ["dawn-pr-ci-env"]
+  tags     = ["tally-pr-ci-env"]
 }
 
 target "pr-ci-gate" {
   inherits = ["reproducible"]
   context  = "pr-ci/gate"
-  tags     = ["dawn-pr-ci-gate"]
+  tags     = ["tally-pr-ci-gate"]
 }
 
 group "pr-ci" {
@@ -44,13 +44,13 @@ group "pr-ci" {
 target "cybergym-env" {
   inherits = ["reproducible"]
   context  = "cybergym/environment"
-  tags     = ["dawn-cybergym-env"]
+  tags     = ["tally-cybergym-env"]
 }
 
 target "cybergym-gate" {
   inherits = ["reproducible"]
   context  = "cybergym/gate"
-  tags     = ["dawn-cybergym-gate"]
+  tags     = ["tally-cybergym-gate"]
 }
 
 group "cybergym" {
@@ -64,14 +64,14 @@ target "vdh-adyen-env" {
   inherits   = ["reproducible"]
   context    = "vdh-adyen"
   dockerfile = "environment/Dockerfile"
-  tags     = ["dawn-vdh-adyen-env"]
+  tags     = ["tally-vdh-adyen-env"]
 }
 
 target "vdh-adyen-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-adyen"
   dockerfile = "gate/Dockerfile"
-  tags     = ["dawn-vdh-adyen-gate"]
+  tags     = ["tally-vdh-adyen-gate"]
 }
 
 group "vdh-adyen" {
@@ -81,20 +81,20 @@ group "vdh-adyen" {
 target "mdash-env" {
   inherits = ["reproducible"]
   context  = "mdash/environment"
-  tags     = ["dawn-mdash-env"]
+  tags     = ["tally-mdash-env"]
 }
 
 target "mdash-gate" {
   inherits = ["reproducible"]
   context  = "mdash/gate"
-  tags     = ["dawn-mdash-gate"]
+  tags     = ["tally-mdash-gate"]
 }
 
 target "mdash-env-codex" {
   inherits   = ["reproducible"]
   context    = "mdash/environment"
   dockerfile = "Dockerfile.codex"
-  tags       = ["dawn-mdash-env-codex"]
+  tags       = ["tally-mdash-env-codex"]
 }
 
 group "mdash" {
@@ -105,28 +105,28 @@ target "vdh-hunt-env" {
   inherits = ["reproducible"]
   context  = "vdh-hunt"
   dockerfile = "environment/Dockerfile"
-  tags     = ["dawn-vdh-hunt-env"]
+  tags     = ["tally-vdh-hunt-env"]
 }
 
 target "vdh-hunt-env-codex" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
   dockerfile = "environment/Dockerfile.codex"
-  tags       = ["dawn-vdh-hunt-env-codex"]
+  tags       = ["tally-vdh-hunt-env-codex"]
 }
 
 target "vdh-hunt-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
   dockerfile = "gate/Dockerfile.hunt"
-  tags       = ["dawn-vdh-hunt-gate"]
+  tags       = ["tally-vdh-hunt-gate"]
 }
 
 target "vdh-report-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
   dockerfile = "gate/Dockerfile.report"
-  tags       = ["dawn-vdh-report-gate"]
+  tags       = ["tally-vdh-report-gate"]
 }
 
 
@@ -134,21 +134,21 @@ target "vdh-validate-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
   dockerfile = "gate/Dockerfile.validate"
-  tags       = ["dawn-vdh-validate-gate"]
+  tags       = ["tally-vdh-validate-gate"]
 }
 
 target "vdh-dedupe-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
   dockerfile = "gate/Dockerfile.dedupe"
-  tags       = ["dawn-vdh-dedupe-gate"]
+  tags       = ["tally-vdh-dedupe-gate"]
 }
 
 target "vdh-trace-gate" {
   inherits   = ["reproducible"]
   context    = "vdh-hunt"
   dockerfile = "gate/Dockerfile.trace"
-  tags       = ["dawn-vdh-trace-gate"]
+  tags       = ["tally-vdh-trace-gate"]
 }
 
 group "vdh-hunt" {

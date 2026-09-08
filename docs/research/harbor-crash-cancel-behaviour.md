@@ -1,4 +1,4 @@
-# Harbor crash/cancel behaviour — dawn ticket #15
+# Harbor crash/cancel behaviour — tally ticket #15
 
 What survives when the process that started a Harbor trial dies mid-run, and what a later
 process can reconstruct by inspection alone (no replay). Four cases run end-to-end against
@@ -13,7 +13,7 @@ real Docker/OrbStack, plus the relevant Harbor 0.22.0 source read from disk.
 ## Setup
 
 Two throwaway tasks, both copies of the provisioned `smoke` task
-(`/private/tmp/.../scratchpad/provision/smoke`, oracle solution writes `dawn` to
+(`/private/tmp/.../scratchpad/provision/smoke`, oracle solution writes `tally` to
 `/app/answer.txt`, verifier greps it):
 
 - **`crash-long`** — `solution/solve.sh` changed to `sleep 120` before writing the answer;
@@ -21,7 +21,7 @@ Two throwaway tasks, both copies of the provisioned `smoke` task
   thing that ends the trial (cases 1–3).
 - **`crash-timeout`** — `solve.sh` does `sleep 60`; `[agent] timeout_sec = 10.0` (case 4).
 
-All jobs run from `/private/tmp/claude-501/-Users-vabbb-Documents-GitHub-dawn/81887e3f-.../scratchpad/provision`
+All jobs run from `/private/tmp/claude-501/-Users-vabbb-Documents-GitHub-tally/81887e3f-.../scratchpad/provision`
 with `harbor run -p <task> -a oracle -o jobs --job-name crash-<case> -y`, `oracle` agent (no LLM
 spend). Every job name is prefixed `crash-`; every container Harbor creates inherits that prefix
 via the compose project name.
@@ -102,12 +102,12 @@ job-level `result.json` is frozen mid-run and never gets a `finished_at`:
 
 **105 seconds later** (past the in-container `sleep 120`), the orphaned `docker compose exec`
 process finished on its own and exited — but `agent/oracle.txt` never grew, because `solve.sh`'s
-only stdout write was its first line; the actual effect (`echo dawn > /app/answer.txt`) happened
+only stdout write was its first line; the actual effect (`echo tally > /app/answer.txt`) happened
 *inside* the container, invisible to any host-side log:
 
 ```
 $ docker exec <container> cat /app/answer.txt
-dawn
+tally
 ```
 
 **13+ minutes later, still running, `RestartPolicy=no`:**
@@ -346,7 +346,7 @@ is killed before it can run any of its own code.
 
 ## What an attempt journal must record before dispatch
 
-Recorded the instant dawn spawns the `harbor run` subprocess for an attempt — not after, since
+Recorded the instant tally spawns the `harbor run` subprocess for an attempt — not after, since
 case 1 proves nothing written by harbor itself can be trusted to exist later:
 
 1. **`harbor_pid` + a PID-reuse guard (process start time / a `/proc`-equivalent fingerprint).**
@@ -371,8 +371,8 @@ case 1 proves nothing written by harbor itself can be trusted to exist later:
 
 4. **`dispatched_at` and the resolved `agent.timeout_sec` + `verifier.timeout_sec` budget** (from
    the task's own `task.toml`, before any multiplier surprises at runtime). Rescues case 4 and,
-   jointly with #1, case 1: gives dawn an independent deadline after which a still-"alive"-looking
-   PID should stop being trusted, and lets dawn tell "still legitimately running" apart from
+   jointly with #1, case 1: gives tally an independent deadline after which a still-"alive"-looking
+   PID should stop being trusted, and lets tally tell "still legitimately running" apart from
    "should have finished by now, go check."
 
 5. **`task_checksum`/digest** — the same value harbor itself computes and stores
@@ -391,16 +391,16 @@ case 1 proves nothing written by harbor itself can be trusted to exist later:
    default `/logs/artifacts` convention directory, nothing task-specific. Case 1's manifest.json
    doesn't even exist (crash preceded artifact collection). The only reason case 1's outcome was
    knowable at all was a live, undocumented `docker exec` into a container that happens to still
-   be running — a lucky accident of timing, not a designed recovery path. If dawn wants inspection
+   be running — a lucky accident of timing, not a designed recovery path. If tally wants inspection
    (rather than replay) to actually work, protocol authors must declare `collect=[...]` for
    whatever evidence a later regrade needs, **and** the journal should record that declaration so
-   dawn knows in advance whether inspection-based recovery is even possible for a given attempt,
+   tally knows in advance whether inspection-based recovery is even possible for a given attempt,
    versus needing a full agent re-run.
 
    Aside, found while reading source, not exercised here: harbor ships a first-class
    **regrade** path (`harbor/trial/regrade.py:1-13`) that re-runs *only* the verifier against a
    recorded trial's `agent/`+`artifacts/`, seeded from the artifact manifest, without touching the
-   agent — exactly the "reconstruct rather than replay" shape dawn wants, gated entirely on
+   agent — exactly the "reconstruct rather than replay" shape tally wants, gated entirely on
    whether the source trial's manifest actually contains what the new verifier declares it needs
    (`regrade.py:8-12`). This is the durable, designed version of what case 1's live-container
    `docker exec` did by luck.
@@ -418,21 +418,21 @@ already-removed-container case — routes through `Trial._finalize` →
 `_stop_agent_environment` → `DockerEnvironment.stop()` (`trial.py:455`, `1606`, `docker.py:941`),
 which only runs from inside the harbor process's own `finally:` block. A `SIGKILL`\-equivalent
 death (OOM kill, `kill -9`, a supervisor that force-stops without a grace period) bypasses all of
-it. **dawn needs its own reaper** — something external to any single `harbor run` process,
-sweeping by the compose-project-name convention (#2 above) against dawn's own attempt journal
-(a container/network whose project name doesn't correspond to a journal entry dawn still
+it. **tally needs its own reaper** — something external to any single `harbor run` process,
+sweeping by the compose-project-name convention (#2 above) against tally's own attempt journal
+(a container/network whose project name doesn't correspond to a journal entry tally still
 considers in-flight is a leak, full stop) — since nothing in Harbor or Docker provides this on its
 own.
 
 ---
 
-## Mapping to dawn's six states
+## Mapping to tally's six states
 
 (`passed` / `rejected` / `unverified` / `exhausted` / `infra_error` / `cancelled`, per
-`/Users/vabbb/Documents/GitHub/dawn/CONTEXT.md`.)
+`/Users/vabbb/Documents/GitHub/tally/CONTEXT.md`.)
 
-- **Case 1 (hard kill -9):** `infra_error`. Not `unverified` — that would imply dawn trusts the
-  agent-side outcome and is only missing a verifier verdict; here dawn's own bookkeeping (a dead
+- **Case 1 (hard kill -9):** `infra_error`. Not `unverified` — that would imply tally trusts the
+  agent-side outcome and is only missing a verifier verdict; here tally's own bookkeeping (a dead
   PID, an empty/absent trial `result.json`) can't even establish that much without the lucky,
   non-durable live-container inspection. The runner itself failed; redispatch, don't grade.
 - **Case 2 (SIGTERM/graceful cancel):** `cancelled`. Unambiguous — harbor's own vocabulary agrees

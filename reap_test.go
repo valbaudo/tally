@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 import (
 	"fmt"
@@ -14,27 +14,27 @@ import (
 // --format '{{.Label "com.docker.compose.project"}}|{{.State}}'` output,
 // including the fixture this ticket names by name: a real hand-run orphan
 // this tool did not create (mdash__hagmszn__verifier__trial) must survive
-// because it does not carry the dawn__ prefix at all. dawn's own long-lived
+// because it does not carry the tally__ prefix at all. tally's own long-lived
 // Postgres container carries no compose label whatsoever, so it never
 // appears in this input in the first place — nothing to assert there.
 //
-// dawn__abc1234__env and dawn__abc1234__verifier__k1 are two DIFFERENT
+// tally__abc1234__env and tally__abc1234__verifier__k1 are two DIFFERENT
 // compose projects belonging to the same trial (its agent environment and
 // its separate verifier), each with a single container — reap decides them
 // independently, project by project, exactly as docker compose down does.
-func TestParseReapableMatchesOnlyExitedDawnPrefixedProjects(t *testing.T) {
+func TestParseReapableMatchesOnlyExitedTallyPrefixedProjects(t *testing.T) {
 	const psOutput = `mdash__hagmszn__verifier__trial|exited
-dawn__abc1234__env|exited
-dawn__abc1234__verifier__k1|exited
-dawn__running1__env|running
-dawn__dead1__env|dead
+tally__abc1234__env|exited
+tally__abc1234__verifier__k1|exited
+tally__running1__env|running
+tally__dead1__env|dead
 `
 	got := parseReapable(psOutput)
-	want := []string{"dawn__abc1234__env", "dawn__abc1234__verifier__k1", "dawn__dead1__env"}
+	want := []string{"tally__abc1234__env", "tally__abc1234__verifier__k1", "tally__dead1__env"}
 	if !equalStrings(got, want) {
 		t.Fatalf("parseReapable() = %v, want %v", got, want)
 	}
-	for _, mustSurvive := range []string{"mdash__hagmszn__verifier__trial", "dawn__running1__env"} {
+	for _, mustSurvive := range []string{"mdash__hagmszn__verifier__trial", "tally__running1__env"} {
 		for _, p := range got {
 			if p == mustSurvive {
 				t.Fatalf("parseReapable() swept %q, which must survive", mustSurvive)
@@ -49,18 +49,18 @@ dawn__dead1__env|dead
 // compose down acts on the whole project, so "reapable" has to mean "every
 // container THIS project has is done", not "at least one is".
 func TestParseReapableExcludesTheWholeProjectIfAnyOfItsContainersIsAlive(t *testing.T) {
-	got := parseReapable("dawn__mixed__env|exited\ndawn__mixed__env|running\n")
+	got := parseReapable("tally__mixed__env|exited\ntally__mixed__env|running\n")
 	if len(got) != 0 {
 		t.Fatalf("parseReapable() = %v, want none: one live container must veto the whole project", got)
 	}
 }
 
 // A malformed or unlabelled line (no "|", or an empty label before it) must
-// not panic and must not be mistaken for a dawn__ project.
+// not panic and must not be mistaken for a tally__ project.
 func TestParseReapableIgnoresUnlabelledLines(t *testing.T) {
-	got := parseReapable("no-pipe-in-this-line\n|exited\ndawn__x__env|exited\n")
-	if len(got) != 1 || got[0] != "dawn__x__env" {
-		t.Fatalf("parseReapable() = %v, want just [dawn__x__env]", got)
+	got := parseReapable("no-pipe-in-this-line\n|exited\ntally__x__env|exited\n")
+	if len(got) != 1 || got[0] != "tally__x__env" {
+		t.Fatalf("parseReapable() = %v, want just [tally__x__env]", got)
 	}
 }
 
@@ -134,31 +134,31 @@ func projectExists(t *testing.T, project string) bool {
 	return strings.TrimSpace(string(out)) != ""
 }
 
-// TestReapSweepsExitedDawnProjectAndLeavesForeignOrphanAlone is the real,
+// TestReapSweepsExitedTallyProjectAndLeavesForeignOrphanAlone is the real,
 // docker-backed proof of Decision 1's critical requirement: a project this
 // tool did not create must survive. It builds its own synthetic "foreign"
 // orphan (rather than depending on any specific container that happens to
 // exist on the machine running the test) so the test is reproducible
-// anywhere docker runs, alongside a real dawn__-prefixed exited project to
+// anywhere docker runs, alongside a real tally__-prefixed exited project to
 // prove the positive case in the same run.
-func TestReapSweepsExitedDawnProjectAndLeavesForeignOrphanAlone(t *testing.T) {
+func TestReapSweepsExitedTallyProjectAndLeavesForeignOrphanAlone(t *testing.T) {
 	if !hasDocker() {
 		t.Skip("docker not available")
 	}
-	dawnProject := "dawn__reaptest1234__env"
-	foreignProject := "not-dawn-reaptest-foreign"
+	tallyProject := "tally__reaptest1234__env"
+	foreignProject := "not-tally-reaptest-foreign"
 
-	composeUp(t, dawnProject, 0)
+	composeUp(t, tallyProject, 0)
 	composeUp(t, foreignProject, 0)
-	waitExited(t, dawnProject)
+	waitExited(t, tallyProject)
 	waitExited(t, foreignProject)
 
 	if err := reap(); err != nil {
 		t.Fatalf("reap(): %v", err)
 	}
 
-	if projectExists(t, dawnProject) {
-		t.Errorf("reap() left %q behind", dawnProject)
+	if projectExists(t, tallyProject) {
+		t.Errorf("reap() left %q behind", tallyProject)
 	}
 	if !projectExists(t, foreignProject) {
 		t.Errorf("reap() swept %q, a project it did not create", foreignProject)
@@ -166,13 +166,13 @@ func TestReapSweepsExitedDawnProjectAndLeavesForeignOrphanAlone(t *testing.T) {
 }
 
 // TestReapNeverTouchesARunningProject is the negative case that makes the
-// whole design safe: a live sibling dawn run's containers are Running, and
+// whole design safe: a live sibling tally run's containers are Running, and
 // reap must leave them exactly alone, mid-run, with no coordination at all.
 func TestReapNeverTouchesARunningProject(t *testing.T) {
 	if !hasDocker() {
 		t.Skip("docker not available")
 	}
-	project := "dawn__reaptest-running__env"
+	project := "tally__reaptest-running__env"
 	composeUp(t, project, 60)
 
 	if err := reap(); err != nil {

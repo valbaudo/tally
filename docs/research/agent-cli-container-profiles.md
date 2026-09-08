@@ -89,7 +89,7 @@ gateway traffic or a local `timeout`.
 
 ## 3. Exit 0 on failure — the classifier's hit list
 
-This is the section dawn's error-to-state classifier has to encode.
+This is the section tally's error-to-state classifier has to encode.
 
 **goose exits 0 on every model-layer failure, comprehensively.**
 401 bad key, 401 no key, 403 model rejected, and TCP connection refused **all exit 0**. goose only
@@ -131,11 +131,11 @@ check false-positives on every healthy run. Only the terminal `turn.failed` fram
 - droid goes further: with `-o json`, stderr goes silent even for the text-mode error string. Anything capturing only stderr sees nothing at all.
 - codex is the exception — it is the only CLI that reliably puts its error on stderr.
 
-**Two runs never terminate on their own** (not exit-0, but the same class of harm — dawn must own
+**Two runs never terminate on their own** (not exit-0, but the same class of harm — tally must own
 the wall clock, an idle timeout is not enough):
 - codex against an unreachable host: reconnects forever.
 - opencode on a retryable error (429): retries forever with **zero bytes** of stdout, byte-for-byte indistinguishable from a hang.
-- claude against an unreachable host or bad key takes ~3 minutes to give up. **If dawn's per-trial timeout is under ~200 s, every claude credential failure presents as exit 124 and the diagnostic is lost.**
+- claude against an unreachable host or bad key takes ~3 minutes to give up. **If tally's per-trial timeout is under ~200 s, every claude credential failure presents as exit 124 and the diagnostic is lost.**
 
 ---
 
@@ -148,7 +148,7 @@ is Harbor's own `AgentFactory` registry — unrelated to Factory.ai.) This is th
 "own the launch": five things had to be discovered by hand that an adapter would have carried.
 
 1. **Version pinning has no CLI surface.** The installer hard-codes `VER="0.212.0"` inside the
-   shell script; there is no `--version` argument. To pin, dawn must fetch
+   shell script; there is no `--version` argument. To pin, tally must fetch
    `https://downloads.factory.ai/factory-cli/releases/<VER>/<os>/<arch>/droid` directly. Every other
    CLI takes a version in its install command (`npm i -g pkg@<ver>`, or an interpolated release URL).
 2. **PATH.** The installer does not edit PATH; `export PATH=$HOME/.local/bin:$PATH` is mandatory.
@@ -173,7 +173,7 @@ is Harbor's own `AgentFactory` registry — unrelated to Factory.ai.) This is th
    `FACTORY_AIRGAP_ENABLED=1` kills all api.factory.ai / telemetry egress (6 retries per run
    otherwise, all 401s) and is what removes the exit-124-on-success window in §3.
 6. **Custom model ids are positional:** `custom:<slugified display name>-<index>`. Slugs can
-   collide; dawn should read the id back out of the `Custom Models:` block in `droid exec --help`
+   collide; tally should read the id back out of the `Custom Models:` block in `droid exec --help`
    rather than constructing it.
 7. **All failures collapse to one string.** Bad key, unreachable host, 403 and 429 all surface as
    `result: "Exec failed"`. The HTTP status and provider message exist **only** in
@@ -227,7 +227,7 @@ partial; goose was never exercised against a 429; droid's and goose's gateway-50
 of five reached the real LiteLLM gateway and returned the canned string end to end; codex is the
 partial (above).
 
-**Environment caveat that affects reproduction.** The shared virtual key `dawn-smoke` has
+**Environment caveat that affects reproduction.** The shared virtual key `tally-smoke` has
 `max_budget: 0.1` with `budget_duration: null` — no reset window — and the agents' own system
 prompts cost $0.02–0.03 per single-turn call (claude sends ~2095 input tokens, droid ~2.4–3.0 k,
 goose ~1015, opencode ~2034 even for a one-word prompt). **Roughly four invocations of any of these

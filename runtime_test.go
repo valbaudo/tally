@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 import (
 	"context"
@@ -240,7 +240,7 @@ func TestMoreFlipsOnEitherHalfOfTheLease(t *testing.T) {
 	}
 }
 
-// An attempt gets the smaller of dawn's per-attempt clock and what is left of
+// An attempt gets the smaller of tally's per-attempt clock and what is left of
 // the scope's, so the scope's WallClock really does bound the scope.
 func TestAttemptClockIsTruncatedByTheScope(t *testing.T) {
 	f := &fake{script: []State{Unverified}}
@@ -604,7 +604,7 @@ func TestResumeAdoptsItsOwnReceiptedTrial(t *testing.T) {
 }
 
 // A crash between writing result.json and writing receipt.json, followed by
-// DAWN_RESUME onto a Prompt edited in the meantime, lands two different
+// TALLY_RESUME onto a Prompt edited in the meantime, lands two different
 // stages on the same id's evidence path — the path matches, but the stage
 // changed, which the grammar cannot see. resumeResult must catch it by
 // checking the receipt beside the trial, not just the path it sits at, and
@@ -652,7 +652,7 @@ func TestResumeRefusesEvidenceThatIsNotThisAttempts(t *testing.T) {
 	}
 }
 
-// Model and effort are deliberately NOT part of contentDigest (dawn.go's own
+// Model and effort are deliberately NOT part of contentDigest (tally.go's own
 // comment says why), so two stages that differ ONLY in Agent.model land on
 // the identical attemptID — the rec.ID check above cannot catch a profile
 // that changed since the evidence was produced. resumeResult's model/effort
@@ -720,41 +720,41 @@ func TestDispatchRefusesAStageIDThatIsNotOneSegment(t *testing.T) {
 	}
 }
 
-// --- Decision 2: DAWN_RESUME ---
+// --- Decision 2: TALLY_RESUME ---
 
-// DAWN_RESUME reuses a literal path rather than minting a fresh
-// "name-<timestamp>", mirroring DAWN_RUN_ROOT/DAWN_MAX_CONCURRENT since dawn
+// TALLY_RESUME reuses a literal path rather than minting a fresh
+// "name-<timestamp>", mirroring TALLY_RUN_ROOT/TALLY_MAX_CONCURRENT since tally
 // owns no flag parser.
-func TestResolveRunDirHonoursDawnResume(t *testing.T) {
+func TestResolveRunDirHonoursTallyResume(t *testing.T) {
 	existing := t.TempDir()
-	t.Setenv("DAWN_RESUME", existing)
+	t.Setenv("TALLY_RESUME", existing)
 	got, err := resolveRunDir("whatever")
 	if err != nil {
 		t.Fatalf("resolveRunDir: %v", err)
 	}
 	if got != existing {
-		t.Fatalf("resolveRunDir() = %q, want the literal DAWN_RESUME path %q", got, existing)
+		t.Fatalf("resolveRunDir() = %q, want the literal TALLY_RESUME path %q", got, existing)
 	}
 }
 
-// A typo'd DAWN_RESUME must fail loud, before anything else runs, rather
+// A typo'd TALLY_RESUME must fail loud, before anything else runs, rather
 // than silently minting a brand-new run under a name nobody asked for.
-func TestResolveRunDirDawnResumeToMissingDirFailsLoud(t *testing.T) {
+func TestResolveRunDirTallyResumeToMissingDirFailsLoud(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	t.Setenv("DAWN_RESUME", missing)
+	t.Setenv("TALLY_RESUME", missing)
 	if _, err := resolveRunDir("whatever"); err == nil {
-		t.Fatal("resolveRunDir did not fail for a DAWN_RESUME directory that does not exist")
+		t.Fatal("resolveRunDir did not fail for a TALLY_RESUME directory that does not exist")
 	}
 	if _, err := os.Stat(missing); err == nil {
 		t.Fatal("resolveRunDir must not create the directory it just refused to resume")
 	}
 }
 
-// Without DAWN_RESUME, a fresh run is minted (and actually created on disk)
+// Without TALLY_RESUME, a fresh run is minted (and actually created on disk)
 // under runRoot(), name-qualified and timestamped.
 func TestResolveRunDirMintsAFreshRunByDefault(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("DAWN_RUN_ROOT", root)
+	t.Setenv("TALLY_RUN_ROOT", root)
 	dir, err := resolveRunDir("myproto")
 	if err != nil {
 		t.Fatal(err)
@@ -787,7 +787,7 @@ func TestResumeDoesNotRefireActuators(t *testing.T) {
 		t.Fatalf("first run made %d calls, want 1", calls)
 	}
 
-	// Second invocation over the SAME run directory, as DAWN_RESUME does.
+	// Second invocation over the SAME run directory, as TALLY_RESUME does.
 	second := newRun(dir, context.Background(), nil)
 	res2 := Result{State: Passed, attemptID: "attempt-1", run: second, publishDir: t.TempDir()}
 	got, err := "", error(nil)
@@ -821,7 +821,7 @@ func TestResumeKeepsTheRecord(t *testing.T) {
 	s1.Record("reward", 1.0)
 	s1.Record("manifest", manifest)
 
-	// Second invocation over the SAME run directory, as DAWN_RESUME does.
+	// Second invocation over the SAME run directory, as TALLY_RESUME does.
 	second := newRun(dir, context.Background(), nil)
 	s2 := second.root(Lease{Attempts: 1, WallClock: time.Hour})
 	s2.Record("caveat", "x")        // identical value: must not bug
@@ -856,7 +856,7 @@ func TestResumeKeepsTheRecord(t *testing.T) {
 // the previous invocation's to repeat — see loadRecord. Left in the loaded
 // record, a resumed run that crashes before writing its own would flush a
 // stale "passed" or a protocol_bug a later fix already resolved.
-func TestResumeDropsDawnsOwnVerdict(t *testing.T) {
+func TestResumeDropsTallysOwnVerdict(t *testing.T) {
 	dir := t.TempDir()
 
 	first := newRun(dir, context.Background(), nil)
@@ -877,10 +877,10 @@ func TestResumeDropsDawnsOwnVerdict(t *testing.T) {
 
 // A resumed timeout must stay Exhausted. classify's first two rules read
 // t.Cancelled and t.TimedOut, which are ctx facts of the process that
-// dispatched, so a resumed trial reads them false and the two states dawn
+// dispatched, so a resumed trial reads them false and the two states tally
 // owns directly were unreachable here — a real timeout came back InfraError,
 // which dispatchAttempt RETRIES, into the same clock Exhausted exists to stop
-// dawn retrying into. The receipt already recorded the live verdict; this is
+// tally retrying into. The receipt already recorded the live verdict; this is
 // the check that it is taken.
 func TestResumeKeepsTheStateItsReceiptRecorded(t *testing.T) {
 	for _, want := range []State{Exhausted, Cancelled, Rejected} {

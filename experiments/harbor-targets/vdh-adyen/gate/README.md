@@ -1,7 +1,7 @@
 # Arming this gate
 
 This gate has no oracle until a **canary** is planted. Unarmed, it refuses to
-vote: it writes no `reward.json`, dawn reads that as `infra_error`, and the
+vote: it writes no `reward.json`, tally reads that as `infra_error`, and the
 protocol reports that it obtained no verdict. That is the correct state. A gate
 with no ground truth that voted 0 would be reporting "the plugin is sound" on
 the strength of a check nobody armed.

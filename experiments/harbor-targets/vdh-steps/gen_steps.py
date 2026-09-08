@@ -1,13 +1,13 @@
 import os, textwrap, pathlib
-ROOT = pathlib.Path("/Users/vabbb/Documents/GitHub/dawn/experiments/harbor-targets/vdh-steps")
+ROOT = pathlib.Path("/Users/vabbb/Documents/GitHub/tally/experiments/harbor-targets/vdh-steps")
 STEPS = ROOT / "steps"
-ENV   = "dawn-vdh-hunt-env@sha256:49f379ebc783f05a6efd07675f3b9ea09f8bbf7c44fef75518d0885ab20541c3"
+ENV   = "tally-vdh-hunt-env@sha256:49f379ebc783f05a6efd07675f3b9ea09f8bbf7c44fef75518d0885ab20541c3"
 GATES = {
- "hunt":     "dawn-vdh-hunt-gate@sha256:8d9a2c9fa24581c76cc062b2cbfb2d9f0012209ee232b71fea3b69af27b7a9b7",
- "validate": "dawn-vdh-validate-gate@sha256:8920f43f31512977b2d58ae698256ca8f4c6bf729f7ac6537a54485f4946a28a",
- "dedupe":   "dawn-vdh-dedupe-gate@sha256:dd0472f55516f4d972cc9cbeaa47d13a8fbf7f492492c647cbd3d6e5f53b7772",
- "trace":    "dawn-vdh-trace-gate@sha256:321cfdd7662c1d9f1f7f0b22207cd8e604fdc337f6b9a76f2d4c46207e9bc1ad",
- "report":   "dawn-vdh-report-gate@sha256:cce0530330d78ff60006ed17775f9d3c5d7ad0e4e64e7552e81415d355fbba65",
+ "hunt":     "tally-vdh-hunt-gate@sha256:8d9a2c9fa24581c76cc062b2cbfb2d9f0012209ee232b71fea3b69af27b7a9b7",
+ "validate": "tally-vdh-validate-gate@sha256:8920f43f31512977b2d58ae698256ca8f4c6bf729f7ac6537a54485f4946a28a",
+ "dedupe":   "tally-vdh-dedupe-gate@sha256:dd0472f55516f4d972cc9cbeaa47d13a8fbf7f492492c647cbd3d6e5f53b7772",
+ "trace":    "tally-vdh-trace-gate@sha256:321cfdd7662c1d9f1f7f0b22207cd8e604fdc337f6b9a76f2d4c46207e9bc1ad",
+ "report":   "tally-vdh-report-gate@sha256:cce0530330d78ff60006ed17775f9d3c5d7ad0e4e64e7552e81415d355fbba65",
 }
 HUNTERS, ROUNDS = 3, 2
 
@@ -154,7 +154,7 @@ steps = [("recon", None, RECON, "map.json")]
 for r in range(ROUNDS):
     for i in range(HUNTERS):
         steps.append((f"hunt-r{r}-{i}", "hunt", HUNT.format(n=i+1, tot=HUNTERS, i=i), "finding.json"))
-    for i in range(HUNTERS):   # UNROLLED AT WORST CASE: dawn uses len(live)
+    for i in range(HUNTERS):   # UNROLLED AT WORST CASE: tally uses len(live)
         steps.append((f"validate-r{r}-{i}", "validate", VALIDATE, "verdict.json"))
     if r + 1 < ROUNDS:
         steps.append((f"gapfill-r{r}", None, GAPFILL, "map.json"))
@@ -176,14 +176,14 @@ for name, gate, instr, art in steps:
 toml = [
  'schema_version = "1.4"',
  'artifacts = ["/app/outputs"]',
- '# dawn returns the LAST stage\'s state as the run\'s state (protocols/vdh/main.go',
+ '# tally returns the LAST stage\'s state as the run\'s state (protocols/vdh/main.go',
  '# returns report.State), so "final" is the closest available match. It is not the',
- '# same thing: dawn also reads every intermediate gate\'s metrics for control flow,',
+ '# same thing: tally also reads every intermediate gate\'s metrics for control flow,',
  '# which no aggregation strategy exposes.',
  'multi_step_reward_strategy = "final"',
  '',
  '[task]',
- 'name = "dawn/vdh-steps"',
+ 'name = "tally/vdh-steps"',
  'version = "1.0.0"',
  'description = "vdh translated to Harbor [[steps]] - see README.md for what did not survive"',
  'keywords = []',
@@ -218,7 +218,7 @@ for name, gate, instr, art in steps:
     toml += ['', '[[steps]]', f'name = "{name}"', f'artifacts = ["/app/outputs/{art}"]']
     if gate:
         toml += [
-          '# min_reward 1.0 mirrors dawn\'s classify(): reward > 0 is Passed. But dawn',
+          '# min_reward 1.0 mirrors tally\'s classify(): reward > 0 is Passed. But tally',
           '# REJECTS the stage and keeps going per its own control flow, while Harbor can',
           '# only abort every remaining step.',
           'min_reward = 1.0',
@@ -231,10 +231,10 @@ for name, gate, instr, art in steps:
         ]
     else:
         toml += [
-          '# dawn marks this NoGate and clamps it to `unverified`, a distinct state.',
+          '# tally marks this NoGate and clamps it to `unverified`, a distinct state.',
           '# Harbor has no per-step "no verifier" mode: verifier.disable lives on the',
           '# TRIAL, so an ungated step either inherits the task verifier or has none of',
-          '# its intent recorded. The reason dawn carries in NoGate("...") has nowhere',
+          '# its intent recorded. The reason tally carries in NoGate("...") has nowhere',
           '# to go at all.',
         ]
 ROOT.joinpath("task.toml").write_text("\n".join(toml) + "\n")

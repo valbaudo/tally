@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="description" content="A source-verified review of what Dawn needs to run the Prestige agent workflow while remaining a small, elegant native workflow runner.">
-  <title>Dawn × Prestige — the missing workflow language</title>
+  <meta name="description" content="A source-verified review of what Tally needs to run the Prestige agent workflow while remaining a small, elegant native workflow runner.">
+  <title>Tally × Prestige — the missing workflow language</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=Manrope:wght@400;500;600;700&amp;family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&amp;display=swap" rel="stylesheet">
@@ -449,15 +449,15 @@
 <body>
   <a class="skip-link" href="#report">Skip to report</a>
   <nav class="topbar" aria-label="Report navigation">
-    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"></span><span>Dawn / field review 08</span></a>
+    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"></span><span>Tally / field review 08</span></a>
     <span class="topbar-meta">Source-verified · 08 Aug 2026 · Native-first</span>
   </nav>
 
   <header class="hero" id="top">
     <div class="hero-inner">
       <div>
-        <p class="eyebrow">Capability review / Dawn × Prestige</p>
-        <h1 id="hero-title" data-pretext>Dawn needs a <em>workflow algebra.</em></h1>
+        <p class="eyebrow">Capability review / Tally × Prestige</p>
+        <h1 id="hero-title" data-pretext>Tally needs a <em>workflow algebra.</em></h1>
         <p class="hero-deck">Not an AWF clone. Not Docker management. Five deep semantics around a core that already knows how to accept, commit, and resume expensive agent work.</p>
       </div>
       <aside class="hero-side" aria-label="Review verdict">
@@ -498,10 +498,10 @@
       <section class="chapter" id="answer">
         <p class="section-kicker">01 / Executive answer</p>
         <h2>Preserve the nucleus. Replace the assumptions.</h2>
-        <p class="lede">Dawn already owns the hardest invariants: strict plans, independent judges, accepted-attempt-only commits, content-addressed state, and rerun-as-resume. It should add composition around <code>Invocation → Backend → Result</code>, not inflate that seam.</p>
+        <p class="lede">Tally already owns the hardest invariants: strict plans, independent judges, accepted-attempt-only commits, content-addressed state, and rerun-as-resume. It should add composition around <code>Invocation → Backend → Result</code>, not inflate that seam.</p>
         <blockquote class="one-thing">
           <small>The one thing · click to edit locally</small>
-          <p contenteditable="true" spellcheck="false" data-pretext>Dawn turns a typed workflow into accepted, resumable artifacts—whether a native agent or script produced them.</p>
+          <p contenteditable="true" spellcheck="false" data-pretext>Tally turns a typed workflow into accepted, resumable artifacts—whether a native agent or script produced them.</p>
         </blockquote>
         <div class="status-strip" aria-label="Current state summary">
           <div class="status-cell"><strong>Strong</strong><span>Persistence, gate integrity, strictness</span></div>
@@ -528,16 +528,16 @@
       <section class="chapter" id="gap">
         <p class="section-kicker">03 / Capability gap</p>
         <h2>Partial is not missing. Missing is not all syntax.</h2>
-        <p class="lede">Use the filters to separate existing foundations from seams that need generalizing and capabilities Dawn does not yet have.</p>
+        <p class="lede">Use the filters to separate existing foundations from seams that need generalizing and capabilities Tally does not yet have.</p>
         <div class="filters" role="group" aria-label="Filter capability matrix">
           <button class="filter" type="button" data-filter="all" aria-pressed="true">All 14</button>
           <button class="filter" type="button" data-filter="ready" aria-pressed="false">Ready</button>
           <button class="filter" type="button" data-filter="partial" aria-pressed="false">Partial</button>
           <button class="filter" type="button" data-filter="missing" aria-pressed="false">Missing</button>
         </div>
-        <div class="matrix-wrap" role="region" aria-label="Dawn capability matrix" tabindex="0">
+        <div class="matrix-wrap" role="region" aria-label="Tally capability matrix" tabindex="0">
           <table>
-            <thead><tr><th>Capability</th><th>Status</th><th>Dawn today</th><th>Needed for Prestige</th></tr></thead>
+            <thead><tr><th>Capability</th><th>Status</th><th>Tally today</th><th>Needed for Prestige</th></tr></thead>
             <tbody>
               <tr data-status="ready"><td>Strict plans</td><td><span class="state state-ready">Ready</span></td><td>Unknown keys fail at load time.</td><td>Preserve; compile new shorthands before strict validation.</td></tr>
               <tr data-status="ready"><td>Durable resume</td><td><span class="state state-ready">Ready</span></td><td>Content-addressed results; rerun is resume.</td><td>Extend to hierarchical calls, map items, skill choices, and gate decisions.</td></tr>
@@ -569,19 +569,19 @@
           <article class="idea"><span class="idea-no">04</span><h3>Acceptance</h3><p>Generate, independently evaluate, repair from typed feedback, commit one attempt.</p></article>
           <article class="idea"><span class="idea-no">05</span><h3>Policy</h3><p>Retry, timeout, cache, idempotency, secrets, resource pools, and failure handling.</p></article>
         </div>
-        <div class="source-note"><strong>Script boundary:</strong> give every process <code>DAWN_INPUT</code> (canonical JSON), <code>DAWN_OUTPUT</code> (schema-validated JSON), <code>DAWN_FILES</code> (named artifacts), and <code>DAWN_IDEMPOTENCY_KEY</code>. Do not interpolate runtime strings into shell source.</div>
+        <div class="source-note"><strong>Script boundary:</strong> give every process <code>TALLY_INPUT</code> (canonical JSON), <code>TALLY_OUTPUT</code> (schema-validated JSON), <code>TALLY_FILES</code> (named artifacts), and <code>TALLY_IDEMPOTENCY_KEY</code>. Do not interpolate runtime strings into shell source.</div>
       </section>
 
       <section class="chapter" id="architecture">
         <p class="section-kicker">05 / Deep-module architecture</p>
         <h2>One compiler. One interpreter. Two leaf executors.</h2>
         <p class="lede">Sub-workflows compile into hierarchical addresses in the same canonical IR. The interpreter remains the only writer of durable state; workers return candidates.</p>
-        <div class="architecture" role="img" aria-label="Dawn target architecture from YAML through compiler and interpreter to stores">
+        <div class="architecture" role="img" aria-label="Tally target architecture from YAML through compiler and interpreter to stores">
           <div class="arch-row"><div class="arch-label">YAML source</div><div class="arch-arrow">→</div><div class="arch-body">Human shorthand: contracts, steps, roles, local imports, assets.</div></div>
           <div class="arch-row"><div class="arch-label">Compiler</div><div class="arch-arrow">→</div><div class="arch-body">Validate contracts, scopes, capabilities, import containment. Lower jury and legacy syntax. Assign canonical hierarchical paths.</div></div>
           <div class="arch-row"><div class="arch-label">Canonical IR</div><div class="arch-arrow">→</div><div class="arch-body">One representation for top-level and called workflows. Definition digest and dynamic-address rules live here.</div></div>
           <div class="arch-row"><div class="arch-label">Interpreter</div><div class="arch-arrow">→</div><div class="arch-body">Sole durable-state writer. Coordinates call / when / map / gate / try; journals worklists, selection, verdicts, and accepted attempts.</div></div>
-          <div class="arch-row"><div class="arch-label">Leaf dispatcher</div><div class="arch-arrow">→</div><div class="arch-body"><div class="arch-split"><div class="arch-leaf"><strong>Agent adapter</strong><span>Uses the existing small <code>dawn.Backend</code>.</span></div><div class="arch-leaf"><strong>Process runner</strong><span>Native command, staged files, process-tree cancellation.</span></div></div></div></div>
+          <div class="arch-row"><div class="arch-label">Leaf dispatcher</div><div class="arch-arrow">→</div><div class="arch-body"><div class="arch-split"><div class="arch-leaf"><strong>Agent adapter</strong><span>Uses the existing small <code>tally.Backend</code>.</span></div><div class="arch-leaf"><strong>Process runner</strong><span>Native command, staged files, process-tree cancellation.</span></div></div></div></div>
           <div class="arch-row"><div class="arch-label">Store</div><div class="arch-arrow">→</div><div class="arch-body">Canonical values, content-addressed artifacts/trees, journal pointers, usage and effect receipts.</div></div>
         </div>
       </section>
@@ -590,8 +590,8 @@
         <p class="section-kicker">06 / Product discipline</p>
         <h2>The cut list protects the promise.</h2>
         <div class="decision-grid">
-          <article class="decision build"><h3>Build into Dawn</h3><ul><li>First-class values, files, trees, and assets</li><li>Native process execution</li><li>Local typed calls and canonical IR</li><li>Keyed map/reduce and bounded conditions</li><li>General gates; current jury as shorthand</li><li>Retry/effect/finally policy</li><li>Adapter roles, skills, BM25, trace</li></ul></article>
-          <article class="decision cut"><h3>Keep outside Dawn</h3><ul><li>Docker or DinD lifecycle language</li><li>PDF/image/document-specific nodes</li><li>Unrestricted text templating</li><li>Arbitrary expressions or embedded code</li><li>Explicit static <code>parallel</code> syntax</li><li>A separate LLM-judge engine</li><li>Global mutable workspace semantics</li></ul></article>
+          <article class="decision build"><h3>Build into Tally</h3><ul><li>First-class values, files, trees, and assets</li><li>Native process execution</li><li>Local typed calls and canonical IR</li><li>Keyed map/reduce and bounded conditions</li><li>General gates; current jury as shorthand</li><li>Retry/effect/finally policy</li><li>Adapter roles, skills, BM25, trace</li></ul></article>
+          <article class="decision cut"><h3>Keep outside Tally</h3><ul><li>Docker or DinD lifecycle language</li><li>PDF/image/document-specific nodes</li><li>Unrestricted text templating</li><li>Arbitrary expressions or embedded code</li><li>Explicit static <code>parallel</code> syntax</li><li>A separate LLM-judge engine</li><li>Global mutable workspace semantics</li></ul></article>
         </div>
       </section>
 
@@ -623,9 +623,9 @@
 
       <section class="chapter" aria-labelledby="bottom-line">
         <p class="section-kicker">Conclusion</p>
-        <h2 id="bottom-line">Dawn should not become “AWF without Docker.”</h2>
+        <h2 id="bottom-line">Tally should not become “AWF without Docker.”</h2>
         <p class="lede">It should become the smaller language Prestige proves is necessary: <strong>typed contracts + native leaves + composition + acceptance + policy</strong>. Scripts make the work open-ended. Artifacts make files first-class. Gates make stochastic work trustworthy. The journal makes all of it resumable.</p>
-        <div class="source-note"><strong>Read the complete report:</strong> <a href="dawn-prestige-workflow-gap-analysis.md">Markdown analysis with source map, proposed syntax, invariants, and test plan</a>.</div>
+        <div class="source-note"><strong>Read the complete report:</strong> <a href="tally-prestige-workflow-gap-analysis.md">Markdown analysis with source map, proposed syntax, invariants, and test plan</a>.</div>
       </section>
     </main>
   </div>
@@ -633,7 +633,7 @@
   <footer>
     <div class="footer-inner">
       <div class="footer-big">A small language around a deep runtime—not a catalog of everything agents can do.</div>
-      <div class="footer-meta">Prepared from Dawn, the active Prestige YAML/scripts/skill libraries, and AWF's authoritative manual. Pretext tier: content-heavy editorial; <code>prepareWithSegments()</code> + <code>layoutNextLine()</code> track the editable headline's responsive measure.</div>
+      <div class="footer-meta">Prepared from Tally, the active Prestige YAML/scripts/skill libraries, and AWF's authoritative manual. Pretext tier: content-heavy editorial; <code>prepareWithSegments()</code> + <code>layoutNextLine()</code> track the editable headline's responsive measure.</div>
     </div>
   </footer>
 

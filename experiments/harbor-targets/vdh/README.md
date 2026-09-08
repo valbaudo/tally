@@ -1,4 +1,4 @@
-# dawn/vdh — toy SQL-injection hunt, gated on citations only
+# tally/vdh — toy SQL-injection hunt, gated on citations only
 
 > Pasted trial output in this file is literal, from the runs it names, so its
 > paths predate the `/app/outputs` rename. It is evidence, not the contract —
@@ -73,7 +73,7 @@ No actuator publishes from this target, so the gate writes nothing to
 
 The one path the agent writes and the gate reads is a constant duplicated
 between `instruction.md`, `task.toml`'s `artifacts`, and `gate/check.py`. The
-`/app/outputs` root itself is not this task's to define -- it is dawn's fixed
+`/app/outputs` root itself is not this task's to define -- it is tally's fixed
 output directory, defined once as `outputDir` in `harbor.go`; what follows
 just restates the mapping under it for readers of this target:
 
@@ -84,9 +84,9 @@ just restates the mapping under it for readers of this target:
 | `repo` (gate's own re-derived copy) | `/gate/repo` | `gate/Dockerfile`, `gate/check.py:11` |
 | verdict (gate-written, never agent-visible) | `/logs/verifier/reward.json` | `gate/check.py:83` |
 
-This mapping used to name `/app/findings.jsonl` directly -- the pre-dawn
-generation of the contract. A gate reading a path dawn never delivers an
-artifact to finds nothing, writes `reward: 0`, and dawn classifies that as
+This mapping used to name `/app/findings.jsonl` directly -- the pre-tally
+generation of the contract. A gate reading a path tally never delivers an
+artifact to finds nothing, writes `reward: 0`, and tally classifies that as
 `Rejected`, so the stale path was fabricating rejections rather than
 describing the gate; `gate/selftest.sh` now proves the real path at image
 build time.
@@ -98,9 +98,9 @@ write it, and the gate never trusts `/app/repo`.
 
 ```bash
 export PATH="$HOME/.orbstack/bin:$PATH"
-cd experiments/harbor-targets/vdh/gate && docker build -t dawn-vdh-gate:1 .
+cd experiments/harbor-targets/vdh/gate && docker build -t tally-vdh-gate:1 .
 # rebuilding changes the digest -- re-pin task.toml from:
-docker inspect dawn-vdh-gate:1 --format '{{index .RepoDigests 0}}'
+docker inspect tally-vdh-gate:1 --format '{{index .RepoDigests 0}}'
 cd experiments/harbor-targets
 harbor run -p vdh -a oracle -o jobs --job-name tc-vdh-pass   # -> 1.0
 harbor run -p vdh -a nop    -o jobs --job-name tc-vdh-fail   # -> 0.0
@@ -145,16 +145,16 @@ Both verifier directories contain `reward.json` and `test-stdout.txt` and
 
 ```toml
 [verifier.environment]
-docker_image = "dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0"
+docker_image = "tally-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0"
 ```
 
 OrbStack's image store gives locally-built images a RepoDigest equal to the
 image ID, so no registry push is needed:
 
 ```
-$ docker inspect dawn-vdh-gate:1 --format '{{index .RepoDigests 0}}'
-dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0
-$ docker inspect dawn-vdh-gate:1 --format '{{.Id}}'
+$ docker inspect tally-vdh-gate:1 --format '{{index .RepoDigests 0}}'
+tally-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0
+$ docker inspect tally-vdh-gate:1 --format '{{.Id}}'
 sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0
 ```
 
@@ -167,7 +167,7 @@ The pin is load-bearing, not decorative. Measured: swapping the digest for
 0.0 verdict. Restored afterwards.
 
 Provenance that survives a rebuild — the layer `diff_ids` of the gate image
-(`docker inspect dawn-vdh-gate:1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}'`):
+(`docker inspect tally-vdh-gate:1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}'`):
 
 ```
 sha256:41d6505109809884e681a97f978542a2d4d3506af0124f18b3f3a471edfcc9b7
@@ -182,7 +182,7 @@ sha256:9951e203ffba4e1494d409d6c9f353cdffc40b0074b5da1a887db33b862e87e3
 
 | Tag | Image ID |
 |---|---|
-| `dawn-vdh-gate:1` (pinned) | `sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0` |
+| `tally-vdh-gate:1` (pinned) | `sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0` |
 | agent env (same context Harbor builds from `environment/`) | rebuilt per run; `pb-vdh-env:3` = `sha256:fa8efa4026a2c8775a2048bd23a3e402978487ea057a08dfeeb78bc3f227c826` |
 | base `python:3.13-slim` | `sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285` |
 
@@ -236,7 +236,7 @@ verifier_phase        = no-network   allowed_hosts=[]
 ```
 
 The verifier stays `no-network` on both baseline and phase, on its pinned
-baked `dawn-vdh-gate:1`. Legal `network_mode` values are
+baked `tally-vdh-gate:1`. Legal `network_mode` values are
 `no-network` | `public` | `allowlist`; `"none"` is **not** legal and fails
 with the misleading "Either datasets or tasks must be provided."
 
@@ -268,7 +268,7 @@ reasoned, not measured; trim them if a real run shows they are not.
 
 ```
 $ docker run --rm pb-vdh-env:3 sh -c 'find / -xdev -iname "*GROUND_TRUTH*"'
-$ docker run --rm dawn-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0 \
+$ docker run --rm tally-vdh-gate@sha256:87ad8b9b5d39f4dd0fe0eee58b9f6f2902c9d3a55eb60676796ffc70e7a66db0 \
     sh -c 'find / -xdev -iname "*GROUND_TRUTH*"'
 ```
 
@@ -314,6 +314,6 @@ agent writes is ever executed.
 
 ## Self-test (host-side, no Harbor)
 
-Six cases were run directly against `dawn-vdh-gate:1`: honest findings → 1;
+Six cases were run directly against `tally-vdh-gate:1`: honest findings → 1;
 missing file → 0; empty file → 0; hallucinated evidence → 0; invented
 filename → 0; out-of-range line → 0; correctly-cited safe decoy → 1.

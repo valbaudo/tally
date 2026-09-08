@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 // The runtime half of the surface: everything that needs the journal,
 // concurrency admission and the Harbor runner to mean anything. The
@@ -23,12 +23,12 @@ import (
 )
 
 // Metric reads one number the gate wrote alongside its reward — including
-// "reward" itself. dawn parses no CLI output, so this is the only channel by
+// "reward" itself. tally parses no CLI output, so this is the only channel by
 // which a stage's own arithmetic reaches the control flow. ok is false when
 // the gate wrote no such metric; a missing metric is never silently zero.
 func (r Result) Metric(name string) (value float64, ok bool) {
 	// These are Harbor's own parse of /logs/verifier/reward.json, which
-	// outranks reward.txt in its precedence order. dawn does not read the file
+	// outranks reward.txt in its precedence order. tally does not read the file
 	// a second time behind Harbor's back: a string reward raises a
 	// ValidationError there, and re-reading would accept a verdict Harbor
 	// rejected.
@@ -36,7 +36,7 @@ func (r Result) Metric(name string) (value float64, ok bool) {
 	return value, ok
 }
 
-// Actuate performs an external effect. It runs in dawn's own process, where
+// Actuate performs an external effect. It runs in tally's own process, where
 // the credentials live, and fires only on Passed — on any other state it does
 // nothing and reports why, and it never calls fn at all. An error fn returns
 // (or a Published lookup that found nothing) fails the actuation but never
@@ -50,11 +50,11 @@ func (r Result) Metric(name string) (value float64, ok bool) {
 // the same effect, and the loaded record still holds the first — a bug() on
 // resume for a pattern that looked fine every time it was actually tested.
 //
-// dawn deduplicates its own retries against its own durable record, keyed by
+// tally deduplicates its own retries against its own durable record, keyed by
 // the attempt_id — see Actuation.Step. That record is PER-RUN, held in the
 // run directory, not a second global store: a global dedup store is a second
 // persistence layer with its own crash-recovery, growth and GC policy that
-// nothing in this design has an opinion on. The honest consequence: dawn
+// nothing in this design has an opinion on. The honest consequence: tally
 // deduplicates a run's own retries, never two different runs. Running the
 // same protocol twice over unchanged inputs WILL perform the effect twice —
 // a new run is a new request that it happen.
@@ -64,11 +64,11 @@ func (r Result) Metric(name string) (value float64, ok bool) {
 // the package, Stage-building code included, so a reveal method and a real
 // Prompt-interpolation guard against credential leakage cannot coexist in one
 // type. Credentials for an effect are ordinary strings in this trusted
-// actuator code; "credentials live in dawn's process" means they are never
-// shipped into a container, not that dawn custodies them behind a type.
+// actuator code; "credentials live in tally's process" means they are never
+// shipped into a container, not that tally custodies them behind a type.
 func (r Result) Actuate(fn func(*Actuation) error) error {
 	if r.State != Passed {
-		return fmt.Errorf("dawn: actuate: state is %s, not %s: nothing to actuate", r.State, Passed)
+		return fmt.Errorf("tally: actuate: state is %s, not %s: nothing to actuate", r.State, Passed)
 	}
 	a := &Actuation{Key: r.attemptID, publishDir: r.publishDir, run: r.run}
 	err := fn(a)
@@ -82,9 +82,9 @@ func (r Result) Actuate(fn func(*Actuation) error) error {
 // a door onto the gate's published bytes, and a way to dedup a sub-step —
 // nothing else.
 type Actuation struct {
-	// Key is the attempt_id. dawn has already deduplicated against it; carry
+	// Key is the attempt_id. tally has already deduplicated against it; carry
 	// it into the remote effect (a branch name, a record id) to make the far
-	// side idempotent too, which dawn cannot do for you.
+	// side idempotent too, which tally cannot do for you.
 	Key string
 	// publishDir is the gate's own publish directory for this attempt,
 	// threaded from Result.publishDir. Unexported: an actuator reaches it
@@ -101,14 +101,14 @@ type Actuation struct {
 
 // Published resolves one file the GATE wrote to its publish directory. This is
 // the only door: the agent's raw declared output is unreachable from here, and
-// that filter is what makes publishing safe. dawn fails the actuation if the
+// that filter is what makes publishing safe. tally fails the actuation if the
 // gate wrote no such name — recorded here after a stat, and surfaced by
 // Actuate once fn returns, so a caller that forgets to check still fails
 // rather than pushing a path to nothing.
 func (a *Actuation) Published(name string) string {
 	p := filepath.Join(a.publishDir, name)
 	if _, err := os.Stat(p); err != nil {
-		a.err = fmt.Errorf("dawn: gate published no %q", name)
+		a.err = fmt.Errorf("tally: gate published no %q", name)
 	}
 	return p
 }
@@ -131,7 +131,7 @@ func (a *Actuation) Step(name string, fn func() (string, error)) (string, error)
 	key := a.Key + "/" + name
 
 	// The lock is taken twice and never held across fn. An effect is the one
-	// thing in dawn that talks to the outside world and can block for as long
+	// thing in tally that talks to the outside world and can block for as long
 	// as the outside world likes, and Record takes this same lock — so holding
 	// it across fn would deadlock the run the first time an author recorded
 	// the identifier the step just returned, which is the obvious thing to
@@ -167,7 +167,7 @@ func (a *Actuation) Step(name string, fn func() (string, error)) (string, error)
 // task compiler in harbor.go: the scope decides WHETHER an attempt may run and
 // for how long, the runner decides what it MEANS.
 //
-// The ctx carries the scope's AttemptWallClock. A returned error is dawn
+// The ctx carries the scope's AttemptWallClock. A returned error is tally
 // failing to obtain a verdict at all — the scope turns it into InfraError and
 // retries it against its own counter. Every state assignment that needs to
 // look at what the task produced (rules 2-5 in the State doc, Exhausted
@@ -212,13 +212,13 @@ type Scope struct {
 
 // protocolBug is a bug in the protocol, not a state of the world: dispatching
 // on a spent scope, recording a name twice, dispatching from a scope with no
-// per-attempt clock. dawn unwinds the run the way a cancel does rather than
+// per-attempt clock. tally unwinds the run the way a cancel does rather than
 // inventing a State for it.
 type protocolBug struct{ msg string }
 
 func bug(format string, args ...any) { panic(protocolBug{fmt.Sprintf(format, args...)}) }
 
-// Main is the process entry point: it makes func main legal. dawn owns
+// Main is the process entry point: it makes func main legal. tally owns
 // resumption and the restart sweep, so it must be able to re-enter the
 // protocol itself — on restart, a stage whose result.json already exists on
 // disk is never re-run; dispatchAttempt hands the reconstructed Result
@@ -231,26 +231,26 @@ func bug(format string, args ...any) { panic(protocolBug{fmt.Sprintf(format, arg
 // protocol function from the top and replaying the same calls in the same
 // order.
 //
-// The State the protocol returns is the RUN's terminal state: dawn writes it
+// The State the protocol returns is the RUN's terminal state: tally writes it
 // into the run record and exits on it. That is the only consumer, and it is
 // why every protocol spends care on the difference between a measurement and
 // a catastrophe that produced the same artifacts.
 func Main(name string, root Lease, protocol func(*Scope) State) {
 	dir, err := resolveRunDir(name)
 	if err != nil {
-		panic(fmt.Sprintf("dawn: %v", err))
+		panic(fmt.Sprintf("tally: %v", err))
 	}
 	// The reap is synchronous and unconditional, on every invocation — see
 	// reap.go. It runs after the run directory is settled (so a bad
-	// DAWN_RESUME fails loud without needing Docker at all) and before
+	// TALLY_RESUME fails loud without needing Docker at all) and before
 	// anything is dispatched.
 	if err := reap(); err != nil {
-		panic(fmt.Sprintf("dawn: reap: %v", err))
+		panic(fmt.Sprintf("tally: reap: %v", err))
 	}
 	// Captured once, here, and threaded down as the parent of every attempt's
 	// context (Scope.Run) — never context.Background(). Every in-flight and
 	// future attempt's ctx.Done fires the instant either signal arrives,
-	// which is what lets clockOutcome (harbor.go) tell dawn's own clock
+	// which is what lets clockOutcome (harbor.go) tell tally's own clock
 	// apart from an operator asking the whole run to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -261,33 +261,33 @@ func Main(name string, root Lease, protocol func(*Scope) State) {
 	r.flush()
 	r.mu.Unlock()
 	writeReport(dir)
-	fmt.Printf("dawn: %s %s %s\n", name, state, dir)
+	fmt.Printf("tally: %s %s %s\n", name, state, dir)
 }
 
 // runRoot is where run directories go. The default is a directory beside the
-// protocol binary's working directory; DAWN_RUN_ROOT moves it.
+// protocol binary's working directory; TALLY_RUN_ROOT moves it.
 func runRoot() string {
-	if d := os.Getenv("DAWN_RUN_ROOT"); d != "" {
+	if d := os.Getenv("TALLY_RUN_ROOT"); d != "" {
 		return d
 	}
-	return "dawn-runs"
+	return "tally-runs"
 }
 
 // resolveRunDir picks the run directory for this Main invocation.
-// DAWN_RESUME=<dir>, same family as DAWN_RUN_ROOT/DAWN_MAX_CONCURRENT since
-// dawn owns no flag parser (func main belongs to the protocol author),
+// TALLY_RESUME=<dir>, same family as TALLY_RUN_ROOT/TALLY_MAX_CONCURRENT since
+// tally owns no flag parser (func main belongs to the protocol author),
 // reuses a literal path so a crashed run can be re-entered; otherwise a
-// fresh "name-<timestamp>" is minted under runRoot(). A DAWN_RESUME naming a
+// fresh "name-<timestamp>" is minted under runRoot(). A TALLY_RESUME naming a
 // directory that does not exist is refused rather than silently minting a
 // new run under that name — a typo must fail loud, not quietly start over.
 func resolveRunDir(name string) (string, error) {
-	if d := os.Getenv("DAWN_RESUME"); d != "" {
+	if d := os.Getenv("TALLY_RESUME"); d != "" {
 		info, err := os.Stat(d)
 		if err != nil {
-			return "", fmt.Errorf("DAWN_RESUME=%q: %w", d, err)
+			return "", fmt.Errorf("TALLY_RESUME=%q: %w", d, err)
 		}
 		if !info.IsDir() {
-			return "", fmt.Errorf("DAWN_RESUME=%q: not a directory", d)
+			return "", fmt.Errorf("TALLY_RESUME=%q: not a directory", d)
 		}
 		return d, nil
 	}
@@ -299,7 +299,7 @@ func resolveRunDir(name string) (string, error) {
 }
 
 // protocol runs the protocol against a fresh root scope and unwinds a protocol
-// bug into Cancelled — dawn never obtained a verdict, and the record says why.
+// bug into Cancelled — tally never obtained a verdict, and the record says why.
 func (r *run) protocol(root Lease, fn func(*Scope) State) (state State) {
 	defer func() {
 		p := recover()
@@ -342,8 +342,8 @@ func (s *Scope) Scope(id string, lease Lease) *Scope {
 // guard: "try again until the scope runs out" is the one question a protocol
 // asks the admission queue rather than being told the answer to.
 //
-// Dispatching on a spent scope is a protocol bug, and dawn unwinds the run the
-// way a cancel does — dawn never turns a spent lease into a state of its own,
+// Dispatching on a spent scope is a protocol bug, and tally unwinds the run the
+// way a cancel does — tally never turns a spent lease into a state of its own,
 // because Exhausted already means one attempt hit its clock and a best-of-N
 // loop must be able to tell a single slow attempt from a spent lease. What a
 // PROTOCOL calls its own run when More() was false before it dispatched
@@ -366,7 +366,7 @@ func (s *Scope) More() bool {
 // make Dispatching(1, per) a scope that cannot dispatch at all. What bounds
 // the attempt instead is the clock Run hands it — the remaining scope clock
 // when that is the smaller of the two — and an attempt cut short that way is
-// Exhausted, which is the state for "dawn's own clock ended it". The counter
+// Exhausted, which is the state for "tally's own clock ended it". The counter
 // half walks the ancestry, because siblings spend the same parent counter.
 func (s *Scope) admits(now time.Time) bool {
 	if !now.Before(s.deadline) {
@@ -404,13 +404,13 @@ func (s *Scope) Run(stage Stage) Result {
 // Harbor's constants.py. It is also exactly one path segment — no slash, and
 // the leading alnum rules out "." and ".." — so an id IS its evidence
 // directory and its task name, translated nowhere: attempts/<id>/ is
-// injective in id by construction and "dawn/"+id is a name Harbor accepts.
+// injective in id by construction and "tally/"+id is a name Harbor accepts.
 // Three bugs came from leaving the id unconstrained and sanitising it per
 // consumer (a double slash in the name, a leading '.', two ids on one
 // evidence directory); one grammar at dispatch replaces all three.
 var stageID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
-// dispatchAttempt is Run's body — compiles the stage into a task.toml dawn
+// dispatchAttempt is Run's body — compiles the stage into a task.toml tally
 // owns entirely (artifacts list, separate no-network verifier, digest-pinned
 // verifier image) and dispatches it — parameterised on whether a spent scope
 // on the very FIRST charge is a protocol bug.
@@ -527,7 +527,7 @@ func (s *Scope) dispatchAttempt(stage Stage, bugOnFirstCharge bool) Result {
 // verdict for work that never happened, and actuate on it. Refused, never
 // re-dispatched: re-dispatching would overwrite the evidence that shows why.
 // No receipt at all is today's rule unchanged — nothing finished here, or
-// dawn died in the instant between Harbor's result.json and its own receipt,
+// tally died in the instant between Harbor's result.json and its own receipt,
 // the one window this cannot see.
 func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	var rec receipt
@@ -540,7 +540,7 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 		bug("evidence %s belongs to attempt %s (stage %q), not to stage %q's attempt %s: the stage changed since it ran, or two stages share one id",
 			evidence, rec.ID, rec.Stage, s.ID, attemptID(s, attempt))
 	// Model and effort are deliberately NOT folded into contentDigest
-	// (dawn.go's own comment on it says why), so the rec.ID check above
+	// (tally.go's own comment on it says why), so the rec.ID check above
 	// cannot see a profile that changed between the run that left this
 	// evidence and the one resuming over it: the hash is identical either
 	// way. This case is the sixth field attemptID's LOUD COMMENT prescribes
@@ -584,7 +584,7 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	// classify's first two rules branch on t.Cancelled and t.TimedOut, and
 	// those are ctx facts (clockOutcome) that live only in the process that
 	// dispatched. A resumed trial always reads them false, so the two states
-	// dawn owns DIRECTLY were unreachable on this path: a run resumed after a
+	// tally owns DIRECTLY were unreachable on this path: a run resumed after a
 	// real 20-minute timeout got InfraError — the one state dispatchAttempt
 	// RETRIES — and writeReceipt then rewrote the receipt to say so, erasing
 	// the Exhausted that the live run had correctly assigned. Retrying into
@@ -602,7 +602,7 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 	return r, true
 }
 
-// maxConcurrent is how wide a fanning agent may go: DAWN_MAX_CONCURRENT, or
+// maxConcurrent is how wide a fanning agent may go: TALLY_MAX_CONCURRENT, or
 // 1. There is no formula, and deleting the one that was here is the point.
 //
 // It computed clamp(1, NumCPU, 80% of the Docker VM's memory / the env
@@ -620,11 +620,11 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 // NumCPU is not the replacement, and that is measured rather than argued:
 // the incident this formula was built for WAS NumCPU — 12 wide against a
 // 1.94 GB image, ~23 GB asked of a 9.4 GB Docker VM, and an OOM-killed
-// attempt writes no result.json, so dawn filed it infra_error and burned the
+// attempt writes no result.json, so tally filed it infra_error and burned the
 // lease retrying into the same wall. Defaulting to NumCPU would replay the
 // incident on the machine it was measured on.
 //
-// The honest cap is not unknowable — but it is unknowable from INSIDE dawn.
+// The honest cap is not unknowable — but it is unknowable from INSIDE tally.
 // Every fix this formula ever got was a human measuring their own host by
 // hand and hardcoding another exec.Command; the algorithm never once adapted
 // on its own. That is guesswork wearing a formula's clothes. The operator who
@@ -634,7 +634,7 @@ func resumeResult(evidence string, s Stage, attempt int) (Result, bool) {
 // OOM, and nothing is left that can silently fail closed to it while
 // pretending otherwise.
 func maxConcurrent() int {
-	if v, ok := os.LookupEnv("DAWN_MAX_CONCURRENT"); ok {
+	if v, ok := os.LookupEnv("TALLY_MAX_CONCURRENT"); ok {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
@@ -646,7 +646,7 @@ func maxConcurrent() int {
 // never rebuilt — the structural form of Codex's cap of 1. Capacity is 1
 // when the profile cannot fan (Agent.fanOut == false), otherwise
 // maxConcurrent. Codex's cap of 1 is the structural one: it holds whatever
-// DAWN_MAX_CONCURRENT says, because it comes from the profile, not the
+// TALLY_MAX_CONCURRENT says, because it comes from the profile, not the
 // operator.
 //
 // Every dispatch acquires it, in dispatchAttempt above, fanned or not — which
@@ -681,7 +681,7 @@ func acquireAgentGate(a Agent) func() {
 	return func() { <-g }
 }
 
-// attemptClock is what one attempt gets: dawn's per-attempt clock, or the rest
+// attemptClock is what one attempt gets: tally's per-attempt clock, or the rest
 // of the scope's clock when that is shorter. The scope's WallClock is a bound
 // on the scope as a whole, so a late attempt is truncated rather than allowed
 // to run past it.
@@ -702,7 +702,7 @@ func (s *Scope) attemptClock() time.Duration {
 // Concurrency is admission, not a second data structure: dispatchAttempt's
 // existing charge() plus one per-agent-name semaphore (agentGates), sized
 // once against mk(0)'s Env — a fan is homogeneous, so every child shares one
-// image and dawn need not ask docker n times over. There is no ordering and
+// image and tally need not ask docker n times over. There is no ordering and
 // no fairness beyond index order; the "admission queue" once sketched in
 // CONTEXT.md never existed.
 //
@@ -745,8 +745,8 @@ func (s *Scope) Fan(n int, mk func(i int) Stage) []Result {
 	return results
 }
 
-// Record writes one named value into dawn's run record. It is the channel for
-// what no gate can write: arithmetic dawn does across many attempts, the
+// Record writes one named value into tally's run record. It is the channel for
+// what no gate can write: arithmetic tally does across many attempts, the
 // caveats a protocol with no sound oracle is obliged to state, and the external
 // effects that failed after a gate had already voted yes.
 //
@@ -792,24 +792,24 @@ func (s *Scope) Record(name string, value any) {
 func normalizeJSON(value any) any {
 	b, err := json.Marshal(value)
 	if err != nil {
-		panic(fmt.Sprintf("dawn: run record: %v", err))
+		panic(fmt.Sprintf("tally: run record: %v", err))
 	}
 	var norm any
 	if err := json.Unmarshal(b, &norm); err != nil {
-		panic(fmt.Sprintf("dawn: run record: %v", err))
+		panic(fmt.Sprintf("tally: run record: %v", err))
 	}
 	return norm
 }
 
-// flush rewrites the run record. Held under run.mu. A run record dawn cannot
+// flush rewrites the run record. Held under run.mu. A run record tally cannot
 // write is a run with no product, so the failure is loud.
 func (r *run) flush() {
 	b, err := json.MarshalIndent(r.values, "", "  ")
 	if err != nil {
-		panic(fmt.Sprintf("dawn: run record: %v", err))
+		panic(fmt.Sprintf("tally: run record: %v", err))
 	}
 	if err := os.WriteFile(filepath.Join(r.dir, "record.json"), append(b, '\n'), 0o644); err != nil {
-		panic(fmt.Sprintf("dawn: run record: %v", err))
+		panic(fmt.Sprintf("tally: run record: %v", err))
 	}
 }
 
@@ -817,14 +817,14 @@ func (r *run) flush() {
 // file to record.json, not a field inside it, because Record's one-write-
 // per-name rule and Step's whole point (the SAME key answered twice on
 // purpose) are different invariants and would be confusing sharing one map.
-// Held under run.mu, same as flush: a dedup record dawn cannot write is a
+// Held under run.mu, same as flush: a dedup record tally cannot write is a
 // dedup record nothing can trust on the next retry.
 // loadActuations reads back the dedup record a previous invocation of this
 // same run directory wrote.
 //
 // Without it, resume re-runs every actuator: Main always started with an empty
 // map, so a stage that already pushed a branch pushed it again. That directly
-// contradicts the actuator's own rule — dawn deduplicates a run's OWN retries,
+// contradicts the actuator's own rule — tally deduplicates a run's OWN retries,
 // and a crash-and-resume is exactly the retry that rule was written for. The
 // per-run scope of the record is deliberate and unchanged; this only makes the
 // record survive the process, which is what "durable" was always supposed to
@@ -854,10 +854,10 @@ func (r *run) loadActuations() {
 		return
 	}
 	if err != nil {
-		panic(fmt.Sprintf("dawn: actuation record unreadable at %s: %v", r.dir, err))
+		panic(fmt.Sprintf("tally: actuation record unreadable at %s: %v", r.dir, err))
 	}
 	if err := json.Unmarshal(b, &r.actuations); err != nil {
-		panic(fmt.Sprintf("dawn: actuation record corrupt at %s: %v — refusing to resume, because an empty record re-fires effects that already happened", r.dir, err))
+		panic(fmt.Sprintf("tally: actuation record corrupt at %s: %v — refusing to resume, because an empty record re-fires effects that already happened", r.dir, err))
 	}
 }
 
@@ -871,7 +871,7 @@ func (r *run) loadActuations() {
 // its fresh path; with r.values loaded here, that becomes a bug() — Record
 // sees a name already holding a DIFFERENT value — instead of a silent lie.
 // Without the load, it was a silent lie: the resumed record.json and
-// report.md named a remote with 0 branches and 0 tags, because dawn had no
+// report.md named a remote with 0 branches and 0 tags, because tally had no
 // memory of the one Step had actually pushed to.
 //
 // state and protocol_bug are deleted immediately after loading: they are
@@ -889,7 +889,7 @@ func (r *run) loadRecord() {
 	case errors.Is(err, os.ErrNotExist):
 		return
 	case err != nil:
-		panic(fmt.Sprintf("dawn: run record unreadable at %s: %v", r.dir, err))
+		panic(fmt.Sprintf("tally: run record unreadable at %s: %v", r.dir, err))
 	}
 	delete(r.values, "state")
 	delete(r.values, "protocol_bug")
@@ -898,9 +898,9 @@ func (r *run) loadRecord() {
 func (r *run) flushActuations() {
 	b, err := json.MarshalIndent(r.actuations, "", "  ")
 	if err != nil {
-		panic(fmt.Sprintf("dawn: actuation record: %v", err))
+		panic(fmt.Sprintf("tally: actuation record: %v", err))
 	}
 	if err := os.WriteFile(filepath.Join(r.dir, "actuations.json"), append(b, '\n'), 0o644); err != nil {
-		panic(fmt.Sprintf("dawn: actuation record: %v", err))
+		panic(fmt.Sprintf("tally: actuation record: %v", err))
 	}
 }

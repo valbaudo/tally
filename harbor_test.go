@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 import (
 	"context"
@@ -138,12 +138,12 @@ func readFile(t *testing.T, p string) string {
 }
 
 // The live path. Needs harbor, docker and the rc-pr-ci images; opt in with
-// DAWN_HARBOR_E2E=1. nop hands nothing over, so the gate's honest verdict is
-// zero and dawn's declared output is absent — the two facts a classifier
+// TALLY_HARBOR_E2E=1. nop hands nothing over, so the gate's honest verdict is
+// zero and tally's declared output is absent — the two facts a classifier
 // most needs to be able to tell apart.
 func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
-	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
-		t.Skip("set DAWN_HARBOR_E2E=1 (needs harbor, docker, rc-pr-ci images)")
+	if os.Getenv("TALLY_HARBOR_E2E") != "1" {
+		t.Skip("set TALLY_HARBOR_E2E=1 (needs harbor, docker, rc-pr-ci images)")
 	}
 	// A deadline, not context.Background(): runTrial no longer re-applies the
 	// attempt as a timeout of its own — the ctx it is handed carries it, which
@@ -154,9 +154,9 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 	got, err := runTrial(ctx, Stage{
 		ID:     "rc-pr-ci",
 		Agent:  Agent{name: "nop"},
-		Env:    Image(os.Getenv("DAWN_E2E_ENV")),
+		Env:    Image(os.Getenv("TALLY_E2E_ENV")),
 		Prompt: "Fix calc.py in /app/repo and write the diff as fix.patch.",
-		Gate:   SoundGate(Image(os.Getenv("DAWN_E2E_GATE"))),
+		Gate:   SoundGate(Image(os.Getenv("TALLY_E2E_GATE"))),
 	}, 10*time.Minute, dir)
 	if err != nil {
 		t.Fatalf("%v (see %s/harbor.log)", err, dir)
@@ -178,8 +178,8 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 //
 // NOT "oracle": Harbor's OracleAgent hardcodes its solution script's path as
 // <task_dir>/solution/solve.sh (harbor/models/task/paths.py) — a HOST-side
-// file dawn's compiler has no way to produce, because Stage has no
-// "solution" field and never will (dawn runs real agents against real
+// file tally's compiler has no way to produce, because Stage has no
+// "solution" field and never will (tally runs real agents against real
 // unknowns; baking an answer key is not in its vocabulary, on purpose). This
 // was verified by trying it: harbor fails every trial with "Solution script
 // not found" before ever reaching the gate.
@@ -190,25 +190,25 @@ func TestRunTrialAgainstAGeneratedTask(t *testing.T) {
 // gate run, and the state is irrelevant to what this test proves: overlap in
 // wall time, and correct placement by index.
 //
-// DAWN_MAX_CONCURRENT pins the width to exactly 4 so the comparison below
+// TALLY_MAX_CONCURRENT pins the width to exactly 4 so the comparison below
 // does not depend on this host's own memory or core count. Opt in with
-// DAWN_HARBOR_E2E=1, same images as TestRunTrialAgainstAGeneratedTask.
+// TALLY_HARBOR_E2E=1, same images as TestRunTrialAgainstAGeneratedTask.
 func TestFanOverlapsRealHarborTrials(t *testing.T) {
-	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
-		t.Skip("set DAWN_HARBOR_E2E=1 (needs harbor, docker, rc-pr-ci images)")
+	if os.Getenv("TALLY_HARBOR_E2E") != "1" {
+		t.Skip("set TALLY_HARBOR_E2E=1 (needs harbor, docker, rc-pr-ci images)")
 	}
 	// Opting into the e2e path and then leaving the images unset used to pass
 	// in 0.18s: both "trials" failed instantly, and "four fanned < 4x one"
 	// is trivially true of two instant failures. A test that passes when its
 	// subject never ran is worse than no test, so this fails rather than
 	// skips — the caller asked for the real thing.
-	if os.Getenv("DAWN_E2E_ENV") == "" || os.Getenv("DAWN_E2E_GATE") == "" {
-		t.Fatal("DAWN_HARBOR_E2E=1 requires DAWN_E2E_ENV and DAWN_E2E_GATE (digest-pinned images)")
+	if os.Getenv("TALLY_E2E_ENV") == "" || os.Getenv("TALLY_E2E_GATE") == "" {
+		t.Fatal("TALLY_HARBOR_E2E=1 requires TALLY_E2E_ENV and TALLY_E2E_GATE (digest-pinned images)")
 	}
-	t.Setenv("DAWN_MAX_CONCURRENT", "4")
+	t.Setenv("TALLY_MAX_CONCURRENT", "4")
 
-	env := Image(os.Getenv("DAWN_E2E_ENV"))
-	gate := Image(os.Getenv("DAWN_E2E_GATE"))
+	env := Image(os.Getenv("TALLY_E2E_ENV"))
+	gate := Image(os.Getenv("TALLY_E2E_GATE"))
 	stage := func(id string) Stage {
 		return Stage{
 			ID:      id,
@@ -264,7 +264,7 @@ func TestFanOverlapsRealHarborTrials(t *testing.T) {
 	}
 }
 
-// The classifier is the whole of dawn's state assignment, so it is asserted as
+// The classifier is the whole of tally's state assignment, so it is asserted as
 // a table on facts rather than through Docker. The clamp is the case that
 // matters most: a format-only gate that writes reward 1 is still Unverified,
 // and there is no arrangement of facts that makes it Passed.
@@ -296,7 +296,7 @@ func TestClassifyAssignsStatesByFirstMatch(t *testing.T) {
 		// leaves the output unwritten. It passed over an impossible world and
 		// hid the bug: Exhausted was assigned zero times in twenty-one real
 		// attempts.
-		"dawn's clock ended it": {sound, trial{TimedOut: true, Present: false, Rewarded: false, Fault: "CancelledError: "}, Exhausted},
+		"tally's clock ended it": {sound, trial{TimedOut: true, Present: false, Rewarded: false, Fault: "CancelledError: "}, Exhausted},
 		// The companion, and the reason the reorder is safe: an infra failure
 		// with no clock event is still InfraError, still retryable. This is
 		// the ~190s credential failure the old ordering claimed to protect —
@@ -344,7 +344,7 @@ func TestClassifyPassesALiveGatedStageOnRewardedPresentTrial(t *testing.T) {
 
 // trial.read resolves PublishDir from the SAME trialDir that yields
 // result.json — verifier/publish underneath it — without needing Harbor,
-// Docker or a manifest.json: this is dawn's own arithmetic on a path, not a
+// Docker or a manifest.json: this is tally's own arithmetic on a path, not a
 // property of what the trial contained.
 func TestTrialReadSetsPublishDirFromTheTrialDir(t *testing.T) {
 	jobsDir := t.TempDir()
@@ -403,7 +403,7 @@ func TestDigestMissingDeclaredNameIsNotPresent(t *testing.T) {
 	}
 }
 
-// Decision 3: an oversized declared output is not present either — dawn
+// Decision 3: an oversized declared output is not present either — tally
 // refusing its own collection, not a gate voting no — and "never truncate"
 // means it is never even partially digested.
 func TestDigestOversizedDeclaredNameIsNotPresent(t *testing.T) {
@@ -470,7 +470,7 @@ func TestInstructionNamesEachDeclaredOutput(t *testing.T) {
 	}
 }
 
-// clockOutcome is the pure translation from ctx.Err() dawn relies on to tell
+// clockOutcome is the pure translation from ctx.Err() tally relies on to tell
 // its own clock apart from an external cancel; classify's Cancelled-first
 // rule is only as correct as this mapping.
 func TestClockOutcome(t *testing.T) {
@@ -536,12 +536,12 @@ func TestTerminateGracefullyForceKillsAfterWaitDelay(t *testing.T) {
 // exception, because it is the one thing reap.go's whole reap set depends
 // on: Harbor's LocalTaskId.get_name() reads a task directory's basename
 // verbatim as the seed for trial_name, so this name — not "task", not
-// anything else — is what makes every container dawn creates start with
+// anything else — is what makes every container tally creates start with
 // reapPrefix. A regression here silently breaks reaping without breaking a
 // single Harbor trial.
-func TestGeneratedTaskDirNameIsDawn(t *testing.T) {
-	if generatedTaskDirName != "dawn" {
-		t.Fatalf("generatedTaskDirName = %q, want %q: reap.go's reapPrefix is derived from this constant", generatedTaskDirName, "dawn")
+func TestGeneratedTaskDirNameIsTally(t *testing.T) {
+	if generatedTaskDirName != "tally" {
+		t.Fatalf("generatedTaskDirName = %q, want %q: reap.go's reapPrefix is derived from this constant", generatedTaskDirName, "tally")
 	}
 	if want := generatedTaskDirName + "__"; reapPrefix != want {
 		t.Fatalf("reapPrefix = %q, want %q", reapPrefix, want)
@@ -553,16 +553,16 @@ func TestGeneratedTaskDirNameIsDawn(t *testing.T) {
 // from it (a literal "task" snuck back in here, say).
 func TestTaskDirForJoinsTheGeneratedTaskDirName(t *testing.T) {
 	got := taskDirFor("/run/attempts/x/1")
-	want := "/run/attempts/x/1/dawn"
+	want := "/run/attempts/x/1/tally"
 	if got != want {
 		t.Fatalf("taskDirFor(%q) = %q, want %q", "/run/attempts/x/1", got, want)
 	}
 }
 
-// harborArgs is the one place dawn tells Harbor what to pin. ClaudeCode's
+// harborArgs is the one place tally tells Harbor what to pin. ClaudeCode's
 // profile carries a model, so its argv must carry -m; a profile with neither
 // model nor effort set (the "nop" test agent, same as Codex today) must carry
-// neither flag — dawn records that it pinned nothing rather than guess.
+// neither flag — tally records that it pinned nothing rather than guess.
 func TestHarborArgsSetsModelAndEffortAsFlags(t *testing.T) {
 	pinned := Stage{ID: "s", Agent: ClaudeCode, Env: "e@sha256:0", Gate: NoGate("test")}
 	got := harborArgs(pinned, "/task", "/jobs")
@@ -633,7 +633,7 @@ func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `name = "dawn/pov-0"`) {
+	if !strings.Contains(string(b), `name = "tally/pov-0"`) {
 		t.Errorf("generated task did not carry the sanitised name; task.toml:\n%s", b)
 	}
 }
@@ -645,7 +645,7 @@ func TestTaskNameReachesTheGeneratedTask(t *testing.T) {
 func TestProveGateSkipsGatesThatClaimNothing(t *testing.T) {
 	proven = map[Image]bool{}
 	for _, g := range []Gate{
-		FormatOnlyGate("dawn-no-such-image-should-never-be-run"),
+		FormatOnlyGate("tally-no-such-image-should-never-be-run"),
 		NoGate("nothing to check here"),
 	} {
 		if err := proveGate(context.Background(), g, t.TempDir()); err != nil {
@@ -656,16 +656,16 @@ func TestProveGateSkipsGatesThatClaimNothing(t *testing.T) {
 
 // The live path: a gate proves itself, and a gate that ships no proof is
 // refused BEFORE an agent is dispatched, which is the whole point of the
-// check. Opt in with DAWN_HARBOR_E2E=1 (needs docker and the built images).
+// check. Opt in with TALLY_HARBOR_E2E=1 (needs docker and the built images).
 func TestProveGateRefusesAGateThatShipsNoProof(t *testing.T) {
-	if os.Getenv("DAWN_HARBOR_E2E") != "1" {
-		t.Skip("set DAWN_HARBOR_E2E=1 (needs docker and the built gate images)")
+	if os.Getenv("TALLY_HARBOR_E2E") != "1" {
+		t.Skip("set TALLY_HARBOR_E2E=1 (needs docker and the built gate images)")
 	}
 	proven = map[Image]bool{}
 	dir := t.TempDir()
 
 	// A real gate carries /gate/selftest.sh and passes it.
-	real := Image("dawn-pr-ci-gate@sha256:fb9372925196db1af71f3a1349f1e9c3b5c7d1c44621ec83a5d3b5483d117242")
+	real := Image("tally-pr-ci-gate@sha256:fb9372925196db1af71f3a1349f1e9c3b5c7d1c44621ec83a5d3b5483d117242")
 	if err := proveGate(context.Background(), SoundGate(real), dir); err != nil {
 		t.Fatalf("the pr-ci gate did not prove itself: %v", err)
 	}
@@ -811,7 +811,7 @@ func TestTheGateSeesTheStagesInputs(t *testing.T) {
 	}
 }
 
-// digest is the ONE place agent-controlled bytes enter dawn, and it used
+// digest is the ONE place agent-controlled bytes enter tally, and it used
 // os.Stat, which resolves symlinks. A declared output that is a symlink was
 // digested through to whatever it pointed at, so the agent chose which HOST
 // file became its Manifest — and that Manifest is mounted into the next
@@ -865,7 +865,7 @@ func TestDigestRefusesAnythingButARegularFile(t *testing.T) {
 // proveGate fail), which is the half where no trial exists to carry the fact.
 func TestDispatchDoesNotLaunderTheClockIntoInfraError(t *testing.T) {
 	s := Stage{ID: "clock", Agent: ClaudeCode, Env: Image("e@sha256:" + strings.Repeat("a", 64)),
-		Prompt: "p", Gate: SoundGate(Image("dawn-no-such-image@sha256:" + strings.Repeat("c", 64)))}
+		Prompt: "p", Gate: SoundGate(Image("tally-no-such-image@sha256:" + strings.Repeat("c", 64)))}
 
 	t.Run("expired clock is exhausted, not retryable", func(t *testing.T) {
 		proven = map[Image]bool{}

@@ -1,11 +1,11 @@
-// Package dawn runs agents against verifiers and believes only the verifier.
+// Package tally runs agents against verifiers and believes only the verifier.
 //
 // A protocol is a Go program written against this package: it declares stages,
 // bounds them with leases, reads back a closed set of six states, and — only on
-// passed — actuates. dawn compiles each stage into a Harbor task it owns
+// passed — actuates. tally compiles each stage into a Harbor task it owns
 // entirely, dispatches it, and assigns a state by first match without parsing a
 // single line of agent output. Everything that makes the verdict trustworthy is
-// dawn's, not the author's.
+// tally's, not the author's.
 //
 // This is the whole vocabulary an author has. Nothing else is expressible, on
 // purpose: every construct here was forced by at least one of the four
@@ -16,15 +16,15 @@
 // Everything the settled decisions already fix is absent from this surface:
 // the verifier always runs separate, no-network, after the agent's container
 // is gone, and always writes reward.json; the collected root, the retry
-// backoff, the per-agent concurrency cap and the idempotency key are dawn's,
+// backoff, the per-agent concurrency cap and the idempotency key are tally's,
 // not the author's. An author cannot restate them and so cannot contradict
-// them. Naming the Env image is naming the task, but the ROOT being dawn's
-// (outputDir) does not make the NAMES inside it dawn's too — nothing invents
+// them. Naming the Env image is naming the task, but the ROOT being tally's
+// (outputDir) does not make the NAMES inside it tally's too — nothing invents
 // a name for a file the agent has not written yet. That is why a Stage does
-// have an output field, Outputs: the one thing dawn cannot know in advance
+// have an output field, Outputs: the one thing tally cannot know in advance
 // and must still fix before dispatch, in Go source, rather than leave to
 // whatever the agent decides to call its own handover.
-package dawn
+package tally
 
 import (
 	"crypto/sha256"
@@ -33,21 +33,21 @@ import (
 	"time"
 )
 
-// State is a stage's outcome. Six values, and dawn assigns no other; the
+// State is a stage's outcome. Six values, and tally assigns no other; the
 // numeric reward is never one of them — it rides alongside as a metric
 // (Result.Metric). The zero State is not one of the six, which is why a
 // protocol seeds a loop variable with a state rather than with a zero Result.
 //
-// dawn assigns a state by first match, parsing no agent output at all:
+// tally assigns a state by first match, parsing no agent output at all:
 //
 //  1. external cancel                                    -> Cancelled
-//  2. dawn's own timeout hit                             -> Exhausted
+//  2. tally's own timeout hit                             -> Exhausted
 //  3. declared output missing or invalid                 -> InfraError (always)
 //  4. output present, gate wrote no valid reward         -> InfraError
 //  5. output present, gate ran, clean exit               -> Passed / Rejected,
 //     or Unverified for a format-only gate or no gate at all
 //
-// The first two are the facts dawn owns directly — both are ctx.Err() — and
+// The first two are the facts tally owns directly — both are ctx.Err() — and
 // they are read before anything inferred from what a killed attempt left
 // behind. Rules 3 and 4 used to come first, which made Exhausted unreachable:
 // a clock-kill always leaves a missing output and a Harbor fault, so the
@@ -63,7 +63,7 @@ const (
 	// Unverified: nothing established a verdict — a format-only gate, or no
 	// gate. It is the SUCCESS state of those stages, not a failure.
 	Unverified State = "unverified"
-	// Exhausted: dawn's own clock ended it, not the agent and not a gate. dawn
+	// Exhausted: tally's own clock ended it, not the agent and not a gate. tally
 	// assigns it to a dispatched attempt that hit its AttemptWallClock, and to
 	// nothing else (rule 2 above). It says nothing about whether the declared
 	// output was written or the gate ran — a clock-kill usually means neither,
@@ -74,10 +74,10 @@ const (
 	// A protocol may also RETURN it for a loop that never got to dispatch —
 	// More() false at the first turn — because that is the only honest word
 	// for "no gate ever voted because the lease ran out". That is the
-	// protocol's own reading of More(), never a state dawn assigned to a
+	// protocol's own reading of More(), never a state tally assigned to a
 	// stage; see More.
 	Exhausted State = "exhausted"
-	// InfraError: dawn could not obtain a verdict. Retried with backoff inside
+	// InfraError: tally could not obtain a verdict. Retried with backoff inside
 	// the attempt's own scope, against that scope's attempt lease.
 	InfraError State = "infra_error"
 	// Cancelled: cancelled from outside the run.
@@ -93,7 +93,7 @@ const (
 // — "v != InfraError" here, "len(found) > 0" there, "State == Unverified"
 // somewhere else — and each pass fixed one site and missed another, because
 // local reasoning at N sites reliably produces N-1 correct sites. Exhausted,
-// InfraError and Cancelled are all "dawn never obtained a verdict", and any
+// InfraError and Cancelled are all "tally never obtained a verdict", and any
 // site that wants to know whether anything was learned must call this.
 func (s State) Decided() bool {
 	return s == Passed || s == Rejected || s == Unverified
@@ -104,39 +104,39 @@ func (s State) Decided() bool {
 // which bytes are in which image.
 type Image string
 
-// Agent is an agent profile: dawn's knowledge of how to drive one CLI — its
+// Agent is an agent profile: tally's knowledge of how to drive one CLI — its
 // name, its model and its effort. It is a fact about that CLI, never a knob —
 // an author picks a profile and declares nothing else about it, least of all
-// its concurrency, which is a correctness property dawn fixes.
+// its concurrency, which is a correctness property tally fixes.
 //
 // It does NOT carry an image. The image a stage runs in is Stage.Env, and the
 // agent CLI is baked into it: Harbor installs the CLI before the agent phase
-// begins, so on dawn's no-network environments an unbaked CLI cannot reach a
+// begins, so on tally's no-network environments an unbaked CLI cannot reach a
 // package mirror and the trial dies in setup. A profile therefore names a CLI,
 // and the environment supplies its bytes. Agent once carried an image field
 // of its own, pinned to a literal sha256:0000…; nothing ever read it, so it
 // pinned nothing while claiming to — the exact lie Image exists to prevent.
 //
-// model and effort are facts dawn pins because leaving either unpinned does
+// model and effort are facts tally pins because leaving either unpinned does
 // not mean the CLI runs with none. Harbor's adapter finds ANTHROPIC_MODEL (or
 // --effort) unset and the CLI resolves it from ambient account state instead,
 // so the identical protocol can silently run a different model tomorrow, on a
-// host whose account state changed under it, with nothing in dawn's own
+// host whose account state changed under it, with nothing in tally's own
 // receipt to say so. Pinning them here is what lets the receipt record what
-// dawn told Harbor to run rather than nothing at all — see harborArgs.
+// tally told Harbor to run rather than nothing at all — see harborArgs.
 //
-// EVERY field is dawn's own knowledge, so all of them are unexported: a
+// EVERY field is tally's own knowledge, so all of them are unexported: a
 // protocol selects a profile, it never reads one apart and it certainly never
 // writes one. fanOut was exported once, on the theory that a protocol would
 // read it to state in its caveats that a fan is single-vendor. No protocol
 // ever did. What the export bought instead was the opposite of the paragraph
-// above: ClaudeCode and Codex are package-level vars, so `dawn.Codex.fanOut =
+// above: ClaudeCode and Codex are package-level vars, so `tally.Codex.fanOut =
 // true` — or a copy with the name kept and the bool flipped — resized codex's
 // semaphore from 1 to the whole pool. A field exported so an author could
 // STATE a correctness fact let the author OVERRIDE it.
 type Agent struct {
 	name   string
-	model  string // verbatim to `harbor -m`; "" means dawn pins nothing (oracle, nop)
+	model  string // verbatim to `harbor -m`; "" means tally pins nothing (oracle, nop)
 	effort string // verbatim to `--ak reasoning_effort=`; same rule
 	// fanOut reports whether this profile may run more than one attempt at a
 	// time. Read only by acquireAgentGate, which sizes the per-agent
@@ -144,13 +144,13 @@ type Agent struct {
 	fanOut bool
 }
 
-// The profiles dawn ships. Only ClaudeCode may fan out. ClaudeCode's model is
+// The profiles tally ships. Only ClaudeCode may fan out. ClaudeCode's model is
 // pinned to what every run has actually been doing — measured off Harbor's
 // raw agent logs, since nothing before this recorded it — so the pin is
 // behaviour-neutral.
 //
 // Codex's model was "" on the principle that guessing a default would be
-// inventing a fact dawn has not measured. That principle stands; it simply no
+// inventing a fact tally has not measured. That principle stands; it simply no
 // longer applies. The operator named the model, and the identifier is checked
 // against the CLI's OWN list rather than assumed: codex's models_cache.json
 // carries gpt-5.6-luna, and "max" is in its supported_reasoning_levels. So
@@ -169,7 +169,7 @@ var (
 // a verifier image without saying what it establishes.
 //
 // The constructors make the illegal states unnameable, not unrepresentable: a
-// zero Gate, SoundGate("") and NoGate("") are one value, and dawn rejects it
+// zero Gate, SoundGate("") and NoGate("") are one value, and tally rejects it
 // at dispatch for the same reason it rejects an unpinned Image — a gate is
 // either a digest-pinned image or a stated reason there is none.
 type Gate struct {
@@ -182,14 +182,14 @@ type Gate struct {
 // SoundGate is a gate whose passed verdict is a claim about the world. It is
 // the only kind of gate a stage can reach Passed through.
 //
-// Soundness is the AUTHOR's claim, and dawn believed three gates that did not
+// Soundness is the AUTHOR's claim, and tally believed three gates that did not
 // have it. The rule that would have caught all three by inspection, in the
 // order they were found:
 //
 //	A gate is sound only if the artifact supplies DATA to a procedure it
 //	cannot alter.
 //
-// There are exactly two ways to break it, and dawn's own targets managed both.
+// There are exactly two ways to break it, and tally's own targets managed both.
 // The artifact must not get to CHOOSE THE TEST: vdh-adyen let a finding name
 // both the exploit request and its control, so two unrelated endpoints — a
 // storefront homepage that answers 200 and an API that answers 401 — satisfied
@@ -204,9 +204,9 @@ type Gate struct {
 // the agent hands over argv bytes, and the two builds, the runner and the
 // comparison are all the gate's own.
 //
-// dawn cannot check the rule — it is a property of a gate's reasoning, not of
-// any bytes dawn can read. What dawn does check is that the gate PROVES ITSELF
-// before dawn will spend an agent on it: see gateSelftest in harbor.go, which
+// tally cannot check the rule — it is a property of a gate's reasoning, not of
+// any bytes tally can read. What tally does check is that the gate PROVES ITSELF
+// before tally will spend an agent on it: see gateSelftest in harbor.go, which
 // runs the gate's own selftest in the pinned image and refuses to dispatch if
 // it does not pass. What that selftest must contain is the contract at
 // outputDir, and the case that matters is the last one — an artifact that
@@ -223,7 +223,7 @@ func SoundGate(img Image) Gate { return Gate{image: img} }
 // system, and an empty-versus-non-empty argument list would bury that.
 //
 // hosts are the engagement scope, and they are enforced by the container's
-// egress policy rather than by the gate's good behaviour. dawn is therefore
+// egress policy rather than by the gate's good behaviour. tally is therefore
 // entitled to say where the gate COULD reach; it observes no traffic and
 // never claims where it did.
 //
@@ -233,13 +233,13 @@ func SoundGate(img Image) Gate { return Gate{image: img} }
 // the same "qualify the id by whatever varies" rule Stage.ID already states.
 func LiveGate(img Image, hosts ...string) Gate { return Gate{image: img, hosts: hosts} }
 
-// FormatOnlyGate is a gate that can check shape but establish nothing. dawn
+// FormatOnlyGate is a gate that can check shape but establish nothing. tally
 // clamps such a stage to Unverified mechanically: there is no code path from
 // here to Passed. Its metrics are still the only way a number leaves a stage
-// dawn cannot verify.
+// tally cannot verify.
 func FormatOnlyGate(img Image) Gate { return Gate{image: img, formatOnly: true} }
 
-// NoGate is the plain absence of a verifier plus the reason it is absent. dawn
+// NoGate is the plain absence of a verifier plus the reason it is absent. tally
 // disables the runner's verifier; the stage is Unverified by construction. The
 // reason is required — an empty one is rejected at dispatch — because an
 // ungated stage is the one place a protocol can quietly stop checking
@@ -264,7 +264,7 @@ func (g Gate) kind() string {
 
 // Lease is everything an author may declare about scarcity: three numbers, all
 // time or count. There is no token ceiling and no dollar ceiling — provider
-// quota has no published bound and its exhaustion may be unobservable, so dawn
+// quota has no published bound and its exhaustion may be unobservable, so tally
 // tracks draw rate and never pretends to hold a balance.
 //
 // A lease sized to exactly the work it funds is a lease that cannot pay for
@@ -279,13 +279,13 @@ type Lease struct {
 	// WallClock bounds the scope as a whole. It has to cover the attempts
 	// Attempts funds, at AttemptWallClock apiece, plus their retry backoff.
 	WallClock time.Duration
-	// AttemptWallClock is dawn's own per-attempt clock: the only thing dawn
+	// AttemptWallClock is tally's own per-attempt clock: the only thing tally
 	// turns into Exhausted, and the only thing that stops one wedged agent
 	// from eating the whole scope.
 	AttemptWallClock time.Duration
 }
 
-// dawn's retry schedule. Harbor's max_retries is 0, so dawn owns retry: an
+// tally's retry schedule. Harbor's max_retries is 0, so tally owns retry: an
 // infra_error is re-dispatched inside the scope that owns the attempt, after
 // sleeping. The delay before the nth retry of a scope is the base doubled n-1
 // times and clamped — 15s, 30s, 1m, 2m, 4m, 5m, 5m, ... — so a scope that
@@ -293,7 +293,7 @@ type Lease struct {
 // 5m poll instead of growing without bound.
 //
 // These are constants and not knobs on purpose: the backoff is one of the
-// things the package doc lists as dawn's rather than the author's, and
+// things the package doc lists as tally's rather than the author's, and
 // WallClock is derived from them (see Dispatching) rather than declared
 // against them.
 const (
@@ -329,7 +329,7 @@ func retryBackoffTotal(attempts int) time.Duration {
 
 // Dispatching builds the lease of a scope that dispatches attempts itself.
 //
-// Its WallClock is DERIVED rather than chosen, because dawn admits against ITS
+// Its WallClock is DERIVED rather than chosen, because tally admits against ITS
 // concurrency and not the author's. A scope clocked below the serial floor
 // makes its own later attempts unreachable; they return Exhausted, which then
 // feeds the guards that ask whether a gate voted. Hand-written clocks got this
@@ -337,7 +337,7 @@ func retryBackoffTotal(attempts int) time.Duration {
 // no longer hand-written: the invariant holds by construction instead of by
 // review.
 //
-// The floor is attempts x perAttempt PLUS dawn's own retry backoff, not
+// The floor is attempts x perAttempt PLUS tally's own retry backoff, not
 // attempts x perAttempt alone. The prototype derived only the running time and
 // so under-clocked every scope by the sleeping time: Attempts funds retries,
 // each retry sleeps before it dispatches, and that sleep is charged to the
@@ -357,9 +357,9 @@ func Dispatching(attempts int, perAttempt time.Duration) Lease {
 }
 
 // Artifact is one declared output that crossed a stage boundary. Two fields,
-// because two are all a protocol can act on: the logical name from dawn's
+// because two are all a protocol can act on: the logical name from tally's
 // list, and the digest of the bytes that carried it. The path, the size and
-// the producing attempt are dawn's bookkeeping, not the author's vocabulary.
+// the producing attempt are tally's bookkeeping, not the author's vocabulary.
 type Artifact struct {
 	Name   string
 	Digest string
@@ -380,14 +380,14 @@ type Artifact struct {
 // chmod would not change that; root ignores the bits, and the transport
 // bakes rather than mounts, so there is nothing to mount ro. The claim was
 // harmless and false: what a receiving stage does to its own copy reaches
-// nothing, because deriveGate builds the GATE's copy from dawn's own host
+// nothing, because deriveGate builds the GATE's copy from tally's own host
 // bytes, which no agent has touched. Harmless is not a reason to keep
 // telling the agent something untrue.
 type Manifest []Artifact
 
 // Stage is one runner call: one agent, one environment, one instruction, one
 // set of declared outputs, one gate. Seven fields, and every one of them is
-// something dawn cannot know.
+// something tally cannot know.
 type Stage struct {
 	// ID is stable across attempts and must be unique within the RUN, not
 	// merely within its scope: attempt_id hashes the stage id and no scope
@@ -407,10 +407,10 @@ type Stage struct {
 	// Prompt is the prose instruction. It is the only thing that tells the
 	// agent what to hand back, which makes it part of the integrity argument.
 	Prompt string
-	// Outputs is the exact set of relative paths under dawn's fixed output
+	// Outputs is the exact set of relative paths under tally's fixed output
 	// directory that the agent must write. Each entry is both the logical
 	// name AND the path — there is no separate Path field, because the root
-	// is already dawn's and only the name inside it was ever in question.
+	// is already tally's and only the name inside it was ever in question.
 	// writeTask puts these exact paths into the instruction, so the agent is
 	// never guessing what to call its handover; digest looks up each one by
 	// name instead of walking the output tree, so a file the agent invented
@@ -434,11 +434,11 @@ type Stage struct {
 	// They are BAKED, not mounted, and the difference is worth stating because
 	// this doc claimed the wrong one for months while emitting nothing at all.
 	// Harbor gives a task one environment — a prebuilt image OR a Dockerfile in
-	// the task directory — so dawn generates that Dockerfile: FROM the stage's
+	// the task directory — so tally generates that Dockerfile: FROM the stage's
 	// own pinned Env, COPY the inputs. See inputDir in harbor.go for why the
 	// docker_image key then has to be absent.
 	//
-	// Each input arrives at /app/inputs/<its Stage>/<name>, and dawn writes
+	// Each input arrives at /app/inputs/<its Stage>/<name>, and tally writes
 	// those paths into the instruction so the prompt never has to. Order is
 	// still hashed — attemptID folds in inputDigest, so two stages differing
 	// only in which results they consume are different attempts — but order no
@@ -462,8 +462,8 @@ type Result struct {
 	// package — copyInputs, gateContext's cache key, and the instruction.
 	//
 	// It was exported once, on the rationale that it "is the only thing that
-	// makes a multi-input stage legible". That legibility comes from dawn
-	// writing the field and dawn reading it; no protocol ever read it. What
+	// makes a multi-input stage legible". That legibility comes from tally
+	// writing the field and tally reading it; no protocol ever read it. What
 	// the export did buy was a protocol's ability to WRITE it, and since it
 	// becomes a directory name in two containers, copyInputs had to re-check
 	// it against the stage-id grammar — a guard that could only ever fire for
@@ -498,11 +498,11 @@ type Result struct {
 	publishDir string
 	// artifactsDir is where this attempt's declared outputs actually sit on
 	// the host. Unexported for the same reason publishDir is: a protocol names
-	// a Result in Stage.Inputs and dawn resolves the bytes — an author never
+	// a Result in Stage.Inputs and tally resolves the bytes — an author never
 	// handles a path, so an author can never point one somewhere else.
 	artifactsDir string
 	// drew is what this attempt drew, for the receipt. Unexported for the
-	// same reason metrics is: consumption is something dawn reports, never
+	// same reason metrics is: consumption is something tally reports, never
 	// something a protocol branches on. There is no denominator to compare
 	// it against, so there is nothing here for control flow to do.
 	drew *draw
@@ -521,7 +521,7 @@ type Result struct {
 // anything durable is keyed by it (the per-run actuation record, Step's
 // dedup): if a later ticket changes what feeds contentDigest or inputDigest,
 // every existing dedup record silently starts meaning something else — same
-// key, different attempt, and dawn would skip an effect that never actually
+// key, different attempt, and tally would skip an effect that never actually
 // ran. Recovery, whenever it lands, must layer run/lineage identity
 // ALONGSIDE this hash — a sixth field appended elsewhere — never fold a new
 // ingredient INTO this hash after the fact.

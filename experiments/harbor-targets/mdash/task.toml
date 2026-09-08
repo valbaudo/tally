@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = ["/app/outputs"]
 
 [task]
-name = "dawn/mdash"
+name = "tally/mdash"
 version = "1.0.0"
 description = "Exercise the IDOR in the mdash toy service; gate re-derives ground truth"
 keywords = []
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411"
+docker_image = "tally-mdash-gate@sha256:1cd29af57118414f967b7898e6747f0f8f60588f9809f3f07d5835f676628411"
 network_mode = "no-network"
 
 [verifier.env]

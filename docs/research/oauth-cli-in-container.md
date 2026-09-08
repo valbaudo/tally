@@ -1,6 +1,6 @@
 # OAuth agent CLIs inside a Harbor container
 
-**Ticket:** dawn #35 · **Date:** 2026-09-04 · **Machine:** this laptop (OrbStack, Harbor 0.22.0, arm64)
+**Ticket:** tally #35 · **Date:** 2026-09-04 · **Machine:** this laptop (OrbStack, Harbor 0.22.0, arm64)
 **Constraint:** OAuth subscription only. No API keys, no gateway, no spend.
 
 ---
@@ -15,7 +15,7 @@ exactly this use, it is injected as an env var so N parallel trials cannot corru
 and the full Harbor→container→api.anthropic.com chain is measured working below. Codex also
 works, but its credential is a single-use rotating refresh token shared with the host laptop:
 the moment a trial straddles the refresh window, one trial wins and the rest — plus the user's
-own `codex login` — are dead. OpenAI's own documentation forbids the fan-out shape dawn wants.
+own `codex login` — are dead. OpenAI's own documentation forbids the fan-out shape tally wants.
 **The four protocols as sketched — alternating claude and codex for cross-vendor decorrelation —
 cannot be run as written for the parallel legs.** The honest fallback is claude-code for
 everything wide, and codex reserved for single-trial, serialized legs run inside a known-safe
@@ -64,7 +64,7 @@ Both values reach the agent through `--ae/--agent-env KEY=VALUE` on `harbor run`
 
 ### MEASURED: the chain works end to end inside a real Harbor trial
 
-Run against `experiments/harbor-targets/pr-ci` (the only dawn target whose agent environment is
+Run against `experiments/harbor-targets/pr-ci` (the only tally target whose agent environment is
 `network_mode = "public"`), with a **deliberately fake** token — no real credential, no billable
 model call:
 
@@ -130,10 +130,10 @@ From <https://code.claude.com/docs/en/devcontainer>:
 > "Avoid mounting host secrets such as `~/.ssh` or cloud credential files into the container;
 > prefer repository-scoped or short-lived tokens."
 
-That second warning is live for dawn: Harbor runs claude with `--permission-mode=bypassPermissions`
-and dawn's targets (mdash, cybergym, vdh) are deliberately hostile code. A trial that executes
+That second warning is live for tally: Harbor runs claude with `--permission-mode=bypassPermissions`
+and tally's targets (mdash, cybergym, vdh) are deliberately hostile code. A trial that executes
 untrusted target code with `CLAUDE_CODE_OAUTH_TOKEN` in its environment can exfiltrate the user's
-subscription token. dawn's targets are all `no-network` in the environment phase, which is the
+subscription token. tally's targets are all `no-network` in the environment phase, which is the
 mitigation — see the "egress" section below for the tension this creates.
 
 ### Real caveats
@@ -240,29 +240,29 @@ fallback when the JWT cannot be parsed. Confirmed empirically: `last_refresh` do
 2025-01-01 (20 months stale) produced **zero** refresh attempts, because the access token's `exp`
 was still in the future.
 
-**This means dawn cannot compute the safe window from outside without parsing the user's JWT.**
+**This means tally cannot compute the safe window from outside without parsing the user's JWT.**
 The current access token's `exp` was measured at 2026-09-07 — roughly three days from now. Codex
-is safe to run today and a landmine next week, and nothing in dawn's config can tell the difference.
+is safe to run today and a landmine next week, and nothing in tally's config can tell the difference.
 
 ### Concurrency: measured safe, structurally unsafe
 
 Two containers ran simultaneously on the identical token: both `EXIT=0`, neither invalidated the
 other, and a third run in the original container afterwards still worked. That held **only because
 no refresh was due**. It is not evidence that fan-out is safe; it is evidence that fan-out outside
-the refresh window is safe, and dawn cannot see the window.
+the refresh window is safe, and tally cannot see the window.
 
 ### Other measured facts
 
 - **Schema is strict, all-or-nothing.** Removing `id_token` → ``missing field `id_token` ``, exit 1.
   Removing `refresh_token` → ``missing field `refresh_token` ``, exit 1. `account_id` is optional.
-  So dawn **cannot** mount a stripped, access-token-only credential to sidestep rotation — codex
+  So tally **cannot** mount a stripped, access-token-only credential to sidestep rotation — codex
   refuses to parse it.
 - **`CODEX_HOME` must be writable and is not small.** Cold start creates `state_5.sqlite`,
   `logs_2.sqlite`, `goals_1.sqlite`, `memories_1.sqlite`, `installation_id`, `config.toml`,
   `models_cache.json`, `sessions/`, `skills/`, `plugins/`, `cache/`. Only `auth.json` itself can
   be read-only.
 - **Trace logging leaks PII.** With `RUST_LOG=trace`, `codex_otel.log_only` events print
-  `user.account_id=<uuid>` and `user.email=<address>` in plaintext on stdout. If dawn captures
+  `user.account_id=<uuid>` and `user.email=<address>` in plaintext on stdout. If tally captures
   verbose codex logs into a trial artifact, it ships the subscription owner's email and account id
   with it. (`codex_otel.trace_safe` is the redacted twin.)
 - **Exit code is masked by a pipe.** `codex exec ... | tail` reports tail's status: a run that
@@ -284,7 +284,7 @@ the refresh window is safe, and dawn cannot see the window.
 
 ## Harbor-level findings (measured here, new)
 
-### 1. dawn's targets are `no-network` in the agent phase — no agent CLI can even install
+### 1. tally's targets are `no-network` in the agent phase — no agent CLI can even install
 
 `harbor run -p mdash -a claude-code ...` failed at **agent setup**, before any auth:
 
@@ -317,7 +317,7 @@ shape OpenAI's own doc requires — but it converts a 24-wide fan-out into a 24-
 
 ### 3. Harbor already models both OAuth paths
 
-Neither CLI needs a dawn-side hack. `--ae CLAUDE_FORCE_OAUTH=1 --ae CLAUDE_CODE_OAUTH_TOKEN=...`
+Neither CLI needs a tally-side hack. `--ae CLAUDE_FORCE_OAUTH=1 --ae CLAUDE_CODE_OAUTH_TOKEN=...`
 and `--ae CODEX_AUTH_JSON_PATH=/path/to/seed/auth.json` are the whole integration. Use
 `CODEX_AUTH_JSON_PATH` pointed at a dedicated 0600 seed copy, **never** `CODEX_FORCE_AUTH_JSON`,
 which reads `~/.codex/auth.json` directly.
@@ -337,14 +337,14 @@ Why, plainly:
    working in a hand-built container, but has **never** been run through a Harbor trial here, and
    its one dangerous path was deliberately not exercised.
 3. Anthropic explicitly publishes `setup-token` for this. OpenAI explicitly publishes a rule
-   against the shape dawn wants (below).
+   against the shape tally wants (below).
 
 **What this costs — say it plainly:**
 
 > The four acceptance protocols as sketched alternate between claude and codex to get cross-vendor
 > decorrelation. **That cannot be run as written on this laptop.** Codex cannot safely take a
 > parallel leg, and cannot safely take *any* leg once its access token enters its five-minute
-> refresh window — a moment dawn cannot detect from the outside.
+> refresh window — a moment tally cannot detect from the outside.
 
 The honest fallback, in order of preference:
 
@@ -412,8 +412,8 @@ Consumer Terms §2:
 > "You may not share your Account login information, Anthropic API key, or Account credentials with
 > anyone else or make your Account available to anyone else."
 
-Binds the token to the user personally. dawn on the user's own laptop under the user's own seat is
-fine. Distributing that token to other people, a shared runner, or other users of dawn is not.
+Binds the token to the user personally. tally on the user's own laptop under the user's own seat is
+fine. Distributing that token to other people, a shared runner, or other users of tally is not.
 
 **Explicitly silent:** <https://support.claude.com/en/articles/11145838> says nothing about
 automated, headless, or unattended operation, and nothing about parallel agents or sessions. No
@@ -459,7 +459,7 @@ Europe Terms of Use (EEA resident, updated January 16, 2026), <https://openai.co
 The tension between the last set and the CI guide's explicit blessing of `codex exec` on a ChatGPT
 `auth.json` is **not resolved here** — both are quoted as written. What is unambiguous and directly
 actionable: OpenAI states in its own Codex documentation that one `auth.json` must not be shared
-across concurrent jobs. dawn's fan-out is exactly that shape.
+across concurrent jobs. tally's fan-out is exactly that shape.
 
 **Neither source is silent.** Anthropic explicitly permits the scripted path and is silent only on
 concurrency; OpenAI explicitly permits the CI path and explicitly forbids the concurrent one.
@@ -474,7 +474,7 @@ concurrency; OpenAI explicitly permits the CI path and explicitly forbids the co
 2. **Codex has never been run through a Harbor trial here at all.** Everything codex-side is from
    hand-built containers. Harbor's upload-and-symlink path is read from source, not exercised.
 3. **The codex refresh-failure mode is source-derived, never observed.** Forcing it means either
-   burning the user's real refresh token or faking the clock against a static binary. If dawn ever
+   burning the user's real refresh token or faking the clock against a static binary. If tally ever
    depends on codex, this stays a known unknown.
 4. **Rate-limit behaviour at 24-wide is unmeasured.** How many concurrent claude-code trials a Pro
    or Max seat sustains before 429s dominate, and whether Harbor's retry classification handles
@@ -495,7 +495,7 @@ concurrency; OpenAI explicitly permits the CI path and explicitly forbids the co
 
 ```bash
 export PATH="$HOME/.orbstack/bin:$PATH"
-cd /Users/vabbb/Documents/GitHub/dawn/experiments/harbor-targets
+cd /Users/vabbb/Documents/GitHub/tally/experiments/harbor-targets
 
 # The fake-token probe. No real credential, no billable call. Expect a 401.
 harbor run -p pr-ci -a claude-code -m claude-sonnet-4-5 \
@@ -518,4 +518,4 @@ Harbor source paths on this machine:
   (agent-phase semaphore)
 
 No credential was printed, copied out of the keychain, baked into an image, or sent anywhere. The
-host's `~/.codex/auth.json` and `~/.claude/` were not modified. Only `dawn-pg` remains running.
+host's `~/.codex/auth.json` and `~/.claude/` were not modified. Only `tally-pg` remains running.

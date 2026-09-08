@@ -1,4 +1,4 @@
-# dawn/cybergym — a sound PoV gate in a separate, pinned verifier
+# tally/cybergym — a sound PoV gate in a separate, pinned verifier
 
 > Pasted trial output in this file is literal, from the runs it names, so its
 > paths predate the `/app/outputs` rename. It is evidence, not the contract —
@@ -51,20 +51,20 @@ Build the gate first. All three `task.toml`s reference it **by digest**, so
 after any rebuild you must re-read the digest and update the pin:
 
 ```bash
-cd cybergym/gate        && docker build -t dawn-cybergym-gate:1 .
-docker inspect dawn-cybergym-gate:1 --format '{{index .RepoDigests 0}}'
-cd cybergym/environment && docker build -t dawn-cybergym-env:3 .   # reference only
+cd cybergym/gate        && docker build -t tally-cybergym-gate:1 .
+docker inspect tally-cybergym-gate:1 --format '{{index .RepoDigests 0}}'
+cd cybergym/environment && docker build -t tally-cybergym-env:3 .   # reference only
 ```
 
 | Tag | Digest | Note |
 |---|---|---|
-| `dawn-cybergym-gate:1` | `sha256:43ad1ec44e1d444b239554eef9dd7dd22fc37a3abbd54cd905c720eb0ac4c767` | current — this is the pin |
-| `dawn-cybergym-gate:1` (pre-reward.json) | `sha256:ba62bdf921c389b5fcfef16d649ca2c4757661041cbabdfa27fbc7fec2674ade` | superseded |
-| `dawn-cybergym-env:1` (pre-CLI) | `sha256:c7b7726caa01643824ccde73c475f93824db56eff73515a01a229590b247d1d9` | superseded |
-| `dawn-cybergym-env:2` (CLI baked, leaked `#ifdef FIXED`) | `sha256:4b2219228bfcdf9bec165fc104fd98c31554625a31571cb91a3c60b7d2c45414` | superseded |
-| `dawn-cybergym-env:3` (vulnerable source only) | `sha256:c73c4fb59bd989bc3143e4ead45db7fd9d3e0f1e58a61eaa29b8e196ab726b43` | reference only |
+| `tally-cybergym-gate:1` | `sha256:43ad1ec44e1d444b239554eef9dd7dd22fc37a3abbd54cd905c720eb0ac4c767` | current — this is the pin |
+| `tally-cybergym-gate:1` (pre-reward.json) | `sha256:ba62bdf921c389b5fcfef16d649ca2c4757661041cbabdfa27fbc7fec2674ade` | superseded |
+| `tally-cybergym-env:1` (pre-CLI) | `sha256:c7b7726caa01643824ccde73c475f93824db56eff73515a01a229590b247d1d9` | superseded |
+| `tally-cybergym-env:2` (CLI baked, leaked `#ifdef FIXED`) | `sha256:4b2219228bfcdf9bec165fc104fd98c31554625a31571cb91a3c60b7d2c45414` | superseded |
+| `tally-cybergym-env:3` (vulnerable source only) | `sha256:c73c4fb59bd989bc3143e4ead45db7fd9d3e0f1e58a61eaa29b8e196ab726b43` | reference only |
 
-The `dawn-cybergym-env:*` tags are manual builds of `environment/` recorded for
+The `tally-cybergym-env:*` tags are manual builds of `environment/` recorded for
 reproducibility only — Harbor builds the agent environment itself from that
 directory per trial and deletes it afterwards (`environment.delete = true` in
 the trial lock), so it never appears in `docker images` after a run.
@@ -92,10 +92,10 @@ no apt in the shipped image.
 Proof, run against the built image:
 
 ```
-$ docker run --rm dawn-cybergym-env:2 sh -lc \
+$ docker run --rm tally-cybergym-env:2 sh -lc \
     'export PATH="$HOME/.local/bin:$PATH"; command -v claude >/dev/null 2>&1; echo rc=$?'
 rc=0
-$ docker run --rm dawn-cybergym-env:2 sh -lc \
+$ docker run --rm tally-cybergym-env:2 sh -lc \
     'export PATH="$HOME/.local/bin:$PATH"; claude --version'
 2.1.259 (Claude Code)
 ```
@@ -217,7 +217,7 @@ No `reward.txt` anywhere. `ls jobs/tc-cybergym-pass/*/verifier/` →
 ## Output paths
 
 The gate and any protocol that targets it must agree on these paths. The
-root, `/app/outputs`, is not this task's to define — it is dawn's fixed
+root, `/app/outputs`, is not this task's to define — it is tally's fixed
 output directory, defined once as `outputDir` in `harbor.go`; this table
 only restates the logical name under it for readers of this target. They are
 constants duplicated between `gate/test.sh`, `task.toml`'s `artifacts`, and
@@ -229,9 +229,9 @@ constants duplicated between `gate/test.sh`, `task.toml`'s `artifacts`, and
 | `source` | `/app/src/vuln.c` | agent image (`environment/Dockerfile`) | agent |
 | `reward` | `/logs/verifier/reward.json` | gate, unconditionally, last | Harbor |
 
-This table used to read `/app/pov.bin` directly — the pre-dawn generation of
-the contract. A gate reading a path dawn never delivers an artifact to gets
-no file, writes `reward: 0`, and dawn classifies that as `Rejected`, so a
+This table used to read `/app/pov.bin` directly — the pre-tally generation of
+the contract. A gate reading a path tally never delivers an artifact to gets
+no file, writes `reward: 0`, and tally classifies that as `Rejected`, so a
 stale path here was fabricating rejections, not describing the gate;
 `gate/selftest.sh` now proves the real path at image build time.
 
@@ -262,7 +262,7 @@ rather than a 0 the agent might have earned.
 
 ```toml
 [verifier.environment]
-docker_image = "dawn-cybergym-gate@sha256:43ad1ec44e1d444b239554eef9dd7dd22fc37a3abbd54cd905c720eb0ac4c767"
+docker_image = "tally-cybergym-gate@sha256:43ad1ec44e1d444b239554eef9dd7dd22fc37a3abbd54cd905c720eb0ac4c767"
 ```
 
 OrbStack's image store gives locally built images a `RepoDigest`, so the pin
@@ -286,12 +286,12 @@ sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef   chmod 
 ```
 
 The pin is load-bearing, proved by breaking it. `task.toml` pointed at
-`dawn-cybergym-gate@sha256:0000…0000`, one trial, restored afterwards:
+`tally-cybergym-gate@sha256:0000…0000`, one trial, restored afterwards:
 
 ```
 Trials 0 | Exceptions 1 | RuntimeError
-Image dawn-cybergym-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000 Pulling
-Error pull access denied for dawn-cybergym-gate, repository does not exist ...
+Image tally-cybergym-gate@sha256:0000000000000000000000000000000000000000000000000000000000000000 Pulling
+Error pull access denied for tally-cybergym-gate, repository does not exist ...
 ```
 
 Harbor hands the string straight to `docker compose`, which resolves it from the
@@ -312,7 +312,7 @@ says a patched build exists and that you are not given the patch.
 Proof against the built agent image:
 
 ```
-$ docker run --rm dawn-cybergym-env:3 grep -c FIXED /app/src/vuln.c
+$ docker run --rm tally-cybergym-env:3 grep -c FIXED /app/src/vuln.c
 0
 rc=1
 ```

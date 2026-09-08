@@ -86,7 +86,7 @@ echo "SELFTEST OK (offline mechanics; the live half is proven by a recorded run)
 # thing to build: the repo holds no canary, so that is what a clean checkout
 # produces, and every case above proved the mechanics without one.
 #
-# dawn calls it with no argument, from proveGate, BEFORE it dispatches an agent
+# tally calls it with no argument, from proveGate, BEFORE it dispatches an agent
 # (harbor.go). There an unarmed gate must refuse: it has no oracle, so it would
 # abstain after the agent had already run, and the whole point of proving a gate
 # first is that a gate which cannot produce a verdict costs nothing to discover.

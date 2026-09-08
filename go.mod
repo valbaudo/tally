@@ -1,3 +1,3 @@
-module github.com/valbaudo/dawn
+module github.com/valbaudo/tally
 
 go 1.26

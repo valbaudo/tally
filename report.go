@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 // The run's receipt. report is a pure function of the run directory — every
 // number it prints is read back off the same receipt.json and record.json a
@@ -26,7 +26,7 @@ type receipt struct {
 	Attempt int                `json:"attempt"`
 	ID      string             `json:"id"` // attemptID: joins actuations.json
 	Agent   string             `json:"agent"`
-	Model   string             `json:"model,omitempty"`  // verbatim to `harbor -m`; absent means dawn pinned nothing
+	Model   string             `json:"model,omitempty"`  // verbatim to `harbor -m`; absent means tally pinned nothing
 	Effort  string             `json:"effort,omitempty"` // verbatim to `--ak reasoning_effort=`; same rule
 	Gate    string             `json:"gate"`             // sound | live | format_only | none
 	Image   Image              `json:"image,omitempty"`  // the gate's image; absent when there is none
@@ -43,7 +43,7 @@ type receipt struct {
 	// without saying what it produced is a spend receipt wearing the word.
 	Handed Manifest `json:"handed,omitempty"`
 	// Evidence is where the rest lives — the generated task, harbor's log, the
-	// trial, the collected artifact, the gate's own stdout. dawn parses none of
+	// trial, the collected artifact, the gate's own stdout. tally parses none of
 	// it and never will; it points, so a reader is one cd away from the thing
 	// the digest above names.
 	Evidence string `json:"evidence"`
@@ -59,7 +59,7 @@ type receipt struct {
 // receipt for that attempt too.
 //
 // On any failure this calls bug() — the same reasoning as the evidence
-// directory itself: a receipt dawn cannot write is an attempt with no
+// directory itself: a receipt tally cannot write is an attempt with no
 // record.
 func writeReceipt(evidence string, s Stage, attempt int, r Result) {
 	rec := receipt{
@@ -102,11 +102,11 @@ func report(dir string) (string, error) {
 	for _, hit := range hits {
 		b, err := os.ReadFile(hit)
 		if err != nil {
-			return "", fmt.Errorf("dawn: report: %s: %w", hit, err)
+			return "", fmt.Errorf("tally: report: %s: %w", hit, err)
 		}
 		var rec receipt
 		if err := json.Unmarshal(b, &rec); err != nil {
-			return "", fmt.Errorf("dawn: report: %s: %w", hit, err)
+			return "", fmt.Errorf("tally: report: %s: %w", hit, err)
 		}
 		receipts = append(receipts, rec)
 	}
@@ -122,13 +122,13 @@ func report(dir string) (string, error) {
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(b, &record); err != nil {
-			return "", fmt.Errorf("dawn: report: record.json: %w", err)
+			return "", fmt.Errorf("tally: report: record.json: %w", err)
 		}
 	case os.IsNotExist(err):
 		// Missing is fine — a run that unwound before Record ever fired
 		// still gets a report, just an empty record section.
 	default:
-		return "", fmt.Errorf("dawn: report: record.json: %w", err)
+		return "", fmt.Errorf("tally: report: record.json: %w", err)
 	}
 
 	return render(dir, receipts, record), nil
@@ -141,10 +141,10 @@ func report(dir string) (string, error) {
 func writeReport(dir string) {
 	text, err := report(dir)
 	if err != nil {
-		panic(fmt.Sprintf("dawn: report: %v", err))
+		panic(fmt.Sprintf("tally: report: %v", err))
 	}
 	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(text), 0o644); err != nil {
-		panic(fmt.Sprintf("dawn: report: %v", err))
+		panic(fmt.Sprintf("tally: report: %v", err))
 	}
 }
 
@@ -181,7 +181,7 @@ func renderStage(b *strings.Builder, rs []receipt) {
 	case "sound":
 		fmt.Fprintf(b, "## %s — sound gate\n`%s`\n\n", head.Stage, head.Image)
 	case "live":
-		fmt.Fprintf(b, "## %s — live gate: reachable, not reached — dawn observes no traffic\n`%s`\nhosts: %s\n\n",
+		fmt.Fprintf(b, "## %s — live gate: reachable, not reached — tally observes no traffic\n`%s`\nhosts: %s\n\n",
 			head.Stage, head.Image, strings.Join(head.Hosts, ", "))
 	case "format_only":
 		fmt.Fprintf(b, "## %s — format-only gate: its metrics say well-formed, not correct\n`%s`\n\n", head.Stage, head.Image)
@@ -193,7 +193,7 @@ func renderStage(b *strings.Builder, rs []receipt) {
 	// single-shot fix that is the finding. The gate's own numbers ride in the
 	// same row: the verifier contract has always allowed a gate to write
 	// metrics beside its reward, and a gate that writes only "reward" leaves a
-	// reader nothing to reconstruct WHY. dawn parses no gate output to get
+	// reader nothing to reconstruct WHY. tally parses no gate output to get
 	// this — these are numbers the gate handed over through reward.json.
 	b.WriteString("| attempt | state | handed over | gate said | agent | model |\n")
 	b.WriteString("|--:|---|---|---|---|---|\n")
@@ -219,8 +219,8 @@ func renderStage(b *strings.Builder, rs []receipt) {
 	b.WriteString("\n")
 }
 
-// renderModelCell renders what dawn told Harbor to run. An empty model
-// renders as "unpinned" — a claim dawn is entitled to make ("I set
+// renderModelCell renders what tally told Harbor to run. An empty model
+// renders as "unpinned" — a claim tally is entitled to make ("I set
 // nothing"), deliberately distinct from drawCell's "unknown" ("nothing was
 // reported to me"). Effort rides in the same cell rather than a column of
 // its own: no shipped profile sets one yet, and a column that would read "—"
@@ -307,24 +307,24 @@ func renderRecord(b *strings.Builder, record map[string]any) {
 // about Harbor and the providers, not about this run's own arithmetic.
 const notKnown = "## not known\n\n" +
 	"- `cost_usd` is Harbor's estimate of list-price value, not an observed charge:\n" +
-	"  dawn never sees the provider's bill. codex's figure is always a litellm\n" +
+	"  tally never sees the provider's bill. codex's figure is always a litellm\n" +
 	"  estimate, and one unpriced call zeroes a whole trial's cost. Nothing above is\n" +
 	"  summed across agents, and nothing above is a share of a budget — the figures\n" +
 	"  are not comparable between agents, and there is no denominator.\n" +
-	"- Any attempt above that did not pass may have hit a provider quota wall dawn\n" +
+	"- Any attempt above that did not pass may have hit a provider quota wall tally\n" +
 	"  cannot see. claude exits 0 on that failure, and Harbor's classifier matches\n" +
 	"  the Console billing wording rather than the consumer limit message, so a\n" +
 	"  silent wall and a genuine result are indistinguishable from here.\n" +
 	"- An attempt whose draw reads `unknown` reported nothing to Harbor. What it\n" +
 	"  drew is recorded nowhere, and is not zero.\n" +
 	"- What a format-only or no-gate stage did NOT check is the author's to state,\n" +
-	"  not dawn's to infer: see each stage's reason, and the record above.\n" +
+	"  not tally's to infer: see each stage's reason, and the record above.\n" +
 	"- A live gate's pass also asserts the target was exploitable at that moment:\n" +
 	"  the verdict is not a function of pinned bytes alone and may not reproduce.\n" +
 	"  The hosts listed are where the gate COULD reach, enforced by the container's\n" +
-	"  egress policy — never where it did; dawn observes no traffic.\n" +
-	"- `model` and `effort` are what dawn told Harbor to run (`harbor run -m`,\n" +
+	"  egress policy — never where it did; tally observes no traffic.\n" +
+	"- `model` and `effort` are what tally told Harbor to run (`harbor run -m`,\n" +
 	"  `--ak reasoning_effort=`), which Harbor exports into the container as\n" +
-	"  `ANTHROPIC_MODEL` / `--effort`. dawn reads no agent output, so it does not\n" +
+	"  `ANTHROPIC_MODEL` / `--effort`. tally reads no agent output, so it does not\n" +
 	"  verify the CLI obeyed; the CLI's own claim lives in Harbor's own\n" +
 	"  `agent/trajectory.json` (`agent.model_name`) beside each attempt.\n"

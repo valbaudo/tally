@@ -8,7 +8,7 @@
 // The gate runs in its own container after the agent's is gone, starts from its
 // OWN pristine baked repo, applies the diff behind `git apply --include=calc.py`
 // and runs its OWN baked suite. Only on Passed does the actuator run, inside
-// dawn's process where the credentials live, publishing the bytes the GATE
+// tally's process where the credentials live, publishing the bytes the GATE
 // wrote and never the agent's raw patch.
 //
 // The actuator pushes to a local bare git repo standing in for a real remote —
@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/tally"
 )
 
 // The two images, pinned by digest and not by tag, because the whole soundness
@@ -32,17 +32,17 @@ import (
 // from experiments/harbor-targets/docker-bake.hcl, which makes that build a
 // pure function of the tree; rebuilding from an unchanged tree reproduces the
 // same digest, and rebuilding after a real change invalidates the pin here,
-// so dawn refuses the stage at dispatch rather than running against bytes
+// so tally refuses the stage at dispatch rather than running against bytes
 // nobody named.
 //
 // The environment carries the seeded repo at /app/repo, an empty /app/outputs,
 // and a baked @anthropic-ai/claude-code@2.1.259 — baked because Harbor runs the
 // agent inside this container and its installer would need hosts the agent
 // phase is not allowed to reach. The gate carries the pristine repo at
-// /gate/repo and dawn's verdict script at /tests/test.sh.
+// /gate/repo and tally's verdict script at /tests/test.sh.
 const (
-	env  dawn.Image = "dawn-pr-ci-env@sha256:0935e346bc4417c8948febc93caefc69288b99086119ae79476d18c7a3f180a6"
-	gate dawn.Image = "dawn-pr-ci-gate@sha256:da8f12d73445739d8d125a6a7cfe751e8175da31e47dc24accdb714cd3bbad48"
+	env  tally.Image = "tally-pr-ci-env@sha256:0935e346bc4417c8948febc93caefc69288b99086119ae79476d18c7a3f180a6"
+	gate tally.Image = "tally-pr-ci-gate@sha256:da8f12d73445739d8d125a6a7cfe751e8175da31e47dc24accdb714cd3bbad48"
 )
 
 // The prompt is part of the integrity argument: it is the only thing that tells
@@ -56,37 +56,37 @@ never run. Only changes to calc.py are considered: hunks touching the test
 suite or ci.sh are discarded before your fix is judged.`
 
 // The lease. Dispatching derives the WallClock from the attempt clock and
-// dawn's own retry backoff, so it is never hand-written and never short.
+// tally's own retry backoff, so it is never hand-written and never short.
 //
 // Two attempts is work 1 plus headroom 1: the single deliberate attempt, and
 // one spare that only an infra_error can spend. A Rejected patch does not get
 // a second attempt on purpose — the agent cannot see why the gate said no, so
 // re-running it is spend, not signal.
 func main() {
-	dawn.Main("pr-ci", dawn.Dispatching(2, 20*time.Minute), protocol)
+	tally.Main("pr-ci", tally.Dispatching(2, 20*time.Minute), protocol)
 }
 
 // protocol returns the stage's state unchanged. Rejected, unverified,
 // exhausted, infra_error and cancelled all publish nothing — fix.Actuate
 // enforces that itself, so actuate below is called unconditionally and simply
 // has nothing to do on any of those states.
-func protocol(run *dawn.Scope) dawn.State {
-	fix := run.Run(dawn.Stage{
+func protocol(run *tally.Scope) tally.State {
+	fix := run.Run(tally.Stage{
 		ID:      "fix",
-		Agent:   dawn.ClaudeCode,
+		Agent:   tally.ClaudeCode,
 		Env:     env,
 		Prompt:  prompt,
 		Outputs: []string{"fix.patch"},
-		Gate:    dawn.SoundGate(gate),
+		Gate:    tally.SoundGate(gate),
 	})
 	// The reward is a number the gate wrote, never a state. Recording it keeps
-	// the arithmetic dawn did across the attempt visible in the run record.
+	// the arithmetic tally did across the attempt visible in the run record.
 	if reward, ok := fix.Metric("reward"); ok {
 		run.Record("fix_reward", reward)
 	}
 	run.Record("fix_manifest", fix.Manifest)
 
-	if fix.State == dawn.Passed {
+	if fix.State == tally.Passed {
 		if err := actuate(run, fix); err != nil {
 			run.Record("actuation_error", err.Error())
 		}
@@ -97,7 +97,7 @@ func protocol(run *dawn.Scope) dawn.State {
 // actuate pushes the GATE's own fix.patch — never the agent's raw declared
 // output, which the gate may have filtered — to a branch in a local bare git
 // repo standing in for a real remote. Three ordered sub-steps, each deduped
-// by dawn against this run's own record: a retried Actuate closure within the
+// by tally against this run's own record: a retried Actuate closure within the
 // same run provisions, pushes and tags at most once each.
 //
 // Provisioning the remote is itself a Step, which a real actuator's never
@@ -106,10 +106,10 @@ func protocol(run *dawn.Scope) dawn.State {
 // Step here would mean a resumed run creates a SECOND, empty remote and
 // records that one instead of the one Step already pushed the branch to —
 // one Step more than the real thing, and honest about why.
-func actuate(run *dawn.Scope, fix dawn.Result) error {
-	return fix.Actuate(func(a *dawn.Actuation) error {
+func actuate(run *tally.Scope, fix tally.Result) error {
+	return fix.Actuate(func(a *tally.Actuation) error {
 		remote, err := a.Step("remote", func() (string, error) {
-			d, err := os.MkdirTemp("", "dawn-prci-remote-")
+			d, err := os.MkdirTemp("", "tally-prci-remote-")
 			if err != nil {
 				return "", err
 			}
@@ -120,12 +120,12 @@ func actuate(run *dawn.Scope, fix dawn.Result) error {
 		}
 		run.Record("remote", remote)
 
-		work, err := os.MkdirTemp("", "dawn-prci-work-")
+		work, err := os.MkdirTemp("", "tally-prci-work-")
 		if err != nil {
 			return err
 		}
 		defer os.RemoveAll(work)
-		branch := "dawn/" + a.Key
+		branch := "tally/" + a.Key
 		if err := runGit(work, "init", "-q", "-b", branch); err != nil {
 			return err
 		}
@@ -139,8 +139,8 @@ func actuate(run *dawn.Scope, fix dawn.Result) error {
 		if err := runGit(work, "add", "fix.patch"); err != nil {
 			return err
 		}
-		if err := runGit(work, "-c", "user.email=dawn@localhost", "-c", "user.name=dawn",
-			"commit", "-q", "-m", "dawn: publish gate-verified fix"); err != nil {
+		if err := runGit(work, "-c", "user.email=tally@localhost", "-c", "user.name=tally",
+			"commit", "-q", "-m", "tally: publish gate-verified fix"); err != nil {
 			return err
 		}
 

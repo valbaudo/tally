@@ -4,7 +4,7 @@
 
 **Goal:** Make every runtime and documentation promise named by GitHub issue #1 true and guard all 21 acceptance criteria with tests or compile checks.
 
-**Architecture:** Keep `dawn.Backend` minimal and describe tree behavior with optional capabilities. Run one capability-aware preflight from both execution and status paths, model missing expected paths as typed pre-judge rejections, isolate git from personal configuration, and expose only the narrow seams required for deterministic CLI/store tests.
+**Architecture:** Keep `tally.Backend` minimal and describe tree behavior with optional capabilities. Run one capability-aware preflight from both execution and status paths, model missing expected paths as typed pre-judge rejections, isolate git from personal configuration, and expose only the narrow seams required for deterministic CLI/store tests.
 
 **Tech Stack:** Go standard library, `gopkg.in/yaml.v3`, git CLI, GitHub Actions.
 
@@ -14,7 +14,7 @@
 - Follow red-green-refactor: observe each new behavior test fail for the intended reason before changing production code.
 - A gated missing `expect:` path consumes an attempt, provides repair feedback, and pays zero judges for that attempt.
 - All author/configuration errors fail before any backend invocation and exit 2 through the CLI.
-- Do not widen the required `dawn.Backend` interface.
+- Do not widen the required `tally.Backend` interface.
 - Add no production dependency.
 - Keep the non-Unix lock a documented no-op and compile its build-tagged surface in CI.
 - Preserve deterministic ordering and stable prompt prefixes.
@@ -24,7 +24,7 @@
 ### Task 1: Capability-aware plan preflight
 
 **Files:**
-- Modify: `dawn.go:53-61`
+- Modify: `tally.go:53-61`
 - Modify: `backend/claude/workspace.go:194-200`
 - Modify: `plan/run.go:63-94,535-586`
 - Test: `plan/run_test.go`
@@ -67,7 +67,7 @@ Expected: invalid plans invoke at least one backend or fail later during binding
 
 - [ ] **Step 3: Add the optional materialization capability and preflight**
 
-In `dawn.go` add:
+In `tally.go` add:
 
 ```go
 type WorkspaceMaterializer interface {
@@ -84,7 +84,7 @@ func (Workspace) MaterializesWorkspace() {}
 
 and its compile-time assertion.
 
-In `plan/run.go`, extract the existing root/expect loop into `preflight`. Resolve each step backend once during preflight. For every input, parse its source and field. If the field is `workspace` or `diff` and the source is not `in`, resolve the source backend and require `dawn.TreeCapturer`. If the field is `workspace`, require the consuming backend to implement `dawn.WorkspaceMaterializer`. Keep `in.workspace` dependent on `Runner.Root`. Resolve every gate judge backend during this pass as well.
+In `plan/run.go`, extract the existing root/expect loop into `preflight`. Resolve each step backend once during preflight. For every input, parse its source and field. If the field is `workspace` or `diff` and the source is not `in`, resolve the source backend and require `tally.TreeCapturer`. If the field is `workspace`, require the consuming backend to implement `tally.WorkspaceMaterializer`. Keep `in.workspace` dependent on `Runner.Root`. Resolve every gate judge backend during this pass as well.
 
 Wrap every preflight failure in `&ValidationError{Err: err}` so callers can distinguish author/configuration errors from journal, store, and invocation failures. Call `preflight` at the start of both `Run` and `Status`, after graph ordering but before journal lookup or invocation.
 
@@ -100,7 +100,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit the capability slice**
 
 ```bash
-git add dawn.go backend/claude/workspace.go plan/run.go plan/run_test.go
+git add tally.go backend/claude/workspace.go plan/run.go plan/run_test.go
 git commit -m "fix(plan): reject impossible tree flows before invocation"
 ```
 
@@ -109,9 +109,9 @@ git commit -m "fix(plan): reject impossible tree flows before invocation"
 ### Task 2: CLI usage validation and shared show behavior
 
 **Files:**
-- Modify: `cmd/dawn/main.go:1-16,101-172,223-250`
+- Modify: `cmd/tally/main.go:1-16,101-172,223-250`
 - Modify: `plan/run.go:68-94,535-603`
-- Test: `cmd/dawn/main_test.go`
+- Test: `cmd/tally/main_test.go`
 - Test: `plan/run_test.go`
 
 **Interfaces:**
@@ -152,7 +152,7 @@ In `plan/run_test.go`, add `TestStatusRunsTheSamePreflightAsRun`: call `r.Status
 - [ ] **Step 3: Run focused tests and verify RED**
 
 ```bash
-go test ./cmd/dawn -run 'TestSplit|TestExecute|TestShow' -count=1
+go test ./cmd/tally -run 'TestSplit|TestExecute|TestShow' -count=1
 go test ./plan -run TestStatusRunsTheSamePreflightAsRun -count=1
 ```
 
@@ -181,7 +181,7 @@ Add `[--jobs N]` to the `show` package-doc and usage-banner lines.
 - [ ] **Step 5: Run focused and package tests for GREEN**
 
 ```bash
-go test ./cmd/dawn -count=1
+go test ./cmd/tally -count=1
 go test ./plan -count=1
 ```
 
@@ -190,7 +190,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit the CLI usage slice**
 
 ```bash
-git add cmd/dawn/main.go cmd/dawn/main_test.go plan/run.go plan/run_test.go
+git add cmd/tally/main.go cmd/tally/main_test.go plan/run.go plan/run_test.go
 git commit -m "fix(cli): fail invalid plans and redo requests as usage errors"
 ```
 
@@ -223,9 +223,9 @@ if missing.Path != "dist/never-built" { t.Fatalf("Path = %q", missing.Path) }
 
 - [ ] **Step 2: Add failing gate and runner repair tests**
 
-In `gate/repair_test.go`, add `TestGateConsumesPreJudgeRejectionWithoutCallingJudges`. The generator returns `Candidate{Rejection: "you did not produce dist/dawn"}` first and `Text("good")` second. Use judges with an atomic call counter. Assert `Attempts == 2`, only one round of judges ran, and second-generation feedback contains the path.
+In `gate/repair_test.go`, add `TestGateConsumesPreJudgeRejectionWithoutCallingJudges`. The generator returns `Candidate{Rejection: "you did not produce dist/tally"}` first and `Text("good")` second. Use judges with an atomic call counter. Assert `Attempts == 2`, only one round of judges ran, and second-generation feedback contains the path.
 
-In `plan/run_test.go`, add a generator fake that returns `&store.MissingPathError{Path: "dist/dawn"}` on attempt one and a valid result on attempt two. It implements `TreeCapturer`. Add counting judges. Assert the run succeeds, generator calls equal 2, judge calls equal one panel round, and the second prompt contains `dist/dawn`.
+In `plan/run_test.go`, add a generator fake that returns `&store.MissingPathError{Path: "dist/tally"}` on attempt one and a valid result on attempt two. It implements `TreeCapturer`. Add counting judges. Assert the run succeeds, generator calls equal 2, judge calls equal one panel round, and the second prompt contains `dist/tally`.
 
 Add a neighboring test where the generator returns an ordinary capture error; assert it remains mechanical, consumes no repair attempt, and invokes no judge.
 
@@ -421,8 +421,8 @@ git commit -m "fix(store): isolate captures from personal git config"
 ### Task 6: CLI archive path and interface coverage
 
 **Files:**
-- Modify: `cmd/dawn/main.go:200-250` only if writer injection is needed
-- Modify: `cmd/dawn/main_test.go`
+- Modify: `cmd/tally/main.go:200-250` only if writer injection is needed
+- Modify: `cmd/tally/main_test.go`
 - Modify: `store/git_test.go`
 
 **Interfaces:**
@@ -431,11 +431,11 @@ git commit -m "fix(store): isolate captures from personal git config"
 
 - [ ] **Step 1: Add a failing archive round-trip test in store**
 
-Capture a tree containing `bin/dawn` and `README.md`, call `Archive` into `bytes.Buffer`, read with `archive/tar.NewReader`, and assert both names and bytes are present. This test passes only if the real archive stream is valid tar.
+Capture a tree containing `bin/tally` and `README.md`, call `Archive` into `bytes.Buffer`, read with `archive/tar.NewReader`, and assert both names and bytes are present. This test passes only if the real archive stream is valid tar.
 
 - [ ] **Step 2: Add a CLI `show REF` tar test**
 
-Create a plan, in-memory journal record, blob record, and tree store representing a committed workspace. Call a writer-injected `showRef` and parse its bytes as tar. Assert `bin/dawn` is present.
+Create a plan, in-memory journal record, blob record, and tree store representing a committed workspace. Call a writer-injected `showRef` and parse its bytes as tar. Assert `bin/tally` is present.
 
 First write the test against this desired signature:
 
@@ -446,7 +446,7 @@ err := showRef(context.Background(), r, p, trees, "build.workspace", &buf)
 - [ ] **Step 3: Run tests and verify RED**
 
 ```bash
-go test ./cmd/dawn ./store -run 'Test.*Archive|TestShowRefStreamsTar' -count=1
+go test ./cmd/tally ./store -run 'Test.*Archive|TestShowRefStreamsTar' -count=1
 ```
 
 Expected: CLI test does not compile because `showRef` has no writer parameter; store archive test provides coverage for the previously untested method.
@@ -458,7 +458,7 @@ Change `showRef` to accept `io.Writer`, pass `os.Stdout` from `execute`, pass th
 - [ ] **Step 5: Run CLI and store packages for GREEN**
 
 ```bash
-go test ./cmd/dawn ./store -count=1
+go test ./cmd/tally ./store -count=1
 ```
 
 Expected: PASS.
@@ -466,7 +466,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit archive coverage**
 
 ```bash
-git add cmd/dawn/main.go cmd/dawn/main_test.go store/git_test.go
+git add cmd/tally/main.go cmd/tally/main_test.go store/git_test.go
 git commit -m "test(cli): cover workspace tar export"
 ```
 
@@ -619,7 +619,7 @@ git commit -m "test(store): cover defensive copies and atomic write failures"
 ### Task 9: Kind vocabulary, platform contract, CI, and documentation truth
 
 **Files:**
-- Modify: `dawn.go:17-26,67-74`
+- Modify: `tally.go:17-26,67-74`
 - Modify: `README.md`
 - Modify: `SPEC.md`
 - Modify: `plan/lock_other.go:7-10`
@@ -728,8 +728,8 @@ Expected: PASS.
 - [ ] **Step 8: Commit platform and documentation truth**
 
 ```bash
-git add .github/workflows/ci.yml dawn.go plan/lock_other.go README.md SPEC.md cmd/dawn/main.go
-git commit -m "docs: align Dawn's promises with the binary"
+git add .github/workflows/ci.yml tally.go plan/lock_other.go README.md SPEC.md cmd/tally/main.go
+git commit -m "docs: align Tally's promises with the binary"
 ```
 
 ---
@@ -754,10 +754,10 @@ Expected: PASS with no races.
 - [ ] **Step 2: Generate package coverage reports**
 
 ```bash
-go test ./cmd/dawn -coverprofile=/tmp/dawn-cmd.cover
-go tool cover -func=/tmp/dawn-cmd.cover
-go test ./store -coverprofile=/tmp/dawn-store.cover
-go tool cover -func=/tmp/dawn-store.cover
+go test ./cmd/tally -coverprofile=/tmp/tally-cmd.cover
+go tool cover -func=/tmp/tally-cmd.cover
+go test ./store -coverprofile=/tmp/tally-store.cover
+go tool cover -func=/tmp/tally-store.cover
 ```
 
 Confirm named paths execute: `split`, flag/usage validation, `showRef`, `Archive`, `Mem.Get`, `FS.Put` failure cleanup, malformed refs, and exec-bit normalization. If a named path remains uncovered, add one focused test, observe its intended failure or mutation sensitivity, and rerun the package.
@@ -767,7 +767,7 @@ Confirm named paths execute: `split`, flag/usage validation, `showRef`, `Archive
 ```bash
 go test ./...
 go vet ./...
-gofmt -w dawn.go backend/claude/*.go cmd/dawn/*.go gate/*.go plan/*.go store/*.go
+gofmt -w tally.go backend/claude/*.go cmd/tally/*.go gate/*.go plan/*.go store/*.go
 git diff --check
 GOOS=windows GOARCH=amd64 go build ./...
 ```

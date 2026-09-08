@@ -1,4 +1,4 @@
-# Salvaged reasoning from dawn (pre-wipe, HEAD 7f448b0)
+# Salvaged reasoning from tally (pre-wipe, HEAD 7f448b0)
 
 The code is deleted; these five arguments are the asset. Recovery: `git show pre-glue-wipe:<path>`
 
@@ -8,8 +8,8 @@ The code is deleted; these five arguments are the asset. Recovery: `git show pre
 
 ```go
 // Jury with a single judge; use it when one evaluator is enough.
-func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Verdict {
-	res, err := judge.Invoke(ctx, dawn.Invocation{
+func Judge(ctx context.Context, judge tally.Backend, system, candidate string) Verdict {
+	res, err := judge.Invoke(ctx, tally.Invocation{
 		System: system,
 		Prompt: candidate,
 		Schema: newVerdictSchema(),
@@ -46,9 +46,9 @@ func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Ve
 
 ```go
 	}
-	return dawn.Result{
+	return tally.Result{
 		Output: output,
-		Tokens: dawn.Tokens{
+		Tokens: tally.Tokens{
 			Input:       env.Usage.InputTokens,
 			Output:      env.Usage.OutputTokens,
 			CacheRead:   env.Usage.CacheReadTokens,
@@ -57,7 +57,7 @@ func Judge(ctx context.Context, judge dawn.Backend, system, candidate string) Ve
 	}, nil
 }
 
-// schemaArgs asks the CLI to constrain the reply, so dawn never has to find a
+// schemaArgs asks the CLI to constrain the reply, so tally never has to find a
 // verdict inside prose.
 //
 // The deleted alternative was a parser: strip fences, take the first `{` to the
@@ -101,13 +101,13 @@ func schemaArgs(schema map[string]any) ([]string, error) {
 	done := map[string]StepResult{}
 	if r.Root != nil {
 		// The reserved root step: a value in the graph, not a special case in bind.
-		done[RootStep] = StepResult{Produced: map[string]dawn.Ref{"workspace": *r.Root}}
+		done[RootStep] = StepResult{Produced: map[string]tally.Ref{"workspace": *r.Root}}
 	}
 
 	sch := newSchedule(p, order)
 	type finished struct {
 		id  string
-		res dawn.Result
+		res tally.Result
 		err error
 ```
 
@@ -125,7 +125,7 @@ func schemaArgs(schema map[string]any) ([]string, error) {
 // commit content-addresses a result and then records the pointer. Blob FIRST: a
 // crash between the two leaves an orphan blob, which is harmless garbage, where
 // the other order leaves a journal pointer to bytes that do not exist.
-func (r *Runner) commit(id, key string, agent Agent, res dawn.Result) (StepResult, error) {
+func (r *Runner) commit(id, key string, agent Agent, res tally.Result) (StepResult, error) {
 	blob, err := json.Marshal(stepBlob{Output: res.Output, Produced: res.Produced})
 	if err != nil {
 		return StepResult{}, err
@@ -150,7 +150,7 @@ func (r *Runner) commit(id, key string, agent Agent, res dawn.Result) (StepResul
 // receives, and the canonical form those inputs take in the identity key.
 type bound struct {
 	prompt string
-	refs   map[string]dawn.Ref
+	refs   map[string]tally.Ref
 	key    map[string]string
 ```
 
@@ -160,7 +160,7 @@ type bound struct {
 
 ```go
 // the raw assistant text under the "text" key.
-func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, error) {
+func (b Backend) Invoke(ctx context.Context, in tally.Invocation) (tally.Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeoutOr(b.Timeout))
 	defer cancel()
 	model := in.Model
@@ -173,7 +173,7 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 	// byte after the drift point recomputes and the caller's content never caches.
 	// Measured: with the default preset, cache_creation stays ~20.5k on EVERY call
 	// and cache_read never covers the caller's prompt. Passing an explicit system
-	// prompt replaces the preset with bytes dawn controls, and the same content then
+	// prompt replaces the preset with bytes tally controls, and the same content then
 	// reads from cache across unrelated invocations.
 	//
 	// Replacing the preset is right HERE and wrong for Workspace: this backend
@@ -195,9 +195,9 @@ func (b Backend) Invoke(ctx context.Context, in dawn.Invocation) (dawn.Result, e
 ```go
 //go:build !darwin && !linux
 
-package dawn
+package tally
 
-// dawn supports macOS and Linux. Building anywhere else stops here, on purpose,
+// tally supports macOS and Linux. Building anywhere else stops here, on purpose,
 // with the identifier below as the message.
 //
 // The alternative was what shipped before: build everywhere, and hand the
@@ -210,13 +210,13 @@ package dawn
 //
 // Adding a platform is therefore a DECISION, not a fallback: implement the two
 // primitives there (on Windows, LockFileEx and a Job Object, which need
-// golang.org/x/sys/windows and would be dawn's second dependency), prove them,
+// golang.org/x/sys/windows and would be tally's second dependency), prove them,
 // and delete a term from the constraint above. Until someone does that, WSL is
 // Linux and works today.
 //
 // The refusal lives in the root package because every other package imports it,
 // so one file covers the whole module.
-var _ = dawn_supports_macOS_and_Linux_only__see_platform_go
+var _ = tally_supports_macOS_and_Linux_only__see_platform_go
 ```
 
 Note for v0: the netns-only-route-out guarantee is Linux-native; on macOS Docker runs in a VM.

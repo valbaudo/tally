@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues and specs are tracked in GitHub Issues for `valbaudo/dawn`. See `docs/agents/issue-tracker.md`.
+Issues and specs are tracked in GitHub Issues for `valbaudo/tally`. See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 

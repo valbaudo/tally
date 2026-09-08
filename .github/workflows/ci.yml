@@ -9,13 +9,13 @@ permissions:
 
 # These steps stopped being vacuous on their own, which is what they were
 # written for: the comment they replace said the repo had no packages, and the
-# same three commands began exercising dawn the moment it landed, with no
+# same three commands began exercising tally the moment it landed, with no
 # workflow change. The rule that produced that is still the rule here — CI
 # that asserts a guarantee no code makes is how the old platform matrix passed
 # while both documented guarantees silently did not hold on Windows.
 #
 # The Docker-dependent tests skip themselves rather than fail: reap_test.go
-# skips without a reachable daemon, harbor_test.go without DAWN_HARBOR_E2E=1.
+# skips without a reachable daemon, harbor_test.go without TALLY_HARBOR_E2E=1.
 # So this is honest about what it covers — the pure logic — and says nothing
 # about the parts that need a container and a subscription token.
 jobs:

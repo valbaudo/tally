@@ -2,23 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement Dawn vNext's immutable runtime value graph, content-addressed files and portable trees, canonical leaf delivery intent, and one private local workspace preparation/capture kernel.
+**Goal:** Implement Tally vNext's immutable runtime value graph, content-addressed files and portable trees, canonical leaf delivery intent, and one private local workspace preparation/capture kernel.
 
-**Architecture:** Add one dependency-free `content` module for immutable bytes, file metadata, and portable tree snapshots; extend `value` with immutable runtime values that contain `content.File` and `content.Tree` recursively; extend `workflow.Leaf` with only workspace-base, workspace-publication, and raw-attachment fidelity semantics; add a `workspace` module that materializes concrete values into fresh runtime-owned roots and returns one validated candidate value after all captures succeed. The new modules never import or adapt the legacy `dawn`, `store`, `plan`, `backend`, `gate`, or `proc` APIs.
+**Architecture:** Add one dependency-free `content` module for immutable bytes, file metadata, and portable tree snapshots; extend `value` with immutable runtime values that contain `content.File` and `content.Tree` recursively; extend `workflow.Leaf` with only workspace-base, workspace-publication, and raw-attachment fidelity semantics; add a `workspace` module that materializes concrete values into fresh runtime-owned roots and returns one validated candidate value after all captures succeed. The new modules never import or adapt the legacy `tally`, `store`, `plan`, `backend`, `gate`, or `proc` APIs.
 
 **Tech Stack:** Go 1.26 standard library only; SHA-256 content identity; deterministic private binary encodings; native macOS/Linux filesystem behavior.
 
 ## Global Constraints
 
 - Implement `docs/superpowers/specs/2026-08-09-values-contracts-workspaces-files-design.md` on top of the canonical kernel from GitHub #5.
-- The clean redesign has no compatibility readers, wrappers, aliases, converters, migrations, or dual writes for the current `dawn.Ref`, `store.Trees`, workspace field, or plan runtime.
+- The clean redesign has no compatibility readers, wrappers, aliases, converters, migrations, or dual writes for the current `tally.Ref`, `store.Trees`, workspace field, or plan runtime.
 - `workspace` remains an execution role. Never add a workspace value kind.
 - Files and trees remain recursive members of the one `value.Value` graph. Never add an artifact map or second result channel.
 - Secrets are not `value.Value` members, file metadata, manifests, candidate outputs, or content-store records. This plan adds no secret reference or secret-producing leaf surface.
 - Semantic strings are opaque data and retain exact bytes. Runtime paths use structured identities and runtime-owned physical locations; do not ban characters merely to simplify path construction.
 - Finite public inputs must terminate without fatal recursion. Use explicit traversal stacks where decoded value or tree depth is user-controlled; do not replace termination with an arbitrary author-visible depth limit.
 - A filesystem leaf receives one fresh private writable workspace, empty or materialized from exactly one required tree input selected in the canonical leaf.
-- Every other file/tree input is staged outside the workspace under deterministic Dawn-owned slots. Every declared file/tree output uses deterministic Dawn-owned slots.
+- Every other file/tree input is staged outside the workspace under deterministic Tally-owned slots. Every declared file/tree output uses deterministic Tally-owned slots.
 - Authors cannot configure staging paths, capture paths, workspace directories, mount layouts, copy strategies, store URIs, provider IDs, merge policies, or archive behavior.
 - Captured trees preserve empty directories, regular bytes, the executable bit, and confined relative symlinks; unsupported filesystem entries fail the capture and are never skipped.
 - Parallel invocations never share a live directory and trees are never implicitly overlaid or merged.
@@ -74,7 +74,7 @@ func storeContract(t *testing.T, open func(*testing.T) Store) {
 	t.Helper()
 	t.Run("identity and defensive reads", func(t *testing.T) {
 		store := open(t)
-		want := bytes.Repeat([]byte("dawn\x00"), 64*1024)
+		want := bytes.Repeat([]byte("tally\x00"), 64*1024)
 		first, err := store.Put(context.Background(), bytes.NewReader(want))
 		if err != nil { t.Fatal(err) }
 		second, err := store.Put(context.Background(), bytes.NewReader(want))
@@ -253,7 +253,7 @@ Every `Path` extension returns a copy. Names and keys remain opaque bytes. Diagn
 
 - [ ] **Step 5: Implement the private canonical value wire format**
 
-Use a domain header (`dawn.value/1`), one byte per variant, unsigned length prefixes, raw string bytes, raw 32-byte digests, and sorted object/map entries. Preserve list order. Do not use JSON for the private wire because Go strings may contain arbitrary bytes and file/tree handles are not ordinary JSON.
+Use a domain header (`tally.value/1`), one byte per variant, unsigned length prefixes, raw string bytes, raw 32-byte digests, and sorted object/map entries. Preserve list order. Do not use JSON for the private wire because Go strings may contain arbitrary bytes and file/tree handles are not ordinary JSON.
 
 The decoder rejects unknown tags, duplicate or unsorted entries, invalid lengths, invalid media, zero content records, trailing bytes, and nesting that does not terminate. It never normalizes a malformed encoding into a valid value.
 
@@ -415,13 +415,13 @@ type treeEntry struct {
 }
 ```
 
-The private `dawn.tree/1` binary encoding length-prefixes raw segment/target bytes and stores entries in canonical segment order. Directories, including empty directories, are explicit. Timestamps, ownership, group, xattrs, and non-executable permission bits never enter the manifest.
+The private `tally.tree/1` binary encoding length-prefixes raw segment/target bytes and stores entries in canonical segment order. Directories, including empty directories, are explicit. Timestamps, ownership, group, xattrs, and non-executable permission bits never enter the manifest.
 
 - [ ] **Step 5: Implement full capture validation**
 
 Walk without following symlinks. Every special or unsupported entry returns an error; none are skipped. Store regular bytes through `Store.Put`. After enumeration, resolve every symlink through the captured entry graph: reject absolute targets, any resolution step that leaves the root, and cycles that never produce a fully resolved target.
 
-There is no ignore file, base diff, Git invocation, or best-effort omission. Full workspace publication means the exact workspace root; Dawn-owned staging roots are excluded structurally by living outside it.
+There is no ignore file, base diff, Git invocation, or best-effort omission. Full workspace publication means the exact workspace root; Tally-owned staging roots are excluded structurally by living outside it.
 
 - [ ] **Step 6: Implement exact materialization**
 
@@ -633,7 +633,7 @@ git commit -m "feat(workspace): prepare private invocation roots"
 Use `Environment.Output(path)` to obtain runtime-owned targets. Assert:
 
 - a file target accepts exactly one regular file at its root, derives length/content from its bytes, and uses the required `Outputs.File` logical name and concrete media as inherent semantic facts;
-- the Dawn-owned physical child named `value` never becomes the semantic filename, and exact or parameterized media need not agree with content sniffing;
+- the Tally-owned physical child named `value` never becomes the semantic filename, and exact or parameterized media need not agree with content sniffing;
 - an empty tree target captures a valid empty tree;
 - nested object, list, and map file/tree outputs resolve through structured concrete paths;
 - missing required outputs, extra files in a file slot, wrong kinds, special entries, escaping symlinks, undeclared output-root entries, and media mismatches fail; and
@@ -669,7 +669,7 @@ Expected: FAIL because all-or-nothing capture does not exist.
 
 - [ ] **Step 4: Implement lazy capture through one deep boundary**
 
-`Outputs.File` and `Outputs.Tree` validate the requested concrete path and kind against the output contract and manifest, capture only its Dawn-owned slot, memoize the immutable result, and never accept an arbitrary host path. `Outputs.File` requires a logical filename and canonicalizable concrete media; these are semantic data, not an author path or policy surface. `Outputs.Workspace` exists only when the compiled leaf declares publication and captures exactly the workspace root. Named trees and a published workspace are each captured twice through the same already-pinned root and must have identical tree identity before publication; this is an ordinary stable-snapshot check, not isolation from continuing external mutation.
+`Outputs.File` and `Outputs.Tree` validate the requested concrete path and kind against the output contract and manifest, capture only its Tally-owned slot, memoize the immutable result, and never accept an arbitrary host path. `Outputs.File` requires a logical filename and canonicalizable concrete media; these are semantic data, not an author path or policy surface. `Outputs.Workspace` exists only when the compiled leaf declares publication and captures exactly the workspace root. Named trees and a published workspace are each captured twice through the same already-pinned root and must have identical tree identity before publication; this is an ordinary stable-snapshot check, not isolation from continuing external mutation.
 
 After the callback returns, `Capture`:
 
@@ -754,7 +754,7 @@ git diff --check
 Verify the new inward modules do not depend on legacy or later runtime packages:
 
 ```bash
-if rg -n 'github\.com/valbaudo/dawn/(store|plan|gate|backend|proc)|dawn\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
+if rg -n 'github\.com/valbaudo/tally/(store|plan|gate|backend|proc)|tally\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
 ```
 
 Verify no duplicate artifact/workspace/path/policy surface entered the new language:
@@ -780,7 +780,7 @@ go test -race ./content ./value ./workflow ./workspace -count=1
 go test ./... -count=1
 go vet ./...
 git diff --check
-if rg -n 'github\.com/valbaudo/dawn/(store|plan|gate|backend|proc)|dawn\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
+if rg -n 'github\.com/valbaudo/tally/(store|plan|gate|backend|proc)|tally\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
 if rg -n 'KindWorkspace|artifact(s)?\s+map|input_files|output_files|capture_path|destination_path|merge_policy|provider_file_id|workspace_dir|mounts:' content value workflow workspace; then exit 1; fi
 ```
 

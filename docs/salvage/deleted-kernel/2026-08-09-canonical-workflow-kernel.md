@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build Dawn vNext's immutable, typed, hierarchical workflow definition and its one syntax-independent compilation path, so every later scheduler, ledger, adapter, script, and author-format implementation shares one closed semantic model.
+**Goal:** Build Tally vNext's immutable, typed, hierarchical workflow definition and its one syntax-independent compilation path, so every later scheduler, ledger, adapter, script, and author-format implementation shares one closed semantic model.
 
 **Architecture:** Add two inward packages. `value` owns the small recursive contract algebra and compile-time ordinary literals because typed ports cannot be validated without them; the later #6 implementation extends this package with immutable runtime values, files, trees, storage, and workspace materialization. `workflow` owns source-neutral drafts, static module resolution, lowering, lexical binding validation, fixed-graph cycle detection, structured-scope shape validation, provenance, and the immutable compiled definition. It exposes no scheduler, persistence, adapter, YAML, legacy-plan, or execution API.
 
@@ -21,7 +21,7 @@
 - Source order has no scheduling meaning and must not change canonical compiled bytes.
 - Reject unknown kinds, unresolved or cross-scope references, multiply bound inputs, incompatible bindings, incompatible branch contracts, and fixed-graph cycles before execution.
 - Add no YAML spelling, expression language, scheduler, runtime capacity, concurrency setting, retry field, attempt count, failure-policy knob, adapter registry, provider configuration, journal format, store URI, workspace path, Docker branch, or compatibility layer.
-- Do not import or adapt current `dawn.Backend`, `dawn.Invocation`, `dawn.Result`, `plan.Plan`, `plan.Step`, `gate`, or AWF types.
+- Do not import or adapt current `tally.Backend`, `tally.Invocation`, `tally.Result`, `plan.Plan`, `plan.Step`, `gate`, or AWF types.
 - The old implementation may coexist only as untouched code while the vNext branch is built. Add no alias, shim, converter, dual-write path, or backward-compatible decoder; the final vNext cutover deletes it in a later integration plan.
 - Use red-green-refactor and commit every task independently.
 - Preserve unrelated untracked files.
@@ -67,7 +67,7 @@ Keep contract knowledge in `value` and graph knowledge in `workflow`. Do not spl
 **Interfaces:**
 - Produces: `value.Type`, `value.Field`, `value.Contract`, `value.Literal`, and `value.Assignment`.
 - Produces: scalar and composite constructors, `ParseLiteral`, `Contract.Resolve`, `Type.ValidateLiteral`, `Contract.ValidateLiteral`, and `CheckAssignable`.
-- Consumes: no Dawn package.
+- Consumes: no Tally package.
 
 - [ ] **Step 1: Write failing closed-algebra and construction tests**
 
@@ -878,7 +878,7 @@ Expected: FAIL until compilation sorts semantic collections and owns encoding.
 In `workflow/canonical.go`, define unexported encoding-only records. Never add JSON tags to the public immutable model or expose the wire shape as an API:
 
 ```go
-const definitionFormat = "dawn.workflow/1"
+const definitionFormat = "tally.workflow/1"
 
 type definitionWire struct {
 	Format string    `json:"format"`
@@ -990,7 +990,7 @@ git diff --check
 Then verify the new inward packages do not depend on the legacy runtime:
 
 ```bash
-if rg -n 'github\.com/valbaudo/dawn/(plan|gate|backend|proc)|dawn\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
+if rg -n 'github\.com/valbaudo/tally/(plan|gate|backend|proc)|tally\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
 ```
 
 Expected: every command exits zero and the dependency search produces no matches.
@@ -1026,7 +1026,7 @@ Verify the closed algebra and the absence of duplicate mechanisms:
 
 ```bash
 if rg -n 'depends_on|continue_on_error|retry_count|attempts|quorum|merge_policy|concurrency:' value workflow; then exit 1; fi
-if rg -n 'github\.com/valbaudo/dawn/(plan|gate|backend|proc)|dawn\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
+if rg -n 'github\.com/valbaudo/tally/(plan|gate|backend|proc)|tally\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
 ```
 
 Expected: every command exits zero and both searches produce no matches.

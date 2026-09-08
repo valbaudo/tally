@@ -1,14 +1,14 @@
-# Dawn vNext Canonical Workflow Semantic Model
+# Tally vNext Canonical Workflow Semantic Model
 
 **Issue:** GitHub #5, “Define the canonical workflow semantic model and vocabulary”
 
 **Status:** Design approved on 2026-08-09
 
-**Goal:** Define the smallest closed semantic model into which every Dawn vNext workflow compiles, so later syntax, runtime, adapter, and persistence work share one vocabulary and one set of invariants.
+**Goal:** Define the smallest closed semantic model into which every Tally vNext workflow compiles, so later syntax, runtime, adapter, and persistence work share one vocabulary and one set of invariants.
 
 ## Product Principle
 
-Dawn is a native workflow runner for agentic work. It should express general file processing, multimodal model calls, tool-using agents, scripts, review and revision, sub-workflows, and cleanup without acquiring a domain-specific node for every task.
+Tally is a native workflow runner for agentic work. It should express general file processing, multimodal model calls, tool-using agents, scripts, review and revision, sub-workflows, and cleanup without acquiring a domain-specific node for every task.
 
 The language therefore owns orchestration and contracts. Leaf adapters own provider translation. Execution backends own the guarantees of the environment in which work runs. PDF handling, image handling, Docker invocation, BM25 retrieval, skill discovery, and provider-specific tools are capabilities used by leaves, not control-flow primitives.
 
@@ -44,7 +44,7 @@ The chosen model is intentionally hierarchical:
 
 ```mermaid
 flowchart LR
-    S["Dawn source"] --> C["Compiler and validator"]
+    S["Tally source"] --> C["Compiler and validator"]
     C --> IR["Immutable hierarchical IR"]
     IR --> R["Recursive runtime scheduler"]
     R --> L["Leaf executors"]
@@ -164,13 +164,13 @@ A branch:
 4. instantiates only the selected child graph; and
 5. exposes the common output contract satisfied by every alternative.
 
-Unselected alternatives never become runtime instances. Ordinary optional work and zero-result paths use `branch`, not failure handling. Dawn needs no general expression language to provide this behavior.
+Unselected alternatives never become runtime instances. Ordinary optional work and zero-result paths use `branch`, not failure handling. Tally needs no general expression language to provide this behavior.
 
 ### Map
 
 A map receives a collection and instantiates one child graph per stable item identity. Instances are independent and may run concurrently. The map collects their contracted outputs and fails fast when an item instance does not succeed.
 
-Aggregation after a map is ordinary downstream work. Dawn does not need a separate `reduce` primitive.
+Aggregation after a map is ordinary downstream work. Tally does not need a separate `reduce` primitive.
 
 Exact item identity, ordering, and collection output rules are defined with structured control-flow semantics.
 
@@ -197,7 +197,7 @@ The configured adapter and execution backend must satisfy those requirements dur
 - A raw `llm` file input becomes the provider’s supported attachment/content form.
 - An `agent` file input is materialized into its workspace at a stable path and described in its invocation manifest.
 - A `script` receives declared values and workspace files through the native execution contract.
-- Skills are ordinary staged files/instructions or adapter-native configuration, not invocations of a Dawn `/skill` primitive.
+- Skills are ordinary staged files/instructions or adapter-native configuration, not invocations of a Tally `/skill` primitive.
 
 Session continuation is not cross-node memory. A named agent binding may be reused, but each agent node begins a fresh logical context. Provider recovery references are limited to retrieving, attaching to, or continuing the exact same logical node execution.
 
@@ -233,7 +233,7 @@ Execution then:
 8. Propagates cancellation through active descendants.
 9. Runs applicable `finally` scopes.
 
-Runtime expansion is constrained instantiation, not arbitrary graph mutation. Internal tool calls made by an agent belong to that one leaf invocation unless the workflow author explicitly models them as Dawn nodes.
+Runtime expansion is constrained instantiation, not arbitrary graph mutation. Internal tool calls made by an agent belong to that one leaf invocation unless the workflow author explicitly models them as Tally nodes.
 
 The runtime remains the sole writer of workflow state. Normal execution, retry, and resume use the same scheduler and node-boundary commit path rather than separate recovery logic.
 
@@ -371,7 +371,7 @@ Those decisions belong to issues #6–#11. They must conform to this model rathe
 
 ## Explicit Non-Goals
 
-- Backward compatibility with the current Dawn plan format.
+- Backward compatibility with the current Tally plan format.
 - A general expression language.
 - Plugin-defined orchestration nodes.
 - Per-node concurrency, failure, merge, or cleanup policy matrices.
@@ -386,8 +386,8 @@ Those decisions belong to issues #6–#11. They must conform to this model rathe
 
 This design incorporates the repository and Prestige/AWF analysis plus two targeted capability investigations:
 
-- `docs/research/dawn-adapter-capability-contract.md` established the separation between raw model attachments, workspace materialization/capture, structured results, and same-node recovery.
-- `docs/research/dawn-native-workspace-isolation.md` established that separate native working directories prevent accidental write overlap but do not imply filesystem, credential, process, network, or hostile-code isolation.
+- `docs/research/tally-adapter-capability-contract.md` established the separation between raw model attachments, workspace materialization/capture, structured results, and same-node recovery.
+- `docs/research/tally-native-workspace-isolation.md` established that separate native working directories prevent accidental write overlap but do not imply filesystem, credential, process, network, or hostile-code isolation.
 
 These findings constrain adapter and backend boundaries. They do not enlarge the workflow language.
 
@@ -436,7 +436,7 @@ go test ./... -count=1
 go vet ./...
 git diff --check
 if rg -n 'depends_on|continue_on_error|retry_count|attempts|quorum|merge_policy|concurrency:' value workflow; then exit 1; fi
-if rg -n 'github\.com/valbaudo/dawn/(plan|gate|backend|proc)|dawn\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
+if rg -n 'github\.com/valbaudo/tally/(plan|gate|backend|proc)|tally\.(Backend|Invocation|Result)' value workflow; then exit 1; fi
 ```
 
 This plan proves compile-time structure only. Issue #6 implements runtime

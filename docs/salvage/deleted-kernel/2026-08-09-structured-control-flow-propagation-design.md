@@ -1,4 +1,4 @@
-# Dawn vNext Structured Control Flow and Propagation
+# Tally vNext Structured Control Flow and Propagation
 
 **Issue:** GitHub #7, “Define structured control-flow and propagation semantics”
 
@@ -55,7 +55,7 @@ An AWF-style gate could own candidate generation, one or more judges, quorum, re
 
 ### 3. Outcomes as ordinary data with generic recovery
 
-Failure, rejection, and cancellation could become values consumed by branch and loop constructs. This is flexible, but makes accidental recovery easy, weakens fail-closed behavior, and obscures which results may safely commit. Dawn keeps terminal outcomes in the execution model and permits composition without a general catch mechanism.
+Failure, rejection, and cancellation could become values consumed by branch and loop constructs. This is flexible, but makes accidental recovery easy, weakens fail-closed behavior, and obscures which results may safely commit. Tally keeps terminal outcomes in the execution model and permits composition without a general catch mechanism.
 
 ## Universal Scope Lifecycle
 
@@ -93,7 +93,7 @@ Structured constructs use the canonical dependency relation; they do not add a s
 - A completion dependency carries readiness without data.
 - One dependency may carry both.
 
-Every public output field has one explicit source and must satisfy the containing scope's declared contract. Dawn performs no implicit object merge, list concatenation, filesystem merge, race winner selection, or last-writer-wins assignment.
+Every public output field has one explicit source and must satisfy the containing scope's declared contract. Tally performs no implicit object merge, list concatenation, filesystem merge, race winner selection, or last-writer-wins assignment.
 
 Children may consume only values made available through their lexical scope and explicit bindings. A child result becomes visible outside its containing scope only through a declared output binding. Completion order never changes binding meaning or output order.
 
@@ -120,7 +120,7 @@ The exact path encoding, digest construction, attempt suffixes, and reuse checks
 - Every case satisfies the same declared branch output contract.
 - There is no default, fallthrough, pattern language, or embedded selector expression.
 
-Dawn evaluates and records the selector once. It instantiates exactly the selected case; unselected cases do not become skipped runtime nodes. The chosen case executes as an ordinary child graph. If it succeeds, its declared values are validated and committed as the branch result. Its non-success becomes the branch's non-success.
+Tally evaluates and records the selector once. It instantiates exactly the selected case; unselected cases do not become skipped runtime nodes. The chosen case executes as an ordinary child graph. If it succeeds, its declared values are validated and committed as the branch result. Its non-success becomes the branch's non-success.
 
 A compiler may simplify a statically constant selector, but must retain enough provenance to explain the authored choice in inspection and replay data.
 
@@ -128,7 +128,7 @@ A compiler may simplify a statically constant selector, but must retain enough p
 
 `parallel` is a named scope containing at least two named child graphs. It exists when authors want explicit grouping, encapsulation, and an all-children barrier.
 
-Once scope inputs commit, branch roots whose ordinary dependencies are satisfied become eligible together. Dawn does not promise simultaneous process start: runtime capacity may delay eligible children without changing workflow meaning. Dependencies inside the scope continue to work normally; an explicit binding from one child result necessarily delays its consumer.
+Once scope inputs commit, branch roots whose ordinary dependencies are satisfied become eligible together. Tally does not promise simultaneous process start: runtime capacity may delay eligible children without changing workflow meaning. Dependencies inside the scope continue to work normally; an explicit binding from one child result necessarily delays its consumer.
 
 The scope completes only after every child succeeds and every declared parallel output validates. Its public outputs come only from explicit bindings. It does not automatically expose a tuple of branches or merge their structured or filesystem results.
 
@@ -149,7 +149,7 @@ Each body instance has the same input and output contracts. Instances become ind
 
 An empty collection succeeds with an empty result. Otherwise, map succeeds only when every body instance succeeds and validates. It returns `list<body-output>` in original input order, never completion order.
 
-Any rejected, failed, timed-out, or intrinsically cancelled item starts fail-fast cancellation of active siblings. The map publishes no result. Successfully committed child results remain internal and durable so a future resume does not require Dawn to pretend they never happened.
+Any rejected, failed, timed-out, or intrinsically cancelled item starts fail-fast cancellation of active siblings. The map publishes no result. Successfully committed child results remain internal and durable so a future resume does not require Tally to pretend they never happened.
 
 ## `loop`
 
@@ -187,7 +187,7 @@ A judge, jury, vote, evidence collector, critique, or repair agent is an ordinar
 Fail-fast has two distinct moments:
 
 1. **Response:** the first observed non-success stops new work and starts cancellation of active siblings.
-2. **Diagnosis:** after active children settle, Dawn chooses the stable terminal outcome from all intrinsic causes.
+2. **Diagnosis:** after active children settle, Tally chooses the stable terminal outcome from all intrinsic causes.
 
 Body causes normalize in this precedence order:
 
@@ -204,7 +204,7 @@ Timeout is represented as `Failed` with a timeout classification. `Cancelled` is
 
 ## Cancellation and Structured Unwinding
 
-When a scope is cancelled or begins fail-fast response, Dawn:
+When a scope is cancelled or begins fail-fast response, Tally:
 
 1. stops scheduling new descendants;
 2. sends cancellation to active descendants;
@@ -228,7 +228,7 @@ The cleanup graph may receive:
 - a typed `outcome` enum describing the normalized body result; and
 - explicitly bound, fully committed body-child outputs.
 
-A binding from a body child is optional unless the compiler can prove that the producer always succeeds before cleanup. Failed, unstarted, or partially completed children contribute no value. Dawn never captures or publishes their partial data for cleanup.
+A binding from a body child is optional unless the compiler can prove that the producer always succeeds before cleanup. Failed, unstarted, or partially completed children contribute no value. Tally never captures or publishes their partial data for cleanup.
 
 Cleanup may contain ordinary bounded leaves and structural composition, including dependency ordering, branching, parallel work, and finite map work. It cannot contain `gate`, `loop`, or another `finally`. Cleanup is operational work, not a second policy decision, recovery loop, or unbounded cleanup stack.
 
@@ -255,9 +255,9 @@ No construct publishes partial results after a non-success. Internal committed r
 
 ## Prestige and AWF Lowering
 
-The representative Prestige control patterns lower into orthogonal Dawn composition:
+The representative Prestige control patterns lower into orthogonal Tally composition:
 
-| Prestige/AWF behavior | Dawn vNext expression |
+| Prestige/AWF behavior | Tally vNext expression |
 | --- | --- |
 | Independent stages | Ordinary `graph` dependencies and automatic concurrency |
 | Explicit parallel phase | `parallel` when a named barrier or encapsulated output boundary is useful |

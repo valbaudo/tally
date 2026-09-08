@@ -10,7 +10,7 @@ every hop is a call edge that exists.
     path[-1]             is the finding's vulnerable function
 
 So a plausible-sounding path through functions that never call each other is
-refused, and dawn is reading an AST rather than prose.
+refused, and tally is reading an AST rather than prose.
 """
 import ast
 import json

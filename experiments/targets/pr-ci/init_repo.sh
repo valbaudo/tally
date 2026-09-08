@@ -5,7 +5,7 @@
 #
 # ./repo is gitignored on purpose: it's a real nested git repository
 # (its own .git, its own commits), regenerated on demand rather than
-# committed into dawn's own history.
+# committed into tally's own history.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -16,8 +16,8 @@ chmod +x repo/ci.sh
 
 cd repo
 git init -q
-git config user.email "toy@dawn.local"
-git config user.name "dawn toy"
+git config user.email "toy@tally.local"
+git config user.name "tally toy"
 git add calc.py
 git commit -q -m "initial: add average()"
 git add test_calc.py ci.sh

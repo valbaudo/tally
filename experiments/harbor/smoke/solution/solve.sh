@@ -1,2 +1,2 @@
 #!/bin/bash
-echo dawn > /app/answer.txt
+echo tally > /app/answer.txt

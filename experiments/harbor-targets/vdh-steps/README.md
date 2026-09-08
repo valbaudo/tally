@@ -1,9 +1,9 @@
 # vdh, translated to Harbor `[[steps]]`
 
 The experiment behind Open Question 1 of
-`docs/designs/dawn-as-the-it-agentic-mechasuit.md`: *is Harbor a dependency or a
+`docs/designs/tally-as-the-it-agentic-mechasuit.md`: *is Harbor a dependency or a
 competitor?* The doc assumed multi-stage sequencing was something Harbor might
-one day grow. It already has it, in 0.22.0, the version dawn pins.
+one day grow. It already has it, in 0.22.0, the version tally pins.
 
 This directory is `protocols/vdh/main.go` expressed as one Harbor multi-step
 task, as faithfully as the schema allows. `task.toml` is **validated against
@@ -14,7 +14,7 @@ Harbor's own `TaskConfig`** (`harbor.models.task.config`), not hand-checked.
 Harbor accepts all 24 steps and resolves **five distinct verifier images**, one
 per gate kind:
 
-| dawn concept | Harbor equivalent | Verified by |
+| tally concept | Harbor equivalent | Verified by |
 |---|---|---|
 | sequential stages | `[[steps]]`, `TaskConfig.steps` | schema accepts 24 |
 | a different gate image per stage | `steps.verifier.environment.docker_image` | `resolve_effective_verifier_env_config` returns 5 distinct images |
@@ -29,7 +29,7 @@ The dependency ships all four.
 
 ## What does not survive
 
-**1. Fan.** No concurrency primitive anywhere in `trial/multi_step.py`. dawn's
+**1. Fan.** No concurrency primitive anywhere in `trial/multi_step.py`. tally's
 8 stage kinds unroll to **24 static steps**, and they run strictly in series.
 
 **2. Runtime-dependent width.** `validate` is `run.Fan(len(live), ...)` — as wide
@@ -51,12 +51,12 @@ field, and `Trial` builds `self.agent` once (`trial/trial.py:967`). One Harbor
 trial is one agent CLI. Running `validate` under a different model than `hunt`
 is not expressible at any width.
 
-**6. Ungated stages degrade to an UNSOUND verifier.** dawn marks recon, gapfill
+**6. Ungated stages degrade to an UNSOUND verifier.** tally marks recon, gapfill
 and feedback `NoGate(reason)` and clamps them to `unverified`. Harbor has no
 per-step "no verifier": `verifier.disable` lives on the *trial*. So those three
 steps resolve to `environment_mode = "shared"` — a verifier running **inside the
 agent's own container** (confirmed: `task_has_any_shared_verifier` is True, for
-`['recon', 'gapfill-r0', 'feedback']`). That is exactly the arrangement dawn's
+`['recon', 'gapfill-r0', 'feedback']`). That is exactly the arrangement tally's
 rule forbids: the artifact would be running inside the test. The alternative,
 trial-level `verifier.disable`, would also disable the five sound gates.
 
@@ -70,7 +70,7 @@ named predecessors.
 decides which findings survive validate. `min_reward` can only abort everything
 downstream.
 
-**9.** Early exhaustion (`if len(confirmed) == 0 { return dawn.Exhausted }`), the
+**9.** Early exhaustion (`if len(confirmed) == 0 { return tally.Exhausted }`), the
 attempt lease (`Dispatching(26, 20*time.Minute)` and `run.More()`), the six-state
 model, resume across process restarts, and actuation. None have an analogue.
 
@@ -79,7 +79,7 @@ model, resume across process restarts, and actuation. None have an analogue.
 Harbor is a dependency, not a competitor, but for a narrower reason than the doc
 assumed. It is not that Harbor lacks sequencing — it has it, with per-step
 isolated verification, which is most of premise 2. It is that **a Harbor task is
-a static, single-vendor, straight-line list**, and dawn's protocols are Go
+a static, single-vendor, straight-line list**, and tally's protocols are Go
 programs: they fan, loop, branch on gate metrics, wire inputs by name, and mix
 vendors across stages.
 

@@ -1,4 +1,4 @@
-package dawn
+package tally
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 func TestMaxConcurrent(t *testing.T) {
 	for _, tc := range []struct{ set, want string }{
 		{"", "1"}, {"7", "7"}, {"1", "1"},
-		// A value dawn cannot use is not a licence to guess a better one.
+		// A value tally cannot use is not a licence to guess a better one.
 		{"0", "1"}, {"-3", "1"}, {"lots", "1"},
 	} {
 		name := tc.set
@@ -29,10 +29,10 @@ func TestMaxConcurrent(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			if tc.set == "" {
-				t.Setenv("DAWN_MAX_CONCURRENT", "")
-				os.Unsetenv("DAWN_MAX_CONCURRENT")
+				t.Setenv("TALLY_MAX_CONCURRENT", "")
+				os.Unsetenv("TALLY_MAX_CONCURRENT")
 			} else {
-				t.Setenv("DAWN_MAX_CONCURRENT", tc.set)
+				t.Setenv("TALLY_MAX_CONCURRENT", tc.set)
 			}
 			want, _ := strconv.Atoi(tc.want)
 			if got := maxConcurrent(); got != want {
@@ -133,10 +133,10 @@ func (f reorderingFake) Dispatch(ctx context.Context, stage Stage, evidence stri
 
 // Fan DRAINS and returns every child in INDEX order regardless of dispatch or
 // completion order (decision: "Fan returns results in index order regardless
-// of dispatch order, so wait-order never matters"). DAWN_MAX_CONCURRENT
+// of dispatch order, so wait-order never matters"). TALLY_MAX_CONCURRENT
 // forces real overlap on a synthetic fanning agent without touching Docker.
 func TestFanReturnsResultsInIndexOrderRegardlessOfCompletionOrder(t *testing.T) {
-	t.Setenv("DAWN_MAX_CONCURRENT", "5")
+	t.Setenv("TALLY_MAX_CONCURRENT", "5")
 	const n = 10
 	f := reorderingFake{n: n}
 	root := testFanRun(t, f).root(Dispatching(n, time.Minute))
@@ -166,7 +166,7 @@ func TestFanReturnsResultsInIndexOrderRegardlessOfCompletionOrder(t *testing.T) 
 // down to zero, and losing that race is not the protocol bug Scope.Run
 // guards against for a plain, un-fanned Run.
 func TestFanChildThatCannotChargeReturnsInfraErrorWithoutAbortingSiblings(t *testing.T) {
-	t.Setenv("DAWN_MAX_CONCURRENT", "8")
+	t.Setenv("TALLY_MAX_CONCURRENT", "8")
 	f := &constFake{state: Unverified}
 	root := testFanRun(t, f).root(Lease{Attempts: 2, WallClock: time.Hour, AttemptWallClock: time.Minute})
 
@@ -240,9 +240,9 @@ func (f *perAgentFake) Dispatch(ctx context.Context, stage Stage, evidence strin
 // Fresh names on purpose: agentGates is a package-level map built lazily and
 // never rebuilt, so naming the real profiles would make this test's result
 // depend on which test happened to create their gate first, and at what
-// DAWN_MAX_CONCURRENT.
+// TALLY_MAX_CONCURRENT.
 func TestAgentGatesAreIndependentPerName(t *testing.T) {
-	t.Setenv("DAWN_MAX_CONCURRENT", "4")
+	t.Setenv("TALLY_MAX_CONCURRENT", "4")
 	fanning := Agent{name: "mixed-fanning-test", fanOut: true}
 	capped := Agent{name: "mixed-capped-test", fanOut: false}
 

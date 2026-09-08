@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = ["/logs/verifier/reward.json"]
 
 [task]
-name = "dawn/vb1-artfx"
+name = "tally/vb1-artfx"
 version = "1.0.0"
 description = "vb1 separate-verifier probe"
 keywords = []

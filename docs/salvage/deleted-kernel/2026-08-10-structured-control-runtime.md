@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Execute Dawn vNext canonical definitions with deterministic DAG concurrency, branch, explicit parallel barriers, map, bounded loop, gate, fail-fast cancellation, outcome normalization, and unconditional finally cleanup.
+**Goal:** Execute Tally vNext canonical definitions with deterministic DAG concurrency, branch, explicit parallel barriers, map, bounded loop, gate, fail-fast cancellation, outcome normalization, and unconditional finally cleanup.
 
 **Architecture:** Add one inward `scheduler` package. It owns structured execution and nothing else: a global external-leaf capacity, graph readiness, stable semantic paths, cancellation/force-stop coordination, boundary publication, and the four terminal outcomes. A narrow `Boundary` port records semantic entry, successful commit, and non-success settlement so #8 can later supply durability; a narrow `LeafRunner` port starts and force-stops external work so #9 and #10 can later supply adapters and scripts. Before the scheduler is added, extend the canonical model with explicit cleanup bindings and add typed literal-to-runtime-value materialization—the two pieces #7 needs that #5/#6 intentionally deferred.
 
@@ -12,7 +12,7 @@
 
 - Implement `docs/superpowers/specs/2026-08-09-structured-control-flow-propagation-design.md` exactly.
 - Preserve the approved canonical model and immutable value/workspace kernels. Extend them only where #7 requires runtime literal materialization and explicit `finally` input bindings.
-- The clean redesign has no compatibility reader, alias, converter, migration, dual path, or adapter for the current `plan`, `gate`, root `dawn`, legacy backend, AWF, or prior canonical workflow bytes.
+- The clean redesign has no compatibility reader, alias, converter, migration, dual path, or adapter for the current `plan`, `gate`, root `tally`, legacy backend, AWF, or prior canonical workflow bytes.
 - `llm`, `agent`, and `script` are external leaves. `gate` is a deterministic scheduler-owned leaf and never reaches `LeafRunner`.
 - `parallel` remains compiler sugar lowered to an ordinary `graph` scope with `OriginParallel`; it does not acquire a second scheduler.
 - Every graph and structured scope validates its complete input before entry and commits its complete output before downstream visibility. A non-success publishes no boundary value.
@@ -72,7 +72,7 @@ Cover every ordinary target kind and the ambiguity JSON alone cannot resolve:
 func TestMaterializeLiteralUsesTargetStructure(t *testing.T) {
 	objectType := mustObjectType(t, mustRequired(t, "name", String()))
 	mapType := mustMapType(t, String())
-	literal := mustLiteral(t, `{"name":"dawn"}`)
+	literal := mustLiteral(t, `{"name":"tally"}`)
 
 	object, err := MaterializeLiteral(literal, objectType)
 	if err != nil { t.Fatal(err) }
@@ -148,7 +148,7 @@ git commit -m "feat(value): materialize typed runtime literals"
 - Produces: `FinallyDraft{Graph GraphDraft, Bindings []CleanupBindingDraft}`.
 - Produces: `CleanupSourceKind`, `CleanupInput`, `CleanupOutcome`, `CleanupChild`, `CleanupSourceDraft`, and `CleanupBindingDraft`.
 - Produces immutable `Finally.Bindings() []CleanupBinding` and read-only source/target accessors.
-- Canonical format becomes `dawn.workflow/2`; no `/1` decoder or dual encoding is added.
+- Canonical format becomes `tally.workflow/2`; no `/1` decoder or dual encoding is added.
 
 - [ ] **Step 1: Write failing cleanup binding model tests**
 

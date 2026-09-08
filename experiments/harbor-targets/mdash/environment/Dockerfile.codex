@@ -5,7 +5,7 @@
 # only honest way to express it is two images whose sole difference is the
 # vendor of the binary on PATH.
 #
-# Baked for the same reason claude's is: dawn's tasks run the environment
+# Baked for the same reason claude's is: tally's tasks run the environment
 # no-network, and Harbor's install step reaches the package mirror BEFORE the
 # agent phase opens its allowlist. Codex.install() returns early when
 # _INSTALL_CHECK_COMMAND (`command -v codex`) exits 0 and no --agent-version

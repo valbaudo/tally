@@ -6,11 +6,11 @@
 
 **Status:** Design approved on 2026-08-09
 
-**Goal:** Define one provider-independent boundary through which Dawn can prepare, run, recover, validate, and commit raw-model and tool-using-agent leaves without teaching the workflow core about provider models, tools, MCP servers, permissions, files, sessions, or command-line flags.
+**Goal:** Define one provider-independent boundary through which Tally can prepare, run, recover, validate, and commit raw-model and tool-using-agent leaves without teaching the workflow core about provider models, tools, MCP servers, permissions, files, sessions, or command-line flags.
 
 ## Product Principle
 
-Dawn owns workflow meaning. An adapter owns the difficult translation between that meaning and one provider or agent runtime.
+Tally owns workflow meaning. An adapter owns the difficult translation between that meaning and one provider or agent runtime.
 
 The boundary should make a broad range of adapters possible while adding no provider machinery to the workflow language. A direct multimodal API, a local Codex or Claude Code process, a remote workspace agent, and a test fake should all fit behind the same semantic contract. They do not have to pretend to support the same operations.
 
@@ -24,11 +24,11 @@ This design is a clean redesign. It has no compatibility obligation to the curre
 - Resolve every alias, reusable agent declaration, default, and node override before the adapter boundary.
 - Add no `roles:`, `models:`, capability, recovery, or provider-session syntax in this ticket.
 - Treat a named agent as a possible source-level route to one resolved adapter binding, not as a durable conversational actor.
-- Keep adapter configuration opaque to Dawn core and make the adapter its sole interpreter and validator.
+- Keep adapter configuration opaque to Tally core and make the adapter its sole interpreter and validator.
 - Derive semantic requirements from leaf kind, contracts, inputs, and workspace declarations. Authors never list capabilities.
 - Evaluate capabilities against the concrete prepared request rather than through a growing struct of provider-feature booleans.
-- Return one candidate Dawn value, not parallel text, JSON, file, and artifact result channels.
-- Keep structured values, files, and trees uncommitted until Dawn validates and stores the complete candidate atomically.
+- Return one candidate Tally value, not parallel text, JSON, file, and artifact result channels.
+- Keep structured values, files, and trees uncommitted until Tally validates and stores the complete candidate atomically.
 - Make exact-operation recovery optional and automatic. It is not a workflow requirement or knob.
 - Keep provider recovery handles operational, opaque, and confined to one logical leaf invocation.
 - Use the narrow retry definition already approved in #8: same-session continuation only after a positively recognized transient upstream provider failure.
@@ -61,11 +61,11 @@ These cuts are structural. They concentrate provider complexity inside one deep 
 
 AWF uses static capability fields, opaque `with:` maps, optional extension interfaces, role-bound adapter wrappers, streaming event and outcome channels, and provider-specific live-session machinery. It proves the value of opaque provider configuration and a registry, but its capabilities and lifecycle concerns have grown across the engine.
 
-Copying this shape would give Dawn immediate precedents for many features. It would also reproduce configuration layering, optional-interface discovery, provider-session guards, retry policies, and event-channel coupling in the core. The interface would become a map of AWF history rather than a Dawn semantic boundary.
+Copying this shape would give Tally immediate precedents for many features. It would also reproduce configuration layering, optional-interface discovery, provider-session guards, retry policies, and event-channel coupling in the core. The interface would become a map of AWF history rather than a Tally semantic boundary.
 
 ### 2. Separate LLM and agent interfaces
 
-Dawn could define `LLMAdapter` and `AgentAdapter` independently. Their type-specific entry points would be explicit, but preparation, configuration, versioning, cancellation, recovery, diagnostics, candidate handling, and errors would be duplicated. An implementation serving both surfaces would need two registrations or a wrapper layer.
+Tally could define `LLMAdapter` and `AgentAdapter` independently. Their type-specific entry points would be explicit, but preparation, configuration, versioning, cancellation, recovery, diagnostics, candidate handling, and errors would be duplicated. An implementation serving both surfaces would need two registrations or a wrapper layer.
 
 This is semantically tidy but shallow. The two leaves differ in payload delivery, not in lifecycle or commit semantics.
 
@@ -119,11 +119,11 @@ These requirements are internal typed data, not user-facing capability names.
 
 A **prepared invocation** is ephemeral adapter-owned execution state created after one concrete request passes adapter validation and capability negotiation. It is safe to hand to `Run` or, when reconstructing after interruption, to `Recover`.
 
-It is not journaled. Dawn can recreate it from the captured workflow, immutable inputs, resolved binding, and runtime environment.
+It is not journaled. Tally can recreate it from the captured workflow, immutable inputs, resolved binding, and runtime environment.
 
 ### Candidate result
 
-A **candidate result** is one complete value proposed by an adapter. It may contain any value kind in #6's type algebra, including files and trees. It is not visible to downstream nodes until Dawn validates, stores, and commits it.
+A **candidate result** is one complete value proposed by an adapter. It may contain any value kind in #6's type algebra, including files and trees. It is not visible to downstream nodes until Tally validates, stores, and commits it.
 
 ### Recovery handle
 
@@ -139,7 +139,7 @@ flowchart LR
     Q --> P["Adapter Prepare"]
     P --> X["Prepared invocation"]
     X --> R["Run or Recover"]
-    R --> C["Candidate Dawn value"]
+    R --> C["Candidate Tally value"]
     C --> V["Validate and store content"]
     V --> M["Atomic result commit"]
 ```
@@ -237,9 +237,9 @@ The interface uses three semantic sinks so ownership remains clear. An implement
 
 #### Candidate sink
 
-The candidate sink accepts the one contracted output value and the bytes or streams backing any file/tree values. It writes only into uncommitted Dawn-owned storage.
+The candidate sink accepts the one contracted output value and the bytes or streams backing any file/tree values. It writes only into uncommitted Tally-owned storage.
 
-The adapter reports candidate success only after every declared candidate component has finished. A provider file ID, URL, path, or container reference is insufficient until the promised content has entered Dawn-owned candidate storage.
+The adapter reports candidate success only after every declared candidate component has finished. A provider file ID, URL, path, or container reference is insufficient until the promised content has entered Tally-owned candidate storage.
 
 #### Recovery-checkpoint sink
 
@@ -280,15 +280,15 @@ A raw `llm` invocation has no workspace. File values arrive as named raw attachm
 
 The adapter may use base64, an upload API, a provider file ID, a URL, multipart content, or another provider mechanism internally. It must preserve the required semantics. For example, visual PDF analysis cannot silently become text extraction.
 
-The same invocation may accept one file, many files, or no files. Multimodality belongs to the selected adapter/model behavior, not to a special Dawn node kind.
+The same invocation may accept one file, many files, or no files. Multimodality belongs to the selected adapter/model behavior, not to a special Tally node kind.
 
 ### Workspace `agent`
 
-An `agent` invocation receives a private workspace manifest. The execution backend and adapter materialize the optional base tree and immutable named file/tree inputs at Dawn-derived paths, then capture declared outputs before candidate success.
+An `agent` invocation receives a private workspace manifest. The execution backend and adapter materialize the optional base tree and immutable named file/tree inputs at Tally-derived paths, then capture declared outputs before candidate success.
 
 The agent may be multimodal and read PDFs, images, or any other files from that workspace. Passing a file to an agent means making its immutable content available at the manifest path and telling the agent where it is; it does not imply a provider attachment channel or a new filesystem isolation boundary.
 
-Skills are ordinary instructions and staged files/trees. If an adapter supports a provider-native skill mechanism, it may expose that through opaque adapter configuration. Dawn core has no `/skill` protocol.
+Skills are ordinary instructions and staged files/trees. If an adapter supports a provider-native skill mechanism, it may expose that through opaque adapter configuration. Tally core has no `/skill` protocol.
 
 ## Capability Negotiation
 
@@ -300,18 +300,18 @@ Capability negotiation answers whether the prepared adapter/backend combination 
 | Output contract | The adapter can produce a candidate for this exact contract or a typed terminal failure. |
 | Raw attachments | Every attachment media type can be delivered at the required text or visual fidelity. |
 | Workspace materialization | The concrete file/tree inputs can be placed into the private agent workspace and represented in its manifest. |
-| Workspace capture | The declared file/tree outputs can be retrieved into Dawn-owned candidate storage before success. |
+| Workspace capture | The declared file/tree outputs can be retrieved into Tally-owned candidate storage before success. |
 | Exact-operation recovery | When the provider supplies a suitable operation reference, the adapter can checkpoint, retrieve/attach/continue, and cancel that exact operation. This is optional operational support, not an admission requirement. |
 
 These are predicates over a request, not Boolean claims on an adapter type.
 
 ### Structured output
 
-A non-string output contract does not require a provider's native structured-output feature. It requires the adapter to return a candidate value that Dawn can validate against the exact canonical contract.
+A non-string output contract does not require a provider's native structured-output feature. It requires the adapter to return a candidate value that Tally can validate against the exact canonical contract.
 
 An adapter may use native constrained decoding, a CLI schema flag, strict response parsing, an internal extraction stage, or another faithful implementation. Provider schema subsets and limitations are adapter knowledge. `Prepare` must reject an exact contract it cannot support before tokens are spent.
 
-Dawn always performs final canonical validation. Provider validation is not a commit.
+Tally always performs final canonical validation. Provider validation is not a commit.
 
 ### Attachment fidelity
 
@@ -329,7 +329,7 @@ Adapters may translate delivery mechanisms, but they may not silently weaken fid
 
 Materialization and capture are independent truths. An adapter that can upload or create a workspace but cannot retrieve declared results does not satisfy an agent leaf with output files or a published tree.
 
-Remote container IDs and local paths are transient implementation details. Capture must finish while the environment remains readable. Expired remote workspaces are rematerialized for a new attempt from committed inputs; their expired state is not a durable Dawn workspace.
+Remote container IDs and local paths are transient implementation details. Capture must finish while the environment remains readable. Expired remote workspaces are rematerialized for a new attempt from committed inputs; their expired state is not a durable Tally workspace.
 
 ### Recovery support
 
@@ -353,7 +353,7 @@ Static leaf instances can prepare during run admission. Dynamic `map` and `loop`
 
 The runtime does not validate raw adapter configuration once at plan load and again at dispatch. `Prepare` produces the execution-ready object. Defensive internal assertions may detect programming defects but must not create a second semantic validation path.
 
-On process continuation, Dawn recreates preparation from the run's captured canonical definition and immutable inputs before calling `Recover`. A recovery handle never bypasses current adapter availability, version resolution, configuration validation, or contract checks.
+On process continuation, Tally recreates preparation from the run's captured canonical definition and immutable inputs before calling `Recover`. A recovery handle never bypasses current adapter availability, version resolution, configuration validation, or contract checks.
 
 ## Behavior Provenance and Reuse
 
@@ -365,7 +365,7 @@ The adapter returns enough stable provenance for #8's effective-work fingerprint
 - execution surface; and
 - any adapter/backend behavior facts that can change the leaf's result semantics.
 
-Dawn does not independently hash opaque configuration and assume that equals behavior. The adapter owns configuration meaning and therefore owns its effective signature. Adapter conformance tests verify signature stability and sensitivity for every documented behavior-relevant option.
+Tally does not independently hash opaque configuration and assume that equals behavior. The adapter owns configuration meaning and therefore owns its effective signature. Adapter conformance tests verify signature stability and sensitivity for every documented behavior-relevant option.
 
 Operational observations do not enter the signature:
 
@@ -374,11 +374,11 @@ Operational observations do not enter the signature:
 - attempt ordinal and cancellation history; and
 - secret bytes.
 
-Prepared behavior provenance is fixed before execution and used for reuse decisions. Provider facts revealed only during execution may be recorded as diagnostics, but cannot retroactively change the work fingerprint. When a mutable provider alias hides a deployment change, Dawn records the declared selector and makes the same limited reproducibility claim already established in #8.
+Prepared behavior provenance is fixed before execution and used for reuse decisions. Provider facts revealed only during execution may be recorded as diagnostics, but cannot retroactively change the work fingerprint. When a mutable provider alias hides a deployment change, Tally records the declared selector and makes the same limited reproducibility claim already established in #8.
 
 ## Candidate Results and Commit
 
-An adapter has one semantic result channel: a complete candidate Dawn value.
+An adapter has one semantic result channel: a complete candidate Tally value.
 
 The candidate may be:
 
@@ -396,7 +396,7 @@ Candidate success triggers the universal commit protocol from #8:
 2. Canonicalize the structured value.
 3. Validate the exact output contract.
 4. Ingest and verify every file/tree object.
-5. Ensure the candidate contains only durable Dawn references.
+5. Ensure the candidate contains only durable Tally references.
 6. Atomically write the node result commit.
 
 Only step 6 publishes the output. A crash before commit leaves no visible result. Stored but unreachable candidate content may later be collected.
@@ -436,7 +436,7 @@ The adapter rejects its opaque configuration. It reports a path within that conf
 
 #### Candidate success
 
-The adapter completed its work and candidate writes. Dawn still owns validation and commit. Invalid output, incomplete capture, and corrupt content convert candidate success into `Failed` at the universal node boundary.
+The adapter completed its work and candidate writes. Tally still owns validation and commit. Invalid output, incomplete capture, and corrupt content convert candidate success into `Failed` at the universal node boundary.
 
 #### Failed
 
@@ -446,7 +446,7 @@ The provider invocation, local execution, result acquisition, or exact recovery 
 
 External or ancestor cancellation stopped the invocation and settled according to #7. The adapter publishes no candidate result.
 
-`Rejected` is not an adapter result. Only a Dawn `gate` turns a valid negative policy verdict into rejection.
+`Rejected` is not an adapter result. Only a Tally `gate` turns a valid negative policy verdict into rejection.
 
 There is no generic adapter or scheduler outcome named `retryable`. A timeout, authentication failure, malformed result, missing capability, invalid configuration, ordinary nonzero exit, gate rejection, and cancellation do not enter provider transient recovery.
 
@@ -486,7 +486,7 @@ The third case is not retry and does not erase the interrupted attempt.
 
 The adapter follows provider `Retry-After` guidance or its baked-in provider-specific backoff. It uses the same attempt identity and effect key. It continues until success, definitive non-transient failure, or cancellation.
 
-Dawn defines no attempt count, delay, maximum, backoff option, retry predicate, or engine-level error-string parser. If the resumable handle does not exist, the adapter reports the upstream failure.
+Tally defines no attempt count, delay, maximum, backoff option, retry predicate, or engine-level error-string parser. If the resumable handle does not exist, the adapter reports the upstream failure.
 
 ## Cancellation
 
@@ -512,8 +512,8 @@ The design is grounded in current provider behavior but does not encode it into 
 | OpenAI Responses raw model | Supports exact-contract preparation through Structured Outputs where the schema is accepted; supports file inputs including PDF text plus page images on vision-capable models; background responses can provide a pollable exact-operation handle. |
 | Anthropic Messages raw model | Supports structured outputs and Files API references for supported PDFs, text, and images; ordinary request/response calls do not supply a pollable interrupted-operation handle. |
 | Codex `exec` local agent | Supports an output schema and a selected working directory; direct CLI attachments are images. `codex exec resume` sends a follow-up prompt to a prior session and is not retrieval of the original interrupted turn. |
-| Claude Code local agent | Supports JSON schema output and workspace tools. Current Dawn launches with session persistence disabled. A separate background-session adapter may claim exact recovery only when it durably checkpoints a usable session/agent ID and can recover that operation. |
-| OpenAI Code Interpreter remote agent | Can use remote containers and generated files, but the adapter must download declared outputs before commit. Ephemeral container identity is not a durable Dawn workspace. |
+| Claude Code local agent | Supports JSON schema output and workspace tools. Current Tally launches with session persistence disabled. A separate background-session adapter may claim exact recovery only when it durably checkpoints a usable session/agent ID and can recover that operation. |
+| OpenAI Code Interpreter remote agent | Can use remote containers and generated files, but the adapter must download declared outputs before commit. Ephemeral container identity is not a durable Tally workspace. |
 
 Primary official references:
 
@@ -528,25 +528,25 @@ Primary official references:
 - [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 - [Claude Code agent view and background agents](https://code.claude.com/docs/en/agent-view)
 
-The supporting evidence and transport-by-transport notes are retained in `docs/research/dawn-adapter-capability-contract.md`.
+The supporting evidence and transport-by-transport notes are retained in `docs/research/tally-adapter-capability-contract.md`.
 
 ## Prestige and AWF Mapping
 
 Prestige exercises this boundary broadly without requiring special semantics.
 
-| Prestige/AWF behavior | Dawn vNext expression |
+| Prestige/AWF behavior | Tally vNext expression |
 | --- | --- |
 | Claude, Droid, Codex, and direct-model runtimes | Independent adapters behind one prepared semantic interface |
 | Architect, planner, hunter, validator, reviewer, reporter | Ordinary resolved agent bindings; no runtime actor or conversation identity |
 | Model, effort, tools, bare mode, MCP, permissions | Opaque adapter configuration interpreted only during `Prepare` |
 | Agent prompts and reusable behavior | Task plus effective instructions in the resolved leaf |
-| Structured findings and verdicts | Exact Dawn output contracts and candidate validation |
+| Structured findings and verdicts | Exact Tally output contracts and candidate validation |
 | Repository, validator, and skill directories | Immutable tree/file inputs materialized through the agent workspace manifest |
-| BM25-selected skills | An upstream script or agent produces selected file/tree values; BM25 is not an adapter capability or Dawn core feature |
+| BM25-selected skills | An upstream script or agent produces selected file/tree values; BM25 is not an adapter capability or Tally core feature |
 | Three heterogeneous reviewers | Independent ordinary agent leaves followed by deterministic aggregation and `gate` |
 | Reports and remediation outputs | Declared file/tree values captured before commit |
 | PDF/image analysis | Raw multimodal `llm` attachments or files read by a multimodal workspace agent |
-| Docker, Podman, browser, converters | Native tools invoked inside `agent` or `script`; Dawn does not manage them |
+| Docker, Podman, browser, converters | Native tools invoked inside `agent` or `script`; Tally does not manage them |
 | AWF `retry.attempts` and backoff | Removed; only same-session transient upstream continuation remains |
 | Persistent sessions across steps | Removed; explicit values and workspace trees cross node boundaries |
 
@@ -579,7 +579,7 @@ Every adapter runs the same semantic suite for each surface and behavior it clai
 
 - Start with an empty workspace.
 - Materialize one base tree and multiple immutable named file/tree inputs.
-- Present deterministic Dawn-derived paths through the manifest.
+- Present deterministic Tally-derived paths through the manifest.
 - Capture declared files and trees before candidate success.
 - Discard undeclared private workspace state.
 - Fail if a promised remote output cannot be downloaded.
@@ -588,7 +588,7 @@ Every adapter runs the same semantic suite for each surface and behavior it clai
 ### Candidate and commit boundary
 
 - Return one contracted candidate value for string, object, file, and tree outputs.
-- Fail malformed structured output without Dawn parsing prose as a fallback.
+- Fail malformed structured output without Tally parsing prose as a fallback.
 - Reject missing, extra, wrong-kind, corrupt, and incomplete candidate components.
 - Kill the process after candidate storage but before commit and prove no output becomes visible.
 - Resume after commit and prove the adapter is not invoked again.
@@ -676,12 +676,12 @@ None of these deferred decisions may weaken the semantic boundary or add provide
 
 This design uses:
 
-- the approved Dawn vNext semantic, value/workspace, control-flow, and durable-execution specifications for GitHub #5 through #8;
-- current Dawn `Backend`, invocation/result, Claude, workspace materialization, capture, and cancellation code;
+- the approved Tally vNext semantic, value/workspace, control-flow, and durable-execution specifications for GitHub #5 through #8;
+- current Tally `Backend`, invocation/result, Claude, workspace materialization, capture, and cancellation code;
 - the supplied Prestige pipeline and its Claude, Droid, Codex, structured-output, skill, and file/workspace usage;
 - AWF's adapter, capability, derived-role, persistent-session, retry, and live-execution implementations;
-- `docs/research/dawn-adapter-capability-contract.md`;
-- `docs/research/dawn-native-workspace-isolation.md`; and
+- `docs/research/tally-adapter-capability-contract.md`;
+- `docs/research/tally-native-workspace-isolation.md`; and
 - the official provider references listed above.
 
 The research recommendation used separate capability names and a multi-channel candidate envelope as an evidence-gathering model. The approved design preserves its important independent truths—structured contracts, attachment fidelity, workspace materialization, workspace capture, and exact recovery—while moving capability names behind automatic derivation and unifying durable results under #6's type algebra.
@@ -692,7 +692,7 @@ The research recommendation used separate capability names and a multi-channel c
 | --- | --- |
 | Role shape | Resolved adapter binding; no runtime actor or speculative author syntax |
 | Universal invocation contract | Prepare, run, recover; tagged invocation surfaces; runtime-owned sinks |
-| Universal result contract | One complete candidate Dawn value followed by universal validation and commit |
+| Universal result contract | One complete candidate Tally value followed by universal validation and commit |
 | Capability vocabulary | Derived semantic requirements and concrete request predicates |
 | Validation timing | One authoritative `Prepare` boundary for static and dynamic instances |
 | Same-node recovery | Opaque durable handle, exact-operation recovery, narrow same-session transient continuation |

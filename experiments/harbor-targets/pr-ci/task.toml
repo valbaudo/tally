@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = ["/app/outputs"]
 
 [task]
-name = "dawn/pr-ci"
+name = "tally/pr-ci"
 version = "1.0.0"
 description = "Fix a seeded bug so CI goes green; hand over a unified diff"
 keywords = []
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607"
+docker_image = "tally-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607"
 network_mode = "no-network"
 
 [verifier.env]

@@ -1,4 +1,4 @@
-# dawn/mdash -- a Harbor task around the mdash toy IDOR
+# tally/mdash -- a Harbor task around the mdash toy IDOR
 
 > Pasted trial output in this file is literal, from the runs it names, so its
 > paths predate the `/app/outputs` rename. It is evidence, not the contract —
@@ -37,8 +37,8 @@ Run from `experiments/harbor-targets/`:
 export PATH="$HOME/.orbstack/bin:$PATH"
 
 # Build, then re-pin: the digest IS the build. Rebuilding changes it.
-docker build --platform linux/arm64 -t dawn-mdash-gate:1 mdash/gate
-docker inspect dawn-mdash-gate:1 --format '{{index .RepoDigests 0}}'
+docker build --platform linux/arm64 -t tally-mdash-gate:1 mdash/gate
+docker inspect tally-mdash-gate:1 --format '{{index .RepoDigests 0}}'
 #   -> paste that exact string into task.toml [verifier.environment].docker_image
 
 harbor run -p mdash -a oracle -o jobs --job-name tc-mdash-pass   # -> 1.0
@@ -52,7 +52,7 @@ Measured: 40s for the oracle trial, 37s for the nop trial.
 The gate image and the agent image agree on these by construction, not by
 convention -- each is a constant duplicated across the two, so any protocol
 that targets this task has to hard-code the same strings. The `/app/outputs`
-root itself is not one of them: it is dawn's fixed output directory, defined
+root itself is not one of them: it is tally's fixed output directory, defined
 once as `outputDir` in `harbor.go`, and this table only restates the name
 under it for readers of this target.
 
@@ -66,8 +66,8 @@ under it for readers of this target.
 | gate entrypoint | `/tests/test.sh` | `gate/Dockerfile` | Harbor |
 
 This table used to point at `/app/exploit_result.json` directly -- the
-pre-dawn generation of the contract. A gate reading a path dawn never
-delivers an artifact to gets nothing, writes `reward: 0`, and dawn classifies
+pre-tally generation of the contract. A gate reading a path tally never
+delivers an artifact to gets nothing, writes `reward: 0`, and tally classifies
 that as `Rejected`, so the stale path was quietly fabricating rejections;
 `gate/selftest.sh` now proves the real path at image build time.
 
@@ -163,7 +163,7 @@ The exploit is real, not a status-code trick: the same `solve.sh` against the
 patched app fails, because the flaw is gone.
 
 ```
-$ docker run --rm --network none -e MDASH_FIXED=1 -v .../solve.sh:/solve.sh:ro dawn-mdash-envtest:1 bash /solve.sh
+$ docker run --rm --network none -e MDASH_FIXED=1 -v .../solve.sh:/solve.sh:ro tally-mdash-envtest:1 bash /solve.sh
 mdash toy app listening on 127.0.0.1:8901 fixed=True
 logged in as alice
 GET /notes/2 with alice's token -> 403 {'error': 'forbidden: not your note'}
@@ -271,7 +271,7 @@ above, modulo the container hostname.
 
 | | disk | content (compressed) |
 |---|---|---|
-| `dawn-mdash-envtest:1` (before) | 211 MB | 46.6 MB |
+| `tally-mdash-envtest:1` (before) | 211 MB | 46.6 MB |
 | `pb-mdash-envtest:2` (after) | 716 MB | 194 MB |
 | delta | **+505 MB** | **+147 MB** |
 
@@ -301,7 +301,7 @@ The verifier image is **digest-pinned** in `task.toml`:
 
 ```toml
 [verifier.environment]
-docker_image = "dawn-mdash-gate@sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a"
+docker_image = "tally-mdash-gate@sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a"
 ```
 
 OrbStack's image store gives a locally built image a RepoDigest equal to its
@@ -311,7 +311,7 @@ change one byte of `gate.py` and the digest changes and the pin must be
 updated. That is the point of pinning, not a nuisance.
 
 Provenance that survives a rebuild -- the layer `diff_ids` of the pinned image
-(`docker inspect dawn-mdash-gate:1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}'`):
+(`docker inspect tally-mdash-gate:1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}'`):
 
 ```
 sha256:41d6505109809884e681a97f978542a2d4d3506af0124f18b3f3a471edfcc9b7   python:3.13-slim base
@@ -329,8 +329,8 @@ changes.
 
 | Tag | Image ID (digest) | Role |
 |---|---|---|
-| `dawn-mdash-gate:1` | `sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a` | pinned verifier; gate baked at `/tests/test.sh`, app at `/opt/mdash` |
-| `dawn-mdash-envtest:1` | `sha256:41bc822c287edb589fa5d87ac36edf483c1a2c46405e2ab17e4f0504328fba3e` | local build of `environment/Dockerfile`, used to test `solve.sh` outside Harbor. Harbor builds its own copy of this per run. |
+| `tally-mdash-gate:1` | `sha256:4af64d4c3652a700563cb91580f6b95008ffddc5eee0c3c0dbd21946a64d270a` | pinned verifier; gate baked at `/tests/test.sh`, app at `/opt/mdash` |
+| `tally-mdash-envtest:1` | `sha256:41bc822c287edb589fa5d87ac36edf483c1a2c46405e2ab17e4f0504328fba3e` | local build of `environment/Dockerfile`, used to test `solve.sh` outside Harbor. Harbor builds its own copy of this per run. |
 | `pb-mdash-envtest:2` | `sha256:eb2f08eb0ce1c58dcf18f551433af0c959516cf2c589eb3d35ff126048d3f156` | local build of `environment/Dockerfile` **after** baking in Claude Code 2.1.259; the skip-check and `solve.sh` evidence above is from this image. |
 
 Both `linux/arm64`, both `FROM python:3.13-slim`
@@ -392,7 +392,7 @@ Measured 2026-09-06 (OrbStack, arm64):
 
 | fact | value |
 |---|---|
-| digest | `dawn-mdash-env-codex@sha256:7003829e738723ee20e50a09849e89cfa94e5ddbd77365a38e58ab6db0c6460c` |
+| digest | `tally-mdash-env-codex@sha256:7003829e738723ee20e50a09849e89cfa94e5ddbd77365a38e58ab6db0c6460c` |
 | reproducible | yes — a `--no-cache` rebuild yields the identical digest |
 | `command -v codex` | `/usr/local/bin/codex`, exit 0 |
 | `codex --version` | `codex-cli 0.145.0` |

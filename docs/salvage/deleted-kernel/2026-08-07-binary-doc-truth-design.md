@@ -9,14 +9,14 @@
 - Complete all 21 criteria in one coordinated effort, delivered as independently green TDD slices.
 - A missing `expect:` path under a gate is a rejection that consumes an attempt, supplies precise repair feedback, and invokes no judge for that attempt.
 - Keep the non-Unix lock as a no-op and document that one-run-per-state-directory locking is Unix-only.
-- Keep `dawn.Backend` minimal. Model backend-specific behavior through narrow optional capability interfaces and validate capabilities before any invocation.
+- Keep `tally.Backend` minimal. Model backend-specific behavior through narrow optional capability interfaces and validate capabilities before any invocation.
 - Add no production dependency unless implementation proves one is unavoidable.
 
 ## Architecture
 
 ### Backend capabilities and preflight
 
-Add an optional capability interface for a backend that can materialize workspace inputs. Continue using `dawn.TreeCapturer` to identify a backend that produces `workspace` and `diff` and honors `Invocation.Expect`.
+Add an optional capability interface for a backend that can materialize workspace inputs. Continue using `tally.TreeCapturer` to identify a backend that produces `workspace` and `diff` and honors `Invocation.Expect`.
 
 Create one runner preflight path shared by `Run` and `Status`. Before invoking or pricing any step, it resolves the plan’s generator and judge backends and validates:
 
@@ -66,7 +66,7 @@ Both `show PLAN` and `show PLAN REF` run the same `Status`/runner preflight as `
 
 Test `execute` directly for flag parsing, positional/flag splitting, and all five usage-error families without calling a real agent. Keep production refactoring limited to explicit dependency or writer seams needed by those tests.
 
-`dawn show PLAN step.workspace [--in DIR]` continues streaming a tar archive; `--in` is required when the plan references `in.workspace`. Test the real `store.Trees.Archive` output by reading it with Go’s tar reader.
+`tally show PLAN step.workspace [--in DIR]` continues streaming a tar archive; `--in` is required when the plan references `in.workspace`. Test the real `store.Trees.Archive` output by reading it with Go’s tar reader.
 
 ### Deterministic tree capture
 
@@ -142,6 +142,6 @@ Before completion:
 - run `go test -race ./...` because runner and jury code are concurrent;
 - run the configured non-Unix compile command locally where possible;
 - run `go vet ./...`;
-- inspect coverage for `cmd/dawn` and `store` to confirm the named paths execute;
+- inspect coverage for `cmd/tally` and `store` to confirm the named paths execute;
 - review the final diff against every issue checkbox; and
 - verify README, SPEC, package docs, and CLI usage agree exactly.

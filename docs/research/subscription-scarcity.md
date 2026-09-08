@@ -1,8 +1,8 @@
 # Subscription scarcity — what's actually scarce, and what reports it
 
-dawn tests exclusively against OAuth-subscription Claude Code (no API keys, no gateway), so
+tally tests exclusively against OAuth-subscription Claude Code (no API keys, no gateway), so
 dollar cost is notional, not a real constraint. This asks what the real constraint is, and
-whether Harbor's normalized channel — the only thing dawn reads, since dawn parses no per-CLI
+whether Harbor's normalized channel — the only thing tally reads, since tally parses no per-CLI
 output — can see it.
 
 - **Harbor version:** 0.22.0, source read from
@@ -33,14 +33,14 @@ session/stream log → build a `FinalMetrics` → copy four numbers onto `contex
 | `n_output_tokens` | Summed `output_tokens` per turn (`claude_code.py:859`, `1627`). | `total_token_usage.output_tokens`, Codex's own cumulative counter (`codex.py:1110`, `1197`). | `output_tokens` (goose ≥1.37); `None` on older goose, since only a combined total exists then (`goose.py:592`, `641`). | Summed `tokens.output` per turn (`opencode.py:306`, `385`, `434`). |
 | `cost_usd` | **Authoritative:** Claude Code's own `{"type":"result","total_cost_usd":...}` line from `--output-format=stream-json`, parsed from the teed stdout log (`claude_code.py:956-985`). **Fallback:** per-step `litellm.cost_per_token()` estimate, tagged `extra.cost_source="litellm_estimate"` (`claude_code.py:987-1041`). `None` if both fail. | Comment states plainly: "Codex CLI does not include cost in token_count events" (`codex.py:1116-1117`) — `info.get("total_cost")` / `info.get("cost_usd")` are dead-letter fallbacks that in practice never fire; cost is **always** an estimate: per-API-call `litellm.cost_per_token()`, summed (`codex.py:724-781`, `1083-1090`). One unpriced call anywhere in the trial (model absent from litellm's table) zeroes the *entire* trial's cost to `None` (`codex.py:1086-1088`). | `usage.cost_usd`, **goose's own self-reported figure** from its `complete` event (not litellm-derived) — only present on goose >1.43; else `None`, never defaulted to 0 (`goose.py:597`, `646-647`). | Sum of per-turn `finish.cost`, OpenCode's own self-reported figure; `total_cost if total_cost else None` — an all-zero session (e.g. an unpriced/subscription auth path) correctly yields `None`, not a misleading `$0.00` (`opencode.py:304`, `312`, `323`, `387`, `432`). |
 
-**Takeaways for what dawn can honestly report:**
+**Takeaways for what tally can honestly report:**
 - **All four are internally consistent but not cross-comparable.** claude_code.py folds cache
   *creation* into `n_input_tokens`; codex.py and opencode.py never surface cache *writes* in any
-  normalized field at all (buried in `extra`, which dawn doesn't read). Summing `n_input_tokens`
+  normalized field at all (buried in `extra`, which tally doesn't read). Summing `n_input_tokens`
   across a mixed-agent fleet is not an apples-to-apples token count.
 - **`cost_usd` provenance is agent-specific and not always labeled.** Only claude_code.py marks
   a `cost_source="litellm_estimate"` fallback in its trajectory `extra` (still inside
-  `agent_result`'s sibling trajectory file, not in the four `AgentContext` numbers dawn reads).
+  `agent_result`'s sibling trajectory file, not in the four `AgentContext` numbers tally reads).
   For codex.py the number is *always* a litellm estimate in practice, silently. Goose and
   OpenCode report a number the CLI computed itself, of unknown internal provenance.
   **NOT DETERMINED:** whether goose's/OpenCode's self-reported `cost_usd` is zeroed or garbage
@@ -58,7 +58,7 @@ session/stream log → build a `FinalMetrics` → copy four numbers onto `contex
   universal.
 - `TrialResult.compute_token_cost_totals()` (`harbor/models/trial/result.py:96-134`) sums these
   four fields across either the single `agent_result` or all `step_results[i].agent_result` —
-  confirming the channel really is agent-agnostic at the point dawn would read it.
+  confirming the channel really is agent-agnostic at the point tally would read it.
 
 ---
 
@@ -216,7 +216,7 @@ if nothing matches (`base.py:814`).
 exception and records it as `exception_info.exception_type` in the trial's `result.json`
 (`ExceptionInfo`, `harbor/models/trial/result.py:20-35`) — the same field that doc already
 confirmed holds distinct, real values (`AgentTimeoutError`, `CancelledError`,
-`AddTestsDirError`) for other failure modes. So **if** the mechanism fires, dawn's answer is a
+`AddTestsDirError`) for other failure modes. So **if** the mechanism fires, tally's answer is a
 single string comparison on JSON already in `result.json` — no CLI-output parsing needed, and
 this is a genuinely distinct signal from a timeout (`AgentTimeoutError`) or a cancel
 (`CancelledError`).
@@ -238,7 +238,7 @@ actionable, not incidental.
    Anthropic's own docs — **NOT DETERMINED** whether this is real observed CLI output (from some
    version/surface not covered by the docs checked) or defensive coding against an assumed
    phrasing that may not exist. Net: the patterns read as written for **API-key billing errors**,
-   not the **consumer subscription quota** dawn actually runs under.
+   not the **consumer subscription quota** tally actually runs under.
 2. **A partial catch-all exists.** claude_code.py's other documented error strings are all
    prefixed `"API Error: ..."` (`base.py:452-475`), and a bare `ErrorPattern(r"API Error",
    UnknownApiError)` sits at `base.py:513`. If Claude Code happens to wrap a subscription-limit

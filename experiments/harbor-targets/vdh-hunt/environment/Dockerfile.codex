@@ -1,7 +1,7 @@
 # The vdh agent environment for the CODEX profile. Byte-for-byte the same
 # target as Dockerfile — same bases, same /app/src, same /app/outputs —
 # differing in exactly one thing: which agent CLI is baked. That single
-# difference is the whole point. dawn's claim that a stage's vendor is a
+# difference is the whole point. tally's claim that a stage's vendor is a
 # property the runtime enforces is only checkable if two stages can run the
 # same surface under different vendors, and an image per vendor is the honest
 # way to say so.
@@ -10,7 +10,7 @@
 # the report stage is scored on recall and precision against a key that exists
 # only in the gate image.
 #
-# Baked rather than installed at trial time because dawn runs this environment
+# Baked rather than installed at trial time because tally runs this environment
 # no-network, and Harbor's install step reaches the package mirror BEFORE the
 # agent phase opens its allowlist. Codex.install() returns early when
 # _INSTALL_CHECK_COMMAND (`command -v codex`) exits 0 and no --agent-version

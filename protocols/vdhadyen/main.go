@@ -3,7 +3,7 @@
 //
 // This is the protocol that proves what the toy vdh could not. The toy's gate
 // was format-only — it checked a finding cited a real line and quoted it
-// verbatim, and dawn clamped the stage to unverified because a citation
+// verbatim, and tally clamped the stage to unverified because a citation
 // establishes nothing about the world.
 //
 // This file used to say "the live deployment IS the oracle, so the gate is
@@ -16,7 +16,7 @@
 // The trust position is the whole design, and it is worth stating plainly:
 // THE AGENT NEVER TOUCHES THE DEPLOYMENT. It hunts over source baked into its
 // own image, with no network beyond the CLI's own two hosts. Only the gate —
-// dawn's own pinned, reviewable code — reaches the live system, and it does
+// tally's own pinned, reviewable code — reaches the live system, and it does
 // exactly two GETs per attempt: the exploit and its control. The untrusted
 // party is never on the wire.
 //
@@ -45,7 +45,7 @@
 // patched build plays there.
 //
 // UNARMED BY DEFAULT. The gate ships with no canary and refuses to vote: it
-// writes no reward.json, which dawn reads as infra_error. That is deliberate.
+// writes no reward.json, which tally reads as infra_error. That is deliberate.
 // A gate with no oracle that voted 0 would be reporting "the plugin is sound"
 // on the strength of a check nobody armed.
 package main
@@ -54,10 +54,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/valbaudo/dawn"
+	"github.com/valbaudo/tally"
 )
 
-// The target. It is named here, in the protocol source, and dawn writes it
+// The target. It is named here, in the protocol source, and tally writes it
 // into the task's allowed_hosts — so the container's egress policy is what
 // bounds where the gate can reach, not the gate's good behaviour. The gate
 // carries the same host as a constant of its own; both have to agree before
@@ -69,15 +69,15 @@ const target = "shopware.hacktics.net"
 // carries its OWN copy of that source, so the agent's citation is checked
 // against bytes the agent never had a chance to edit.
 const (
-	env  dawn.Image = "dawn-vdh-adyen-env@sha256:a88c3ede0385bd8c0cec45a9be825650fe7d13306ec07530a90e9d079e63a705"
-	gate dawn.Image = "dawn-vdh-adyen-gate@sha256:0ca943cc5028c2921bb65b5e3054f59a64f89ae272ef7a1c75afdeef2433f2ea"
+	env  tally.Image = "tally-vdh-adyen-env@sha256:a88c3ede0385bd8c0cec45a9be825650fe7d13306ec07530a90e9d079e63a705"
+	gate tally.Image = "tally-vdh-adyen-gate@sha256:0ca943cc5028c2921bb65b5e3054f59a64f89ae272ef7a1c75afdeef2433f2ea"
 )
 
 // The prompt is part of the integrity argument: it is the only thing telling
 // the agent what the gate will accept, and every constraint in it is one the
 // gate actually enforces rather than a request the agent may decline.
 //
-// It does not name the output path — dawn's instruction() appends the
+// It does not name the output path — tally's instruction() appends the
 // authoritative "write exactly these file(s)" block — and it does not hint at
 // any particular finding. Naming a suspect file would be teaching to the test;
 // the whole task is choosing where to look.
@@ -137,34 +137,34 @@ const deliberate = 3
 // now costs one attempt rather than two — Exhausted is not retried — but it
 // still costs a whole sample, and the honest fix is a clock the work fits in.
 func main() {
-	dawn.Main("vdh-adyen", dawn.Dispatching(deliberate+1, 35*time.Minute), protocol)
+	tally.Main("vdh-adyen", tally.Dispatching(deliberate+1, 35*time.Minute), protocol)
 }
 
-func protocol(run *dawn.Scope) dawn.State {
+func protocol(run *tally.Scope) tally.State {
 	// Seeded with a state, not a zero Result: nothing has voted yet.
-	last := dawn.Exhausted
+	last := tally.Exhausted
 
 	for i := 0; i < deliberate && run.More(); i++ {
-		r := run.Run(dawn.Stage{
+		r := run.Run(tally.Stage{
 			ID:      fmt.Sprintf("pov-%d", i),
-			Agent:   dawn.ClaudeCode,
+			Agent:   tally.ClaudeCode,
 			Env:     env,
 			Prompt:  prompt,
 			Outputs: []string{"pov.json"},
-			Gate:    dawn.LiveGate(gate, target),
+			Gate:    tally.LiveGate(gate, target),
 		})
 
 		switch r.State {
-		case dawn.Passed:
+		case tally.Passed:
 			// Nothing recorded here. This used to Record the manifest,
 			// justified by "no receipt carries one" — which stopped being
 			// true when the receipt started carrying what an attempt handed
 			// over. Recording it now would be the duplication the report's
 			// own rule forbids: the digest of the proven artifact is already
 			// in this attempt's receipt, and the report renders it.
-			return dawn.Passed
-		case dawn.Cancelled:
-			return dawn.Cancelled
+			return tally.Passed
+		case tally.Cancelled:
+			return tally.Cancelled
 		}
 
 		if r.State.Decided() {

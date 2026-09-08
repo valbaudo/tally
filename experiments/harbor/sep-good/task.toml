@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = []
 
 [task]
-name = "dawn/sep-good"
+name = "tally/sep-good"
 version = "1.0.0"
 description = "Provisioning smoke test"
 keywords = []
@@ -18,7 +18,7 @@ network_mode = "no-network"
 collect = []
 
 [verifier.environment]
-docker_image = "dawn-verifier:2"
+docker_image = "tally-verifier:2"
 network_mode = "no-network"
 
 [verifier.env]

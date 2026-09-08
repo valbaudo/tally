@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = []
 
 [task]
-name = "dawn/vb1-probe"
+name = "tally/vb1-probe"
 version = "1.0.0"
 description = "vb1 separate-verifier probe"
 keywords = []

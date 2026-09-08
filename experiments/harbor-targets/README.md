@@ -87,7 +87,7 @@ consumes them.
 
 ## The output path is part of the gate contract
 
-Every declared output lands at `/app/outputs/<name>` — dawn's `outputDir`,
+Every declared output lands at `/app/outputs/<name>` — tally's `outputDir`,
 documented once at its definition in `harbor.go`. Nothing hands a gate this
 path at runtime; it is baked in like the other three absolute paths every
 gate already depends on without being told (`/tests/test.sh`,
@@ -114,7 +114,7 @@ file is one of the five real repo files, that the line number is in range, and
 that `evidence` is a verbatim substring of that exact line in the source baked
 into the gate image. It never consults ground truth.
 
-Measured directly against `dawn-vdh-gate:1`, a single finding citing
+Measured directly against `tally-vdh-gate:1`, a single finding citing
 `src/users.py:6` — the *safe* bound-parameter query, quoted verbatim — scores:
 
 ```
@@ -158,7 +158,7 @@ after every bake:
 
 ```bash
 docker buildx bake -f docker-bake.hcl pr-ci
-docker inspect dawn-pr-ci-gate:1 --format '{{index .RepoDigests 0}}'
+docker inspect tally-pr-ci-gate:1 --format '{{index .RepoDigests 0}}'
 ```
 
 `pr-ci` and `cybergym` have bake targets today (`pr-ci-env`, `pr-ci-gate`,
@@ -173,14 +173,14 @@ not guaranteed to reproduce elsewhere — until they get one too.
 
 | Task | `[verifier.environment] docker_image` |
 |---|---|
-| `cybergym` (and both decoys) | `dawn-cybergym-gate@sha256:6195d3ff2c3f2a78c29a7bcd6fe0b0f1575aba4a06f13cd845ee5e1f88e98582` — reproducible: a clean checkout bakes to this exact digest |
-| `mdash` | `dawn-mdash-gate@sha256:520a95cdf523ecba1d07961f8adec1122232edaf9dfcd2da2ec26a990321f0d1` — `docker buildx bake -f docker-bake.hcl mdash` |
-| `pr-ci` | `dawn-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607` — reproducible: a clean checkout bakes to this exact digest |
-| `vdh` | `dawn-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756` — build-local, no bake target yet |
+| `cybergym` (and both decoys) | `tally-cybergym-gate@sha256:6195d3ff2c3f2a78c29a7bcd6fe0b0f1575aba4a06f13cd845ee5e1f88e98582` — reproducible: a clean checkout bakes to this exact digest |
+| `mdash` | `tally-mdash-gate@sha256:520a95cdf523ecba1d07961f8adec1122232edaf9dfcd2da2ec26a990321f0d1` — `docker buildx bake -f docker-bake.hcl mdash` |
+| `pr-ci` | `tally-pr-ci-gate@sha256:992e3f451b9296c191f7e5625c81d2f8e1aa60a3d6650b2fb7f682e386538607` — reproducible: a clean checkout bakes to this exact digest |
+| `vdh` | `tally-vdh-gate@sha256:c402a2c65556071b079a3e8096613ffa2372b5ac2c018654144150ba532d7756` — build-local, no bake target yet |
 
 `:2` is the generation that reads the agent's output at `/app/outputs/<name>`
-(dawn's `outputDir`) and self-tests that contract at build time; `:1` is the
-pre-dawn generation, left in place and not deleted, and is what the ten trials
+(tally's `outputDir`) and self-tests that contract at build time; `:1` is the
+pre-tally generation, left in place and not deleted, and is what the ten trials
 below (`tcv-*`, 2026-09-04) actually ran against. This second `:2` build adds
 the abstention tripwire (harbor.go's `outputDir` doc, and each gate's
 `selftest.sh`): a gate whose own environment is sabotaged now writes no
@@ -232,7 +232,7 @@ instead (recorded in each task's own README), which survive one.
 - **The agent must not be able to read the fix.** `cybergym/environment/vuln.c`
   used to be byte-identical to `gate/vuln.c`, `#ifdef FIXED` and all. It now
   carries the vulnerable `strcpy` only. Verified:
-  `docker run --rm dawn-cybergym-env:3 grep -c FIXED /app/src/vuln.c` -> `0`,
+  `docker run --rm tally-cybergym-env:3 grep -c FIXED /app/src/vuln.c` -> `0`,
   rc 1, while the pinned gate image still has both variants (it must, to
   compile two builds).
 - **`cybergym`'s gate self-tests at build time.** `gate/selftest.sh` runs as a
@@ -270,5 +270,5 @@ instead (recorded in each task's own README), which survive one.
   symlink to one produces a dangling link and `command -v claude` returns 127.
   Builds stay cheap (~4 s warm, ~12 s `--no-cache`) once `node:22-slim` is local.
 - Nothing here pushes, commits, or opens a PR. `pr-ci`'s agent produces a
-  proposal (a unified diff); any mutation would happen through dawn's actuator
+  proposal (a unified diff); any mutation would happen through tally's actuator
   after the gate votes.

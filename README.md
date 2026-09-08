@@ -1,15 +1,15 @@
-# dawn
+# tally
 
-**dawn runs an agent against a verifier and believes only the verifier.**
+**tally runs an agent against a verifier and believes only the verifier.**
 
-A *protocol* is a Go program written against package `dawn`: it declares stages, bounds
+A *protocol* is a Go program written against package `tally`: it declares stages, bounds
 them with leases, reads back a closed set of six states, and — only on `passed` —
-actuates. dawn compiles each stage into a task it owns entirely, runs it, and assigns a
+actuates. tally compiles each stage into a task it owns entirely, runs it, and assigns a
 state **without parsing a single line of agent output**.
 
 Vocabulary is in [CONTEXT.md](CONTEXT.md). Every decision behind the design, with the
-measurement that forced it, is on the map: [Map: dawn, the mechasuit around any agent
-CLI](https://github.com/valbaudo/dawn/issues/13).
+measurement that forced it, is on the map: [Map: tally, the mechasuit around any agent
+CLI](https://github.com/valbaudo/tally/issues/13).
 
 ## Running a protocol from a clean checkout
 
@@ -44,7 +44,7 @@ commit the pins were taken at — re-pin, don't work around it.
 These are **arm64** digests. On amd64 the base images resolve to different bytes, so the
 build is reproducible but the digests are not the ones committed here.
 
-**3. Authenticate.** dawn spends no money and holds no API key; it inherits a
+**3. Authenticate.** tally spends no money and holds no API key; it inherits a
 subscription OAuth token from the environment. Mint one yourself — this step is
 deliberately not automated, because it prints a live secret:
 
@@ -55,7 +55,7 @@ claude setup-token
 Keep it in a `0600` file **outside this repo**, then:
 
 ```bash
-export CLAUDE_CODE_OAUTH_TOKEN="$(cat ~/.config/dawn-token)"
+export CLAUDE_CODE_OAUTH_TOKEN="$(cat ~/.config/tally-token)"
 export CLAUDE_FORCE_OAUTH=1
 ```
 
@@ -66,34 +66,34 @@ go run ./protocols/prci
 ```
 
 About 55 seconds. It prints the terminal state and the run directory; the receipt is at
-`dawn-runs/<run>/report.md`, and every attempt's evidence — the generated task, the
-Harbor log, the trial, the collected artifacts — is under `dawn-runs/<run>/attempts/`.
+`tally-runs/<run>/report.md`, and every attempt's evidence — the generated task, the
+Harbor log, the trial, the collected artifacts — is under `tally-runs/<run>/attempts/`.
 Run directories are gitignored.
 
-`DAWN_RESUME=<run-dir> go run ./protocols/prci` re-enters a crashed run: finished
+`TALLY_RESUME=<run-dir> go run ./protocols/prci` re-enters a crashed run: finished
 attempts are reconstructed from disk rather than re-dispatched, and actuators that
 already fired do not fire again.
 
-`DAWN_MAX_CONCURRENT=<n>` is how wide a fanning agent runs. **Unset means 1**, so a
-`Fan` is serial until you say otherwise. dawn does not guess this: sizing it from
+`TALLY_MAX_CONCURRENT=<n>` is how wide a fanning agent runs. **Unset means 1**, so a
+`Fan` is serial until you say otherwise. tally does not guess this: sizing it from
 image bytes and host memory was tried, and it read the image's on-disk size — not a
 container's working set — from a `docker image inspect` that runs *before* Harbor
 pulls the image, so on any host without that image already cached every fan silently
 collapsed to 1 anyway, with nothing to say so. You know your Docker VM's memory and
-what one attempt of your image actually costs; dawn does not. An agent profile that
+what one attempt of your image actually costs; tally does not. An agent profile that
 cannot fan at all (`codex`) stays capped at 1 regardless of this variable.
 
 ### If you skip step 2
 
-The failure is honest but the wording is Docker's, not dawn's. Measured, with a gate
+The failure is honest but the wording is Docker's, not tally's. Measured, with a gate
 image that was never built:
 
 ```
-Error response from daemon: pull access denied for dawn-pr-ci-gate,
+Error response from daemon: pull access denied for tally-pr-ci-gate,
 repository does not exist or may require 'docker login'
 ```
 
-dawn reports `infra_error` — it obtained no verdict — and the run's `report.md` shows
+tally reports `infra_error` — it obtained no verdict — and the run's `report.md` shows
 the attempt with **no metrics and a real token draw**. That is not a wasted diagnostic:
 a bad *gate* pin is only discovered **after** the agent has run, so it costs a full
 attempt (≈140k tokens in the measured case). A bad *environment* pin fails before the
@@ -103,7 +103,7 @@ agent starts.
 
 | | |
 |---|---|
-| `dawn.go` | the whole author-facing surface: six states, `Stage`, `Gate`, `Lease`, `Result` |
+| `tally.go` | the whole author-facing surface: six states, `Stage`, `Gate`, `Lease`, `Result` |
 | `runtime.go` | scopes, leases, admission, fan-out, resume, the actuator |
 | `harbor.go` | the runner: generates the task, runs one trial, classifies it |
 | `report.go` | the run's receipt |

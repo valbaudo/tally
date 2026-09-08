@@ -1,11 +1,11 @@
 # built binaries
-/dawn
-/cmd/dawn/dawn
+/tally
+/cmd/tally/tally
 *.test
 *.out
 
 # local run state / stores (README examples)
-/.dawn/
+/.tally/
 run.json
 
 # isolated agent worktrees
@@ -14,7 +14,7 @@ run.json
 # tooling scratch
 .superpowers/
 .gstack/
-.dawn/
+.tally/
 
 # experiment outputs and local secrets
 /experiments/**/jobs/
@@ -26,4 +26,4 @@ __pycache__/
 *.pyc
 
 # run directories
-/dawn-runs/
+/tally-runs/

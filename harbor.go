@@ -1,9 +1,9 @@
-package dawn
+package tally
 
 // The Harbor runner: one Stage in, one Harbor trial out, one struct of raw
 // facts back. Nothing here decides a State — classification reads these facts
 // and is another ticket's. What IS here is every settled rule about the task
-// dawn emits, because those rules are only true if the compiler is the single
+// tally emits, because those rules are only true if the compiler is the single
 // place a task.toml is ever written.
 
 import (
@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// dawn's fixed output convention, and the whole of the artifacts list it
+// tally's fixed output convention, and the whole of the artifacts list it
 // writes into every task. It is a directory and not a file so that a Manifest
 // can have more than one entry without the author ever naming a path; the
 // logical names in the Manifest are the file names under it.
@@ -30,7 +30,7 @@ import (
 // It is deliberately NOT under /logs/verifier. Harbor restores declared
 // artifacts into the verifier container BEFORE the gate runs, so an artifact
 // declared there would let the agent drop its own reward.json and forge the
-// verdict outright. Nothing dawn emits may name a path under that tree.
+// verdict outright. Nothing tally emits may name a path under that tree.
 // It is also the gate's side of the contract, and the one place it is written:
 // a gate finds each declared output at outputDir/<name>, exactly where the
 // agent was told to write it; it runs as /tests/test.sh, with nothing else of
@@ -51,10 +51,10 @@ import (
 // classify reads it as infra_error and the scope retries. It is never a 0,
 // which is a rejection of an agent nobody checked. So a gate does not catch
 // its own failures to score them; a crash and a deliberate exit mean the same
-// thing, and dawn reads neither an exit code nor a line of output to know it.
+// thing, and tally reads neither an exit code nor a line of output to know it.
 //
 // None of this reaches a gate at runtime — it is baked in — so every gate
-// image proves it at build time by running its own selftest, and dawn runs
+// image proves it at build time by running its own selftest, and tally runs
 // that same selftest again before it will spend an agent on the gate (see
 // gateSelftest). Four ways, and the fourth is the one that was missing:
 //
@@ -80,12 +80,12 @@ const outputDir = "/app/outputs"
 
 // inputDir is where a stage finds the artifacts of the stages it declared in
 // Stage.Inputs, and it is the other half of outputDir's convention: outputs
-// leave at a path dawn fixed, inputs arrive at one.
+// leave at a path tally fixed, inputs arrive at one.
 //
 // They arrive BAKED, not mounted. Harbor gives a task one environment, and
 // that environment is either a prebuilt docker_image or a Dockerfile in the
 // task directory it builds (environments/definition.py:
-// "Set [environment].docker_image or add environment/Dockerfile"). dawn
+// "Set [environment].docker_image or add environment/Dockerfile"). tally
 // already owns the whole task directory, so a stage with inputs gets a
 // generated two-line Dockerfile — FROM the stage's own pinned Env, COPY the
 // inputs — and no docker_image key at all, because a prebuilt image WINS over
@@ -98,7 +98,7 @@ const outputDir = "/app/outputs"
 // runs in. cleanName re-checks it rather than trusting the sentence.
 const inputDir = "/app/inputs"
 
-// gateSelftest is where a gate proves itself, and dawn runs it before it will
+// gateSelftest is where a gate proves itself, and tally runs it before it will
 // spend an agent on that gate. It is a path, not a flag: a gate that claims
 // soundness and ships no proof of it does not run at all.
 //
@@ -125,7 +125,7 @@ const gateSelftest = "/gate/selftest.sh"
 // across the docker run, so in a Fan the first child's transient failure
 // blocked its siblings and then poisoned them for the life of the process,
 // under a comment that only ever justified caching a verdict. Re-running costs
-// one bounded container per attempt on a gate that is failing anyway, and dawn
+// one bounded container per attempt on a gate that is failing anyway, and tally
 // refuses to dispatch on that gate regardless — so the retry buys a fresh
 // gate-selftest.log per attempt rather than one from whenever the first
 // failure happened. Telling "docker never ran it" from "it ran and said no"
@@ -137,7 +137,7 @@ var (
 
 // proveGate runs the gate's own selftest in the pinned gate image and requires
 // it to exit 0. A gate that claims nothing (NoGate, FormatOnlyGate) proves
-// nothing: dawn already refuses to let those reach Passed, so there is no
+// nothing: tally already refuses to let those reach Passed, so there is no
 // verdict for a selftest to protect.
 //
 // The transcript is written beside the attempt that paid for it. Later
@@ -156,7 +156,7 @@ func proveGate(ctx context.Context, g Gate, evidence string) error {
 		string(g.image), gateSelftest)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		err = fmt.Errorf("dawn: gate %s did not prove itself (%s %s): %w\n%s",
+		err = fmt.Errorf("tally: gate %s did not prove itself (%s %s): %w\n%s",
 			g.image, gateSelftest, "exited non-zero", err, out)
 	}
 	if mkErr := os.MkdirAll(evidence, 0o755); mkErr == nil {
@@ -172,7 +172,7 @@ func proveGate(ctx context.Context, g Gate, evidence string) error {
 // seed for trial_name, and reap.go's whole reap set is every compose project
 // whose name starts with this string plus "__" (see reap.go for the rest of
 // the chain). This is a STRING MATCH, not a cryptographic tag — see reap.go.
-const generatedTaskDirName = "dawn"
+const generatedTaskDirName = "tally"
 
 // taskDirFor is the exact join runTrial uses to place the generated task
 // under one attempt's evidence directory — pulled out to a named function so
@@ -180,13 +180,13 @@ const generatedTaskDirName = "dawn"
 func taskDirFor(evidence string) string { return filepath.Join(evidence, generatedTaskDirName) }
 
 // harborArgs builds runTrial's argv — pulled out to a named function, the
-// same move taskDirFor already makes, so the exact flags dawn passes are
+// same move taskDirFor already makes, so the exact flags tally passes are
 // testable without invoking Harbor.
 //
 // model and effort are set as CLI flags (-m, --ak reasoning_effort=), never
 // as cmd.Env: exec.Cmd.Env non-nil means ONLY that environment, which would
 // strip PATH, HOME, DOCKER_HOST and — the real trap — CLAUDE_CODE_OAUTH_TOKEN
-// and CLAUDE_FORCE_OAUTH, which dawn relies on inheriting from its own
+// and CLAUDE_FORCE_OAUTH, which tally relies on inheriting from its own
 // process environment. Harbor's -m flag also makes Harbor record the model in
 // its own result.json (config.agent.model_name), which an env var handed to
 // the child process would not. Do not "improve" this into cmd.Env.
@@ -205,7 +205,7 @@ func harborArgs(s Stage, taskDir, jobsDir string) []string {
 	return args
 }
 
-// gateTimeout bounds the verifier, which is dawn's own program on dawn's own
+// gateTimeout bounds the verifier, which is tally's own program on tally's own
 // pinned image. It is not the attempt clock and not the author's business.
 const gateTimeout = 10 * time.Minute
 
@@ -217,11 +217,11 @@ const gateTimeout = 10 * time.Minute
 // into outputDir. Raise it the day a protocol legitimately needs to hand
 // back something bigger.
 //
-// An oversized declared output is dawn refusing to trust its own collection,
+// An oversized declared output is tally refusing to trust its own collection,
 // not a gate voting no: digest flips trial.Present to false and lets it ride
 // the SAME infra_error rule a missing output already uses (Rule 2 in the
 // State doc) rather than adding a seventh state, or a "rejected" no gate
-// ever voted for. "Never truncate" means dawn never accepts partial bytes as
+// ever voted for. "Never truncate" means tally never accepts partial bytes as
 // the real file — a file over the cap is taken whole or not at all.
 //
 // The honest cost: infra_error implies transience and spends retry budget
@@ -231,7 +231,7 @@ const gateTimeout = 10 * time.Minute
 // accepted price of not inventing a seventh state for one classifier rule.
 const maxOutputBytes = 64 << 20 // 64 MiB
 
-// harborShutdownGrace bounds how long dawn waits, after asking harbor to
+// harborShutdownGrace bounds how long tally waits, after asking harbor to
 // stop, before forcing it. Measured, not guessed
 // (docs/research/harbor-crash-cancel-behaviour.md): a SIGTERM'd harbor runs
 // its own handler, tears down Docker cleanly and writes a reconstructable
@@ -244,7 +244,7 @@ const harborShutdownGrace = 30 * time.Second
 
 // terminateGracefully wires cmd so that a cancelled context asks the process
 // to stop the way harbor itself expects to be asked — SIGTERM, not
-// exec.CommandContext's default SIGKILL — and bounds how long dawn waits for
+// exec.CommandContext's default SIGKILL — and bounds how long tally waits for
 // that before forcing it. grace is a parameter (not always harborShutdownGrace)
 // so the real timing can be exercised by a test without a 30-second wait.
 func terminateGracefully(cmd *exec.Cmd, grace time.Duration) {
@@ -252,7 +252,7 @@ func terminateGracefully(cmd *exec.Cmd, grace time.Duration) {
 	cmd.WaitDelay = grace
 }
 
-// clockOutcome reads what ended an attempt's context: dawn's own per-attempt
+// clockOutcome reads what ended an attempt's context: tally's own per-attempt
 // clock (context.DeadlineExceeded, Rule 4 — Exhausted) or the run's parent
 // context firing from outside (context.Canceled — Main's SIGINT/SIGTERM
 // handler, Rule 1 — Cancelled), or neither. A pure function of ctx.Err() so
@@ -296,11 +296,11 @@ type trial struct {
 	// Set unconditionally by read() from the same trialDir that yields
 	// reward.json; meaningless when no gate ran, exactly like Rewards above.
 	PublishDir string
-	// TimedOut reports that dawn's own per-attempt clock ended the attempt
+	// TimedOut reports that tally's own per-attempt clock ended the attempt
 	// (ctx.Err() == context.DeadlineExceeded).
 	TimedOut bool
 	// Cancelled reports that the RUN's parent context ended the attempt from
-	// outside dawn's own clock (ctx.Err() == context.Canceled) — Main's
+	// outside tally's own clock (ctx.Err() == context.Canceled) — Main's
 	// signal.NotifyContext firing on SIGINT/SIGTERM. classify checks this
 	// first, ahead of every other rule: an attempt cancelled from outside
 	// never reads as a verdict of any kind.
@@ -319,7 +319,7 @@ type trial struct {
 //
 // A pointer, and nil when Harbor wrote no agent_result, because unknown is
 // not zero. An attempt that died before reporting drew something; printing 0
-// for it would be a claim dawn cannot make.
+// for it would be a claim tally cannot make.
 type draw struct {
 	InputTokens  int     `json:"input_tokens"`
 	CacheTokens  int     `json:"cache_tokens"`
@@ -339,17 +339,17 @@ func (i Image) pinned() bool { return strings.Contains(string(i), "@sha256:") }
 // image never receives Harbor's injected /tests, so the gate is baked in.
 func writeTask(ctx context.Context, dir string, s Stage, attempt time.Duration) error {
 	if s.ID == "" {
-		return fmt.Errorf("dawn: stage has no ID")
+		return fmt.Errorf("tally: stage has no ID")
 	}
 	if !s.Env.pinned() {
-		return fmt.Errorf("dawn: stage %s: env image %q is not digest-pinned", s.ID, s.Env)
+		return fmt.Errorf("tally: stage %s: env image %q is not digest-pinned", s.ID, s.Env)
 	}
 	gated := s.Gate.image != ""
 	switch {
 	case gated && !s.Gate.image.pinned():
-		return fmt.Errorf("dawn: stage %s: gate image %q is not digest-pinned", s.ID, s.Gate.image)
+		return fmt.Errorf("tally: stage %s: gate image %q is not digest-pinned", s.ID, s.Gate.image)
 	case !gated && s.Gate.reason == "":
-		return fmt.Errorf("dawn: stage %s: ungated stage must state why (use NoGate)", s.ID)
+		return fmt.Errorf("tally: stage %s: ungated stage must state why (use NoGate)", s.ID)
 	}
 
 	if err := os.MkdirAll(filepath.Join(dir, "environment"), 0o755); err != nil {
@@ -372,7 +372,7 @@ func writeTask(ctx context.Context, dir string, s Stage, attempt time.Duration) 
 	// The description keeps the id verbatim — nothing parses it — and the name
 	// is built to Harbor's grammar rather than hoped into it (see taskName).
 	fmt.Fprintf(&b, "[task]\nname = %q\nversion = \"1.0.0\"\ndescription = %q\n\n",
-		taskName(s.ID), "dawn stage "+s.ID)
+		taskName(s.ID), "tally stage "+s.ID)
 
 	// The environment's baseline is no-network; only the agent phase opens. A
 	// stage with no inputs names its pinned image directly and Harbor pulls it.
@@ -384,12 +384,12 @@ func writeTask(ctx context.Context, dir string, s Stage, attempt time.Duration) 
 	} else {
 		fmt.Fprintf(&b, "[environment]\ndocker_image = %q\nnetwork_mode = \"no-network\"\nos = \"linux\"\n\n", s.Env)
 	}
-	// The agent phase is public, and that is a deliberate non-constraint. dawn
+	// The agent phase is public, and that is a deliberate non-constraint. tally
 	// once pinned it to an allowlist of the hosts one CLI reaches, which
-	// defended nothing: the gate decides, dawn parses zero bytes of agent
+	// defended nothing: the gate decides, tally parses zero bytes of agent
 	// output, and the agent is untrusted by construction — so where its packets
-	// go enters no soundness argument dawn makes. What the allowlist did do was
-	// encode one vendor's endpoints as if they were a fact about dawn, which
+	// go enters no soundness argument tally makes. What the allowlist did do was
+	// encode one vendor's endpoints as if they were a fact about tally, which
 	// silently firewalled every other CLI off from its own provider.
 	fmt.Fprintf(&b, "[agent]\nnetwork_mode = \"public\"\ntimeout_sec = %.1f\n\n",
 		attempt.Seconds())
@@ -414,11 +414,11 @@ func writeTask(ctx context.Context, dir string, s Stage, attempt time.Duration) 
 // path. Stage.Outputs is written in Go source, so this cannot fire on an
 // agent's choosing — but the names become paths in a build context here, and
 // a rule that holds only because of a sentence in a doc comment is the exact
-// thing three of dawn's gates were broken by.
+// thing three of tally's gates were broken by.
 func cleanName(name string) error {
 	if name == "" || strings.HasPrefix(name, "/") || filepath.Clean(name) != name ||
 		strings.HasPrefix(filepath.Clean(name), "..") {
-		return fmt.Errorf("dawn: %q is not a plain relative output name", name)
+		return fmt.Errorf("tally: %q is not a plain relative output name", name)
 	}
 	return nil
 }
@@ -440,7 +440,7 @@ func materialiseInputs(dir string, s Stage) error {
 	if err := copyInputs(filepath.Join(dir, "environment", "inputs"), s); err != nil {
 		return err
 	}
-	df := fmt.Sprintf("# Generated by dawn: this stage declared Stage.Inputs.\n"+
+	df := fmt.Sprintf("# Generated by tally: this stage declared Stage.Inputs.\n"+
 		"# The pin is here rather than in task.toml's [environment] on purpose —\n"+
 		"# see inputDir. Base bytes are the stage's own Env, unchanged.\n"+
 		"FROM %s\nCOPY inputs %s\n", s.Env, inputDir)
@@ -453,14 +453,14 @@ func copyInputs(root string, s Stage) error {
 	seen := map[string]bool{}
 	for i, in := range s.Inputs {
 		if in.artifactsDir == "" {
-			return fmt.Errorf("dawn: stage %s: input %d handed back no artifacts to mount", s.ID, i)
+			return fmt.Errorf("tally: stage %s: input %d handed back no artifacts to mount", s.ID, i)
 		}
 		// No grammar re-check: in.stage is classify's copy of a Stage.ID that
 		// dispatchAttempt already matched against stageID before anything ran.
 		// The duplicate check stays — two inputs CAN legitimately come from
 		// one stage id, and one would bury the other.
 		if seen[in.stage] {
-			return fmt.Errorf("dawn: stage %s: two inputs both named %q; one would bury the other", s.ID, in.stage)
+			return fmt.Errorf("tally: stage %s: two inputs both named %q; one would bury the other", s.ID, in.stage)
 		}
 		seen[in.stage] = true
 		for _, a := range in.Manifest {
@@ -473,7 +473,7 @@ func copyInputs(root string, s Stage) error {
 			}
 			b, err := os.ReadFile(filepath.Join(in.artifactsDir, a.Name))
 			if err != nil {
-				return fmt.Errorf("dawn: stage %s: input %d: %w", s.ID, i, err)
+				return fmt.Errorf("tally: stage %s: input %d: %w", s.ID, i, err)
 			}
 			if err := os.WriteFile(dst, b, 0o644); err != nil {
 				return err
@@ -494,7 +494,7 @@ func copyInputs(root string, s Stage) error {
 // the findings it was given — could not run. The first protocol that needed
 // it lost every one of its validate attempts to infra_error.
 //
-// The copy comes from dawn's own collected artifacts on the host, NOT from the
+// The copy comes from tally's own collected artifacts on the host, NOT from the
 // agent's container, and that is the whole soundness argument: the agent can
 // write anywhere in its own filesystem, so inputs collected back out of it
 // would be inputs it could have edited to match its answer. These bytes it
@@ -511,7 +511,7 @@ func deriveGate(ctx context.Context, dir string, s Stage) (Image, error) {
 	}
 	cmd := exec.CommandContext(ctx, "docker", "build", "-q", "-t", string(tag), root)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("dawn: stage %s: building the input-carrying gate: %w\n%s", s.ID, err, out)
+		return "", fmt.Errorf("tally: stage %s: building the input-carrying gate: %w\n%s", s.ID, err, out)
 	}
 	return tag, nil
 }
@@ -535,15 +535,15 @@ func gateContext(dir string, s Stage) (tag Image, root string, err error) {
 		key.Inputs = append(key.Inputs, in.Manifest)
 	}
 	b, _ := json.Marshal(key)
-	tag = Image("dawn-gate-derived:" + sha256hex(b)[:16])
+	tag = Image("tally-gate-derived:" + sha256hex(b)[:16])
 
 	root = filepath.Join(dir, "verifier")
 	if err := copyInputs(filepath.Join(root, "inputs"), s); err != nil {
 		return "", "", err
 	}
-	df := fmt.Sprintf("# Generated by dawn: this stage declared Stage.Inputs, and a\n"+
+	df := fmt.Sprintf("# Generated by tally: this stage declared Stage.Inputs, and a\n"+
 		"# gate cannot judge work against inputs it cannot see. Harbor carries only\n"+
-		"# the agent's declared artifacts into the verifier, so dawn bakes the same\n"+
+		"# the agent's declared artifacts into the verifier, so tally bakes the same\n"+
 		"# inputs here — from its OWN copy, which the agent never touched.\n"+
 		"FROM %s\nCOPY inputs %s\n", s.Gate.image, inputDir)
 	if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte(df), 0o644); err != nil {
@@ -560,9 +560,9 @@ func quoted(ss []string) string {
 	return strings.Join(out, ", ")
 }
 
-// instruction is the author's prose plus the one thing dawn will not let the
-// author state: exactly which files it expects back, and where. dawn owns
-// the declared list, so dawn — never the protocol, never the agent's own
+// instruction is the author's prose plus the one thing tally will not let the
+// author state: exactly which files it expects back, and where. tally owns
+// the declared list, so tally — never the protocol, never the agent's own
 // judgement — names every path the agent must write, so the agent is never
 // guessing what to call its handover.
 func instruction(s Stage) string {
@@ -570,9 +570,9 @@ func instruction(s Stage) string {
 	b.WriteString(s.Prompt)
 	b.WriteString("\n\n---\n\n")
 	// Inputs come first: they are context the agent needs before it reads what
-	// to hand back. dawn names the paths rather than the prompt doing it, for
+	// to hand back. tally names the paths rather than the prompt doing it, for
 	// the same reason it owns the output paths — the author writes the task,
-	// dawn owns where bytes live.
+	// tally owns where bytes live.
 	if len(s.Inputs) > 0 {
 		fmt.Fprintf(&b, "Earlier stages of this run handed you %d input(s), "+
 			"baked into this container at:\n\n", len(s.Inputs))
@@ -599,13 +599,13 @@ func instruction(s Stage) string {
 }
 
 // runTrial generates the task, runs exactly one Harbor trial against it, and
-// reads back what happened. attempt is dawn's own per-attempt clock.
+// reads back what happened. attempt is tally's own per-attempt clock.
 func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (trial, error) {
 	// dir is the run's own evidence directory for this attempt. It is NOT a
 	// temp dir: a trial that vanishes with the process cannot be inspected
 	// afterwards, and "result.json present, trust it, never re-run" is exactly
 	// an inspection. Everything this attempt produced stays here — the task
-	// dawn generated, harbor's log, and the trial Harbor wrote.
+	// tally generated, harbor's log, and the trial Harbor wrote.
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return trial{}, err
 	}
@@ -635,14 +635,14 @@ func runTrial(ctx context.Context, s Stage, attempt time.Duration, dir string) (
 	// produced a result, and a missing result is what "no verdict" looks like.
 	if err := t.read(filepath.Join(dir, "jobs"), s.Outputs); err != nil {
 		if runErr != nil {
-			return t, fmt.Errorf("dawn: harbor failed (%w) and wrote no readable result: %v", runErr, err)
+			return t, fmt.Errorf("tally: harbor failed (%w) and wrote no readable result: %v", runErr, err)
 		}
 		return t, err
 	}
 	return t, nil
 }
 
-// Harbor's per-trial result.json and artifact manifest, only the fields dawn
+// Harbor's per-trial result.json and artifact manifest, only the fields tally
 // reads. reward.json is Harbor's own highest-precedence source for these
 // rewards; reading the file again behind Harbor's back would accept a verdict
 // Harbor rejected, so this is the single reading of it.
@@ -671,7 +671,7 @@ type manifestEntry struct {
 func (t *trial) read(jobsDir string, outputs []string) error {
 	hits, _ := filepath.Glob(filepath.Join(jobsDir, "*", "*", "result.json"))
 	if len(hits) != 1 {
-		return fmt.Errorf("dawn: expected one trial result under %s, found %d", jobsDir, len(hits))
+		return fmt.Errorf("tally: expected one trial result under %s, found %d", jobsDir, len(hits))
 	}
 	trialDir := filepath.Dir(hits[0])
 	t.PublishDir = filepath.Join(trialDir, "verifier", "publish")
@@ -724,7 +724,7 @@ func readJSON(path string, v any) error {
 // invisible to it: "declared" only means something if an undeclared file is
 // inert, and a file that never enters the Manifest is never mounted anywhere
 // downstream, so it cannot smuggle bytes into a later stage. The Manifest is
-// therefore a record of contract compliance — did the agent write what dawn
+// therefore a record of contract compliance — did the agent write what tally
 // told it to write — never a filesystem audit of everything it left behind.
 //
 // present is false the instant any declared name is missing, is not a regular
@@ -733,7 +733,7 @@ func readJSON(path string, v any) error {
 // isn't (Rule 2 in the State doc, via trial.Present).
 //
 // Lstat, not Stat, and IsRegular, not !IsDir. This is the one place
-// agent-controlled bytes enter dawn, and Stat RESOLVES SYMLINKS: a declared
+// agent-controlled bytes enter tally, and Stat RESOLVES SYMLINKS: a declared
 // output that is a symlink was digested through, so the agent chose which
 // host file became its Manifest — and that Manifest is mounted into the next
 // stage's inputs and baked into the derived gate image, as the agent's
@@ -785,7 +785,7 @@ func digestFile(path string) (string, error) {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// harborRunner is dawn's one runner. There is exactly one — a second
+// harborRunner is tally's one runner. There is exactly one — a second
 // implementation would be a second answer to "what does a trial mean", and
 // the six states are only trustworthy while that answer has one author.
 //
@@ -799,11 +799,11 @@ type harborRunner struct{}
 
 // Dispatch runs one trial and classifies it. The attempt clock arrives on the
 // ctx — the scope decided it — and is also what the task's [agent] timeout_sec
-// is written from, so Harbor stops the agent at the same instant dawn would.
+// is written from, so Harbor stops the agent at the same instant tally would.
 func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Result, error) {
 	d, ok := ctx.Deadline()
 	if !ok {
-		return Result{}, fmt.Errorf("dawn: stage %s dispatched with no attempt clock", s.ID)
+		return Result{}, fmt.Errorf("tally: stage %s dispatched with no attempt clock", s.ID)
 	}
 	// Before the expensive half. A gate that cannot prove itself never gets an
 	// agent run spent on it.
@@ -822,7 +822,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 		// cancelled work resumed, and a timeout re-dispatched into the same
 		// wall. That is the identical bug already fixed on the resumed path,
 		// arriving on the live one, and by the same route — a state derived
-		// from the wreckage instead of from the fact dawn already had.
+		// from the wreckage instead of from the fact tally already had.
 		//
 		// runTrial has already observed the fact (clockOutcome, on the same
 		// ctx this function holds, now that nothing re-wraps it in between);
@@ -837,7 +837,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 		if t.TimedOut || t.Cancelled {
 			return classify(s, trial{TimedOut: t.TimedOut, Cancelled: t.Cancelled}), nil
 		}
-		// dawn failed to obtain a verdict at all. The scope turns this into
+		// tally failed to obtain a verdict at all. The scope turns this into
 		// InfraError and retries it against its own counter; saying so here
 		// as well would be a second opinion on the same fact.
 		return Result{}, err
@@ -845,7 +845,7 @@ func (harborRunner) Dispatch(ctx context.Context, s Stage, evidence string) (Res
 	return classify(s, t), nil
 }
 
-// classify is the whole of dawn's state assignment: the five rules in the
+// classify is the whole of tally's state assignment: the five rules in the
 // State doc, by first match, over the facts of the trial and over no line of
 // agent output. It is a pure function of a Stage and a trial precisely so that
 // the rules can be read in one place and tested without Docker.
@@ -860,16 +860,16 @@ func classify(s Stage, t trial) Result {
 	// that happened to still have voted.
 	case t.Cancelled:
 		r.State = Cancelled
-	// Rule 2: dawn's own clock ended it.
+	// Rule 2: tally's own clock ended it.
 	//
 	// Second, with Cancelled, and ahead of everything below — because these
-	// two are the only facts in this switch dawn owns DIRECTLY. Both are
+	// two are the only facts in this switch tally owns DIRECTLY. Both are
 	// ctx.Err() (see clockOutcome), mutually exclusive, and observed rather
-	// than inferred. Every rule below is read out of the wreckage dawn's own
+	// than inferred. Every rule below is read out of the wreckage tally's own
 	// SIGTERM left behind, and a killed attempt is guaranteed to leave some:
 	// the agent dies mid-work so its declared output is missing, and Harbor
 	// finalizes with a CancelledError that arrives here as t.Fault. Asking
-	// those questions first means dawn's answer to "why did this attempt end"
+	// those questions first means tally's answer to "why did this attempt end"
 	// is derived from the mess it made rather than from the fact it already
 	// had.
 	//
@@ -879,7 +879,7 @@ func classify(s Stage, t trial) Result {
 	// it was unreachable — one of six states that classify could never emit,
 	// and the one naming the thing that actually happened. A real 20-minute
 	// timeout on a real target was filed as infra_error, which is retryable,
-	// so dawn re-dispatched into the same wall: 5.1M tokens burned, then 3.9M
+	// so tally re-dispatched into the same wall: 5.1M tokens burned, then 3.9M
 	// more, for a verdict no attempt could have produced.
 	//
 	// The rule this replaces claimed missing-output had to come first or a
@@ -893,7 +893,7 @@ func classify(s Stage, t trial) Result {
 	case t.TimedOut:
 		r.State = Exhausted
 	// Rule 3: a declared output that is missing or could not be collected is
-	// infra_error, always — dawn cannot tell a bad attempt from a broken
+	// infra_error, always — tally cannot tell a bad attempt from a broken
 	// collection, and guessing in the agent's favour is how a forged verdict
 	// gets in. An empty output directory is present and valid.
 	case !t.Present:
@@ -902,7 +902,7 @@ func classify(s Stage, t trial) Result {
 	case t.Fault != "":
 		r.State = InfraError
 	// Rule 4: the gate ran and wrote no valid reward. A crashed gate emits no
-	// reward.json, and a non-numeric one Harbor rejects before dawn sees it.
+	// reward.json, and a non-numeric one Harbor rejects before tally sees it.
 	case gated && !t.Rewarded:
 		r.State = InfraError
 	// Rule 5, first half: nothing established a verdict. A format-only gate is
@@ -920,8 +920,8 @@ func classify(s Stage, t trial) Result {
 
 // taskName builds the Harbor task name for a stage. The id already satisfies
 // Harbor's own segment grammar (stageID, runtime.go — refused at dispatch
-// otherwise), so it is used verbatim; the "dawn/" prefix exists only because
+// otherwise), so it is used verbatim; the "tally/" prefix exists only because
 // Harbor's grammar wants two segments, not because names must be distinct —
 // two stages that land on one name are still two evidence directories and
 // two attempt_ids.
-func taskName(id string) string { return "dawn/" + id }
+func taskName(id string) string { return "tally/" + id }

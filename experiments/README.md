@@ -1,6 +1,6 @@
 # Experiments
 
-Every Harbor trial behind the decisions on [the map](https://github.com/valbaudo/dawn/issues/13), reproducible from a clean checkout.
+Every Harbor trial behind the decisions on [the map](https://github.com/valbaudo/tally/issues/13), reproducible from a clean checkout.
 
 Findings live in [`../docs/research/`](../docs/research/). This directory holds the inputs that produced them.
 
@@ -22,17 +22,17 @@ Four traps, each of which cost real time:
    cd ~/.local/share/uv/tools/litellm/lib/python3.13/site-packages/litellm/proxy
    PATH="$HOME/.local/share/uv/tools/litellm/bin:$PATH" prisma generate
    ```
-3. **Port 5432 may already be taken** by a pre-existing Postgres bound to `127.0.0.1`. OrbStack binds `*:5432` and loses. LiteLLM then reports the misleading `P1010: User 'dawn' was denied access`. Use 55432.
-4. **Postgres 15+ locks the `public` schema:** `ALTER SCHEMA public OWNER TO dawn;` before migrations will deploy.
+3. **Port 5432 may already be taken** by a pre-existing Postgres bound to `127.0.0.1`. OrbStack binds `*:5432` and loses. LiteLLM then reports the misleading `P1010: User 'tally' was denied access`. Use 55432.
+4. **Postgres 15+ locks the `public` schema:** `ALTER SCHEMA public OWNER TO tally;` before migrations will deploy.
 
 ```bash
 export PATH="$HOME/.orbstack/bin:$PATH"          # docker is NOT on PATH by default
-docker run -d --name dawn-pg -e POSTGRES_PASSWORD=dawn -e POSTGRES_USER=dawn \
+docker run -d --name tally-pg -e POSTGRES_PASSWORD=tally -e POSTGRES_USER=tally \
   -e POSTGRES_DB=litellm -p 55432:5432 postgres:16
-docker exec dawn-pg psql -U dawn -d litellm -c 'ALTER SCHEMA public OWNER TO dawn;'
+docker exec tally-pg psql -U tally -d litellm -c 'ALTER SCHEMA public OWNER TO tally;'
 
-export DATABASE_URL="postgresql://dawn:dawn@127.0.0.1:55432/litellm"
-export LITELLM_MASTER_KEY="sk-dawn-$(openssl rand -hex 16)"   # generate your own; never commit it
+export DATABASE_URL="postgresql://tally:tally@127.0.0.1:55432/litellm"
+export LITELLM_MASTER_KEY="sk-tally-$(openssl rand -hex 16)"   # generate your own; never commit it
 PATH="$HOME/.local/share/uv/tools/litellm/bin:$PATH" \
   litellm --config litellm.config.yaml --port 4000 --host 0.0.0.0
 ```
@@ -53,7 +53,7 @@ harbor run -p <task-dir> -a oracle -o jobs --job-name <unique>
 Build the verifier images first, from `verifier-image/`:
 
 ```bash
-cd verifier-image && docker build -t dawn-verifier:1 .    # gate that votes 0
+cd verifier-image && docker build -t tally-verifier:1 .    # gate that votes 0
 ```
 
 ## What each task demonstrates

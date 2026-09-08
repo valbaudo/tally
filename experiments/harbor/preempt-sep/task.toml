@@ -2,7 +2,7 @@ schema_version = "1.4"
 artifacts = []
 
 [task]
-name = "dawn/preempt-sep"
+name = "tally/preempt-sep"
 version = "1.0.0"
 description = "Provisioning smoke test"
 keywords = []

@@ -6,13 +6,13 @@
 
 **Status:** Design approved on 2026-08-09
 
-**Goal:** Define the smallest native `script` boundary that can run arbitrary host programs while preserving Dawn's typed values, workspace rules, durable execution truth, cancellation, and honest external-effect semantics.
+**Goal:** Define the smallest native `script` boundary that can run arbitrary host programs while preserving Tally's typed values, workspace rules, durable execution truth, cancellation, and honest external-effect semantics.
 
 ## Product Principle
 
-A Dawn script is a native command with typed inputs and typed outputs. Everything required to turn that simple promise into a reliable workflow leaf belongs below the author-facing interface.
+A Tally script is a native command with typed inputs and typed outputs. Everything required to turn that simple promise into a reliable workflow leaf belongs below the author-facing interface.
 
-Scripts may invoke Python, shell utilities, compilers, document converters, OCR tools, browsers, Docker, remote APIs, or any other installed program. Dawn does not model those tools. It owns only the invocation boundary: value delivery, workspace allocation, process lifecycle, diagnostics, validation, capture, and atomic result publication.
+Scripts may invoke Python, shell utilities, compilers, document converters, OCR tools, browsers, Docker, remote APIs, or any other installed program. Tally does not model those tools. It owns only the invocation boundary: value delivery, workspace allocation, process lifecycle, diagnostics, validation, capture, and atomic result publication.
 
 This is a clean redesign. It has no compatibility obligation to the current process package, current plan format, Prestige's AWF files, or AWF's code-step contract.
 
@@ -24,7 +24,7 @@ This is a clean redesign. It has no compatibility obligation to the current proc
 - Never interpolate workflow values into argv or shell source. Scripts read typed input instead.
 - Start every script in its one fresh writable workspace; authors do not configure `cwd`.
 - Deliver structured input, structured output, and file/tree locations through one versioned process ABI.
-- Use fixed `DAWN_INPUT`, `DAWN_OUTPUT`, `DAWN_MANIFEST`, and `DAWN_EFFECT_KEY` environment variables.
+- Use fixed `TALLY_INPUT`, `TALLY_OUTPUT`, `TALLY_MANIFEST`, and `TALLY_EFFECT_KEY` environment variables.
 - Treat stdout and stderr as diagnostics only. They are never workflow values.
 - Close stdin. A tool requiring stdin can receive it through ordinary shell composition.
 - Supply a small documented native environment baseline plus explicitly requested external environment names.
@@ -38,7 +38,7 @@ This is a clean redesign. It has no compatibility obligation to the current proc
 - On continuation after local process loss, start a new attempt with the same effect key only after the old execution group is known dead.
 - Validate structured output and every file/tree capture before publishing one atomic candidate result.
 - Keep isolation policy below the workflow language and state every backend guarantee honestly.
-- Keep Docker and other persistent services outside Dawn's lifecycle model; scripts operate them as external effects.
+- Keep Docker and other persistent services outside Tally's lifecycle model; scripts operate them as external effects.
 - Defer exact author-facing YAML spelling to GitHub #12.
 
 ## What This Ticket Does Not Add
@@ -57,9 +57,9 @@ This design deliberately adds none of the following:
 - interactive terminal or PTY orchestration;
 - exactly-once claims for external effects;
 - PID-based fake process recovery; or
-- backward-compatibility fields for current Dawn or AWF.
+- backward-compatibility fields for current Tally or AWF.
 
-These cuts do not remove native capability. Shell composition, wrapper programs, installed host tools, detached supervisors, and stronger execution backends remain available without expanding Dawn's language.
+These cuts do not remove native capability. Shell composition, wrapper programs, installed host tools, detached supervisors, and stronger execution backends remain available without expanding Tally's language.
 
 ## Alternatives Considered
 
@@ -67,19 +67,19 @@ These cuts do not remove native capability. Shell composition, wrapper programs,
 
 The workflow could contain shell strings with template interpolation, arbitrary input destinations, arbitrary capture paths, host-environment allowlists, stdout results, configurable exit handling, and generic retries.
 
-This fits Prestige's existing files closely. It also makes shell quoting part of Dawn's type system, exposes filesystem layout as workflow meaning, duplicates typed dataflow through stdout and environment variables, and asks every backend to reproduce a growing collection of path and retry conventions.
+This fits Prestige's existing files closely. It also makes shell quoting part of Tally's type system, exposes filesystem layout as workflow meaning, duplicates typed dataflow through stdout and environment variables, and asks every backend to reproduce a growing collection of path and retry conventions.
 
 ### 2. Strict argv-only runner
 
 The language could accept only a direct executable and literal arguments. The runtime boundary would be small, but nearly every nontrivial Prestige script would require a checked-in wrapper file. Ordinary pipelines, redirection, conditionals, and short native setup steps would become ceremony.
 
-This removes useful authoring convenience without reducing runtime complexity: Dawn must supervise the same process and capture the same result either way.
+This removes useful authoring convenience without reducing runtime complexity: Tally must supervise the same process and capture the same result either way.
 
 ### 3. Manifested native invocation — chosen
 
-Dawn canonicalizes every command to argv, lowers multiline shell source to an ordinary shell argv, and gives the process a fixed typed-value and workspace ABI. The executor hides staging, process groups, diagnostics, validation, capture, and cleanup behind one boundary.
+Tally canonicalizes every command to argv, lowers multiline shell source to an ordinary shell argv, and gives the process a fixed typed-value and workspace ABI. The executor hides staging, process groups, diagnostics, validation, capture, and cleanup behind one boundary.
 
-This keeps the author experience small while preserving arbitrary native execution. Prestige's shell-heavy steps remain concise, but AWF-specific interpolation, path mapping, stdout output, and retry policy do not enter Dawn.
+This keeps the author experience small while preserving arbitrary native execution. Prestige's shell-heavy steps remain concise, but AWF-specific interpolation, path mapping, stdout output, and retry policy do not enter Tally.
 
 ## Domain Vocabulary
 
@@ -115,11 +115,11 @@ The **diagnostic stream** carries stdout, stderr, launch details, exit informati
 
 ### Candidate result
 
-A **candidate result** is the complete typed output assembled from `DAWN_OUTPUT`, declared file/tree slots, and optional workspace publication. It remains invisible until Dawn validates, stores, and commits the entire value.
+A **candidate result** is the complete typed output assembled from `TALLY_OUTPUT`, declared file/tree slots, and optional workspace publication. It remains invisible until Tally validates, stores, and commits the entire value.
 
 ### External effect
 
-An **external effect** is any mutation outside Dawn-owned candidate state: API calls, payments, messages, Git pushes, Docker containers, host services, remote jobs, or edits to host files. Dawn supplies a stable effect key that cooperating systems may use for deduplication, but it cannot transact with them.
+An **external effect** is any mutation outside Tally-owned candidate state: API calls, payments, messages, Git pushes, Docker containers, host services, remote jobs, or edits to host files. Tally supplies a stable effect key that cooperating systems may use for deduplication, but it cannot transact with them.
 
 ## Architecture and Ownership
 
@@ -129,7 +129,7 @@ flowchart LR
     P --> X["Native execution group"]
     X --> Q["Quiesce and classify"]
     Q --> V["Validate JSON and captures"]
-    V --> C["Candidate Dawn value"]
+    V --> C["Candidate Tally value"]
     C --> M["Atomic commit"]
 ```
 
@@ -171,7 +171,7 @@ The shell source is literal workflow behavior and contributes to the work finger
 
 Workflow values never become command text through template substitution. This removes quoting and injection semantics from the workflow compiler.
 
-A script needing dynamic values reads `DAWN_INPUT`. A native program can open that file directly; shell source can use `jq`, another parser, or a wrapper program. A command-line tool that accepts only arguments can be called by a small script that converts typed input to its native arguments.
+A script needing dynamic values reads `TALLY_INPUT`. A native program can open that file directly; shell source can use `jq`, another parser, or a wrapper program. A command-line tool that accepts only arguments can be called by a small script that converts typed input to its native arguments.
 
 This preserves dynamic execution capability while keeping the value boundary typed.
 
@@ -187,24 +187,24 @@ Every script invocation receives four fixed variables:
 
 | Name | Meaning |
 | --- | --- |
-| `DAWN_INPUT` | Absolute path to the canonical typed-input JSON file |
-| `DAWN_OUTPUT` | Absolute path where the script must write its typed-output JSON |
-| `DAWN_MANIFEST` | Absolute path to the versioned invocation manifest |
-| `DAWN_EFFECT_KEY` | Stable logical effect key for this node instance |
+| `TALLY_INPUT` | Absolute path to the canonical typed-input JSON file |
+| `TALLY_OUTPUT` | Absolute path where the script must write its typed-output JSON |
+| `TALLY_MANIFEST` | Absolute path to the versioned invocation manifest |
+| `TALLY_EFFECT_KEY` | Stable logical effect key for this node instance |
 
-`DAWN_INPUT`, `DAWN_OUTPUT`, and `DAWN_MANIFEST` live in a runtime control root outside the publishable workspace. `DAWN_OUTPUT` begins absent. The process must create it even when the contracted result is a scalar, string, or `null`.
+`TALLY_INPUT`, `TALLY_OUTPUT`, and `TALLY_MANIFEST` live in a runtime control root outside the publishable workspace. `TALLY_OUTPUT` begins absent. The process must create it even when the contracted result is a scalar, string, or `null`.
 
-No other `DAWN_*` variable is part of the initial public ABI. The workspace is the current directory and is also recorded in the manifest.
+No other `TALLY_*` variable is part of the initial public ABI. The workspace is the current directory and is also recorded in the manifest.
 
 ### Typed-input JSON
 
-`DAWN_INPUT` preserves the exact contracted input shape. Strings, integers, numbers, booleans, nulls, lists, maps, and objects use their canonical JSON representation.
+`TALLY_INPUT` preserves the exact contracted input shape. Strings, integers, numbers, booleans, nulls, lists, maps, and objects use their canonical JSON representation.
 
 File and tree leaves use reserved manifest references instead of physical paths:
 
 ```json
 {
-  "document": {"$dawn": "input:/document"},
+  "document": {"$tally": "input:/document"},
   "options": {"language": "en"}
 }
 ```
@@ -215,11 +215,11 @@ Every concrete input file/tree has an exact entry, including members of lists an
 
 ### Invocation manifest
 
-The manifest is versioned independently from workflow source. ABI `dawn.script/1` uses this exact envelope:
+The manifest is versioned independently from workflow source. ABI `tally.script/1` uses this exact envelope:
 
 ```json
 {
-  "abi": "dawn.script/1",
+  "abi": "tally.script/1",
   "workspace": "/runtime/.../workspace",
   "effect_key": "...",
   "inputs": {
@@ -260,24 +260,24 @@ For every materialized input the manifest records:
 - byte length for files; and
 - immutable content digest.
 
-For every statically known file/tree output, the manifest records one exact writable slot directory. A file slot must contain exactly one regular file, preserving that file's logical filename. A tree slot is itself the tree root and may be empty. For a dynamically sized list or map containing file/tree leaves, the manifest records a fixed Dawn-owned namespace root for the corresponding schema position.
+For every statically known file/tree output, the manifest records one exact writable slot directory. A file slot must contain exactly one regular file, preserving that file's logical filename. A tree slot is itself the tree root and may be empty. For a dynamically sized list or map containing file/tree leaves, the manifest records a fixed Tally-owned namespace root for the corresponding schema position.
 
 ### Input staging
 
-Named input file/tree values are materialized beneath a Dawn-owned input root outside the workspace. The optional base tree is materialized into the workspace itself under the universal workspace rules from GitHub #6.
+Named input file/tree values are materialized beneath a Tally-owned input root outside the workspace. The optional base tree is materialized into the workspace itself under the universal workspace rules from GitHub #6.
 
 Input staging is presented read-only and is never captured back. On the initial local backend this is a data-lifecycle boundary, not hostile-process isolation: a same-user process may be able to alter its disposable materialization or read other host paths, but it cannot mutate the immutable committed source value, and staged edits never flow downstream.
 
 ### Typed-output JSON
 
-The process writes exactly one valid JSON value to `DAWN_OUTPUT`. Dawn parses and canonicalizes it; scripts do not need to reproduce Dawn's canonical byte encoding. The resulting value must match the declared output contract after file/tree references are resolved.
+The process writes exactly one valid JSON value to `TALLY_OUTPUT`. Tally parses and canonicalizes it; scripts do not need to reproduce Tally's canonical byte encoding. The resulting value must match the declared output contract after file/tree references are resolved.
 
 Statically known file/tree leaves reference their exact output-manifest entry:
 
 ```json
 {
   "summary": "complete",
-  "report": {"$dawn": "output:/report"}
+  "report": {"$tally": "output:/report"}
 }
 ```
 
@@ -288,13 +288,13 @@ For a dynamic list or map of files/trees, the manifest supplies a fixed namespac
 ```json
 {
   "pages": [
-    {"$dawn": "output:/pages/*", "member": "0"},
-    {"$dawn": "output:/pages/*", "member": "1"}
+    {"$tally": "output:/pages/*", "member": "0"},
+    {"$tally": "output:/pages/*", "member": "1"}
   ]
 }
 ```
 
-For a dynamic file, the selected member is a directory containing exactly one regular file. For a dynamic tree, the selected member is the tree root. Dawn normalizes and confines member paths before capture. This supports arbitrary collections without adding workflow capture-path syntax.
+For a dynamic file, the selected member is a directory containing exactly one regular file. For a dynamic tree, the selected member is the tree root. Tally normalizes and confines member paths before capture. This supports arbitrary collections without adding workflow capture-path syntax.
 
 The ABI implementation must make static and dynamic references mechanically discoverable and validate them against the contracted value position. Unknown references, unresolved leaves, kind mismatches, escaping paths, and unsupported tree entries fail the candidate.
 
@@ -314,7 +314,7 @@ The local backend supplies a small documented baseline needed for native tools:
 - the effective native `HOME`;
 - attempt-local temporary-directory variables;
 - locale variables; and
-- the fixed Dawn ABI variables.
+- the fixed Tally ABI variables.
 
 The exact portable baseline belongs to the backend contract and is recorded by policy version. The initial local backend does not pretend that exposing the user's native home is credential isolation. A stronger backend may provide an isolated home as part of its explicitly recorded policy.
 
@@ -322,7 +322,7 @@ The exact portable baseline belongs to the backend contract and is recorded by p
 
 A resolved script contains a set of external environment-variable names. The operator supplies their values through runtime configuration. Missing requested names fail preflight before process launch.
 
-All requested values are treated as sensitive and invocation-local, whether they are credentials or ordinary host integration settings. Dawn has one mechanism, not parallel `env` and `secret-env` process protocols.
+All requested values are treated as sensitive and invocation-local, whether they are credentials or ordinary host integration settings. Tally has one mechanism, not parallel `env` and `secret-env` process protocols.
 
 Secret and environment values are never:
 
@@ -333,7 +333,7 @@ Secret and environment values are never:
 - automatically interpolated into commands; or
 - eligible as branch, map, loop, or gate data.
 
-The diagnostic pipeline must redact exact injected values before persistence or presentation. This prevents Dawn itself from serializing supplied secrets. It is not a hostile-script exfiltration guarantee: a native process with host authority can deliberately transform or transmit data it can access.
+The diagnostic pipeline must redact exact injected values before persistence or presentation. This prevents Tally itself from serializing supplied secrets. It is not a hostile-script exfiltration guarantee: a native process with host authority can deliberately transform or transmit data it can access.
 
 If an account, region, profile, credential version, or external setting is semantically important, the workflow should carry a nonsecret selector or version as ordinary typed input. Secret rotation alone does not change a work fingerprint.
 
@@ -343,7 +343,7 @@ Child processes inherit the constructed environment. A script may convert an env
 
 ## Logical Effect Key and External Effects
 
-Every script receives `DAWN_EFFECT_KEY` automatically before it starts. The same value also appears in the manifest.
+Every script receives `TALLY_EFFECT_KEY` automatically before it starts. The same value also appears in the manifest.
 
 The key is:
 
@@ -355,17 +355,17 @@ The key is:
 
 Scripts should forward the key when an external system supports idempotency or deduplication. Examples include API idempotency headers, payment request keys, remote-job labels, Docker labels, and database uniqueness keys.
 
-The key does not make execution exactly once. The external system may ignore it, an interruption may happen after an effect but before Dawn records success, and a later continuation may start a new process attempt. Dawn promises at-least-once execution around uncertain interruption.
+The key does not make execution exactly once. The external system may ignore it, an interruption may happen after an effect but before Tally records success, and a later continuation may start a new process attempt. Tally promises at-least-once execution around uncertain interruption.
 
-Docker containers, host daemons, remote jobs, and other deliberately persistent work are external effects. The script returns their identifiers as structured data when later steps need them, and `finally` performs unconditional cleanup. Dawn does not inspect or manage those systems itself.
+Docker containers, host daemons, remote jobs, and other deliberately persistent work are external effects. The script returns their identifiers as structured data when later steps need them, and `finally` performs unconditional cleanup. Tally does not inspect or manage those systems itself.
 
 ## Standard Streams
 
 ### Standard input
 
-The executor closes stdin immediately. Dawn never inherits an interactive terminal or lets parallel scripts compete for one input stream.
+The executor closes stdin immediately. Tally never inherits an interactive terminal or lets parallel scripts compete for one input stream.
 
-This does not remove pipe-oriented tools. Shell source can redirect `DAWN_INPUT`, a manifest-resolved file, or generated bytes into a command. A wrapper can do the same for direct argv execution. PTY-requiring tools may be invoked through an installed PTY wrapper; Dawn does not add interactive terminal state to workflow semantics.
+This does not remove pipe-oriented tools. Shell source can redirect `TALLY_INPUT`, a manifest-resolved file, or generated bytes into a command. A wrapper can do the same for direct argv execution. PTY-requiring tools may be invoked through an installed PTY wrapper; Tally does not add interactive terminal state to workflow semantics.
 
 ### Standard output and error
 
@@ -373,7 +373,7 @@ Stdout and stderr are drained concurrently from process start until the executio
 
 Both streams are diagnostics only. They are never parsed as results, imported into contracts, or interpreted as workflow control flow. The runtime may stream them live and persist them according to operator-wide diagnostic retention; no per-script log-mode or truncation knob appears in the workflow.
 
-Only `DAWN_OUTPUT` and captured file/tree slots can produce a workflow value.
+Only `TALLY_OUTPUT` and captured file/tree slots can produce a workflow value.
 
 ## Time and Cancellation
 
@@ -415,17 +415,17 @@ If the direct child exits while same-group descendants remain, the executor:
 2. reaps and drains what it owns; and
 3. returns `Failed(leaked_processes)`.
 
-It does not publish output even if the direct child exited zero. Otherwise Dawn could capture a workspace while hidden processes are still mutating it.
+It does not publish output even if the direct child exited zero. Otherwise Tally could capture a workspace while hidden processes are still mutating it.
 
 A deliberately persistent service must detach into an external lifecycle domain, close inherited pipes, and return an explicit handle. Docker, systemd, launchd, and purpose-built supervisors already provide such domains. Their cleanup belongs in `finally`.
 
-An intentionally detached process is no longer covered by the local execution-group guarantee. Dawn states that limitation rather than pretending process groups are containment.
+An intentionally detached process is no longer covered by the local execution-group guarantee. Tally states that limitation rather than pretending process groups are containment.
 
 ### Coordinator loss
 
 The local backend must make coordinator-loss cleanup a tested property. A conforming implementation retains enough runtime-owned attempt identity to establish that an old execution group is dead before a replacement attempt starts. A PID alone is insufficient because PIDs are reusable and diagnostic pipes and process state are lost.
 
-If Dawn loses an uncommitted local invocation:
+If Tally loses an uncommitted local invocation:
 
 - the old attempt never publishes a result;
 - the backend quiesces or verifies the death of its owned group;
@@ -433,7 +433,7 @@ If Dawn loses an uncommitted local invocation:
 - the logical effect key remains the same; and
 - the new process receives a freshly materialized workspace from committed inputs.
 
-This is recovery from interrupted execution, not an automatic retry loop. Exact implementation—such as a runtime-owned supervisor and control channel—belongs to the implementation plan. The semantic conformance requirement is that coordinator loss does not leave Dawn-owned descendants mutating state while a replacement starts.
+This is recovery from interrupted execution, not an automatic retry loop. Exact implementation—such as a runtime-owned supervisor and control channel—belongs to the implementation plan. The semantic conformance requirement is that coordinator loss does not leave Tally-owned descendants mutating state while a replacement starts.
 
 A future durable execution backend may checkpoint and recover the exact same remote job behind the executor boundary. That capability adds no workflow syntax and does not permit the local backend to fake recovery by PID.
 
@@ -446,22 +446,22 @@ The result classification is fixed:
 | Direct child exits `0`, group is quiet, output validates and captures | Candidate success |
 | Direct child exits nonzero | `Failed(exit)` with code in diagnostics |
 | Direct child dies from an unexpected signal | `Failed(signal)` with signal in diagnostics |
-| Dawn terminates for external/ancestor cancellation | `Cancelled` |
-| Dawn terminates for the optional wall deadline | `Failed(timeout)` |
+| Tally terminates for external/ancestor cancellation | `Cancelled` |
+| Tally terminates for the optional wall deadline | `Failed(timeout)` |
 | Direct child exits while owned descendants remain | `Failed(leaked_processes)` |
 | Executable cannot be resolved or launched | `Failed(launch)` |
-| `DAWN_OUTPUT` is absent, malformed, or contract-invalid | `Failed(output)` |
+| `TALLY_OUTPUT` is absent, malformed, or contract-invalid | `Failed(output)` |
 | A declared slot is missing, wrong-kind, unsafe, or uncapturable | `Failed(capture)` |
 
-When multiple facts exist, Dawn reports the causal stage that prevented candidate success and retains subordinate details as diagnostics. A nonzero exit does not become success because it happened to write valid output. Cancellation caused by Dawn is not misreported as an unexpected signal.
+When multiple facts exist, Tally reports the causal stage that prevented candidate success and retains subordinate details as diagnostics. A nonzero exit does not become success because it happened to write valid output. Cancellation caused by Tally is not misreported as an unexpected signal.
 
-Scripts normalize tool-specific exit conventions themselves. For example, a shell step using a search tool for which exit `1` means “no matches” can convert that condition into a typed result and exit zero. Dawn does not grow per-tool success-code policy.
+Scripts normalize tool-specific exit conventions themselves. For example, a shell step using a search tool for which exit `1` means “no matches” can convert that condition into a typed result and exit zero. Tally does not grow per-tool success-code policy.
 
 ## No Script Retry
 
-Dawn never automatically reruns a script because of an exit code, signal, timeout, malformed output, missing capture, or diagnostic text. It does not parse stderr for `429`, “overloaded,” or other provider phrases.
+Tally never automatically reruns a script because of an exit code, signal, timeout, malformed output, missing capture, or diagnostic text. It does not parse stderr for `429`, “overloaded,” or other provider phrases.
 
-The only automatic retry semantic in Dawn vNext remains GitHub #8 and #9's narrow adapter behavior: a positively recognized transient upstream provider failure may continue the same already-established provider session inside the same attempt. A generic script process is opaque and has no such session contract.
+The only automatic retry semantic in Tally vNext remains GitHub #8 and #9's narrow adapter behavior: a positively recognized transient upstream provider failure may continue the same already-established provider session inside the same attempt. A generic script process is opaque and has no such session contract.
 
 If a workflow wants an agent CLI with same-session transient continuation, it uses the corresponding `agent` adapter. If script code calls a remote service directly, that script owns any service-specific continuation or deduplication behavior.
 
@@ -471,12 +471,12 @@ Candidate construction happens only after the execution group is quiescent and t
 
 The executor then:
 
-1. reads exactly one JSON value from `DAWN_OUTPUT`;
+1. reads exactly one JSON value from `TALLY_OUTPUT`;
 2. validates its ordinary structure against the output contract;
 3. resolves every reserved file/tree reference against the manifest;
 4. validates media, kind, path confinement, symlinks, and required slots;
 5. captures every declared file/tree and optional published workspace into uncommitted content storage;
-6. assembles the one complete Dawn value; and
+6. assembles the one complete Tally value; and
 7. offers that value to the universal atomic commit boundary.
 
 If any step fails, every uncommitted structured value and captured byte is discarded or left unreachable for storage cleanup. No downstream node can observe a partial candidate.
@@ -521,7 +521,7 @@ The script-specific source surface contains only:
 - requested external environment names; and
 - an optional wall deadline.
 
-Everything else is universal Dawn language:
+Everything else is universal Tally language:
 
 - typed input and output ports;
 - file, tree, and media contracts;
@@ -549,12 +549,12 @@ The supplied Prestige pipeline contains 47 AWF `run` steps. Of those, 44 use mul
 
 The chosen contract covers those behaviors as follows:
 
-| Prestige/AWF behavior | Dawn vNext mapping |
+| Prestige/AWF behavior | Tally vNext mapping |
 | --- | --- |
 | Multiline `run` body | Shell convenience lowered to literal `/bin/sh -c` argv |
 | Direct Python or utility process | Canonical direct argv |
-| `{{ ... }}` command interpolation | Read typed values from `DAWN_INPUT`; no command templating |
-| `AWF_OUTPUT` JSON | Write the contracted value to `DAWN_OUTPUT` |
+| `{{ ... }}` command interpolation | Read typed values from `TALLY_INPUT`; no command templating |
+| `AWF_OUTPUT` JSON | Write the contracted value to `TALLY_OUTPUT` |
 | `input_files` destination map | Typed file/tree input plus manifest lookup |
 | `output_files` capture map | Declared file/tree output plus manifest slot |
 | Shared container working tree | One private workspace, optionally seeded from one immutable tree |
@@ -565,7 +565,7 @@ The chosen contract covers those behaviors as follows:
 | Generic AWF retry | Removed; scripts fail once, agent adapters own narrow same-session continuation |
 | stdout/exit implicit values | Diagnostics only; scripts write explicit typed output |
 
-Prestige's deterministic validators, report builders, Docker setup, scoring, consolidation, and cleanup require no additional Dawn node types. Its files and skill directories use the universal file/tree value model. Its provider-backed agent calls use GitHub #9's adapter boundary rather than hiding a provider session inside a generic script.
+Prestige's deterministic validators, report builders, Docker setup, scoring, consolidation, and cleanup require no additional Tally node types. Its files and skill directories use the universal file/tree value model. Its provider-backed agent calls use GitHub #9's adapter boundary rather than hiding a provider session inside a generic script.
 
 ## Conformance Strategy
 
@@ -605,7 +605,7 @@ Prestige's deterministic validators, report builders, Docker setup, scoring, con
 
 ### Crash and continuation
 
-- Kill the Dawn coordinator during a running script and prove no owned execution remains before replacement.
+- Kill the Tally coordinator during a running script and prove no owned execution remains before replacement.
 - Reconstruct the interrupted attempt without treating a PID as a session.
 - Start a continued process as a new attempt with the same effect key and fresh workspace.
 - Prove the generic script executor contains no automatic retry loop or provider-error parser.
@@ -615,7 +615,7 @@ Prestige's deterministic validators, report builders, Docker setup, scoring, con
 - Verify the local backend reports only its actual non-isolating policy.
 - Reject a stronger backend that cannot establish its claimed policy.
 - Prove no silent fallback to ordinary host execution.
-- Start and clean a Docker-backed external service using script plus `finally`, with no Docker-specific Dawn branch.
+- Start and clean a Docker-backed external service using script plus `finally`, with no Docker-specific Tally branch.
 
 ### Prestige-shaped tracer bullet
 
@@ -642,7 +642,7 @@ The approved design scores 10/10 against the software-design-philosophy diagnost
 | Design review is explicit | Pass: AWF-like and strict-argv alternatives and their costs are recorded. |
 | Each module hides an important decision | Pass: command lowering, native lifecycle, durable execution, and content identity each have one owner. |
 | Boundaries are understandable without implementation reading | Pass: the ownership table and process lifecycle describe the complete semantic handoff. |
-| Strategic design investment is present | Pass: current Dawn, AWF, Prestige, workspace isolation, and adapter recovery were inspected before fixing the contract. |
+| Strategic design investment is present | Pass: current Tally, AWF, Prestige, workspace isolation, and adapter recovery were inspected before fixing the contract. |
 
 The design reaches depth by exposing only command, named environment requirements, and an optional deadline while implementing the difficult native behavior below that surface.
 
@@ -682,12 +682,12 @@ None of these deferred decisions may add alternate dataflow channels, weaken can
 
 This design uses:
 
-- the approved Dawn vNext semantic, value/workspace, structured-control-flow, durable-execution, and agent-adapter specifications for GitHub #5 through #9;
-- current Dawn process launch, process-group cancellation, workspace materialization, and capture code and tests;
+- the approved Tally vNext semantic, value/workspace, structured-control-flow, durable-execution, and agent-adapter specifications for GitHub #5 through #9;
+- current Tally process launch, process-group cancellation, workspace materialization, and capture code and tests;
 - the supplied Prestige pipeline's shell, Python, Docker, environment, output, file, validation, report, and cleanup steps;
 - AWF's `CodeStep`, native executor, shell, environment, output, timeout, process-group, idempotency, and retry behavior;
-- `docs/research/dawn-native-workspace-isolation.md`; and
-- `docs/research/dawn-adapter-capability-contract.md` where script execution meets provider-backed agents.
+- `docs/research/tally-native-workspace-isolation.md`; and
+- `docs/research/tally-adapter-capability-contract.md` where script execution meets provider-backed agents.
 
 AWF proves that shell composition, file handoff, timeouts, process-tree cleanup, effect correlation, and durable outputs are necessary. It also shows the complexity cost of template interpolation, arbitrary path maps, stdout-derived results, generic retries, and shared mutable execution environments. The chosen design preserves the capabilities and removes the leakage.
 
@@ -697,14 +697,14 @@ AWF proves that shell composition, file handoff, timeouts, process-tree cleanup,
 | --- | --- |
 | Command representation | Canonical literal argv; multiline shell lowered to `/bin/sh -c` |
 | Working directory | One fresh writable workspace as fixed `cwd` |
-| Scalar input and output | `DAWN_INPUT` carries canonical typed JSON; `DAWN_OUTPUT` accepts one typed JSON value that Dawn validates and canonicalizes, including top-level scalars and `null` |
+| Scalar input and output | `TALLY_INPUT` carries canonical typed JSON; `TALLY_OUTPUT` accepts one typed JSON value that Tally validates and canonicalizes, including top-level scalars and `null` |
 | Named files | Manifest references, immutable input staging, fixed output slots and dynamic namespaces |
 | Environment and secrets | Small baseline, named external requirements, sensitive non-durable values, redaction boundary |
 | stdout and stderr | Concurrent diagnostics only; never workflow values |
 | Timeouts | One optional wall deadline; no default or idle timeout |
 | Process-tree cancellation | Owned execution group, graceful termination, run-wide grace, force-stop, reap, drain |
 | Exit classification | Fixed success, exit, signal, timeout, cancellation, launch, output, capture, and leaked-process outcomes |
-| Effect-key delivery | Automatic `DAWN_EFFECT_KEY` plus manifest field; stable logical semantics from #8 |
+| Effect-key delivery | Automatic `TALLY_EFFECT_KEY` plus manifest field; stable logical semantics from #8 |
 | Capture rules | Quiescence first, complete validation and capture, atomic candidate publication |
 | Resume | New local process attempt only after old group death, same effect key, fresh workspace |
 | Side-effect honesty | At-least-once semantics; detached services and Docker are explicit external effects |

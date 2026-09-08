@@ -1,4 +1,4 @@
-# Dawn vNext Values, Contracts, Workspaces, and Files
+# Tally vNext Values, Contracts, Workspaces, and Files
 
 **Issue:** GitHub #6, “Define values, contracts, workspaces, and named files”
 
@@ -6,13 +6,13 @@
 
 **Status:** Design approved on 2026-08-09
 
-**Goal:** Define how immutable typed data crosses node and workflow boundaries while filesystem-capable leaves receive one private writable workspace, without exposing host paths, staging machinery, implicit workspace merges, or provider file APIs in Dawn source.
+**Goal:** Define how immutable typed data crosses node and workflow boundaries while filesystem-capable leaves receive one private writable workspace, without exposing host paths, staging machinery, implicit workspace merges, or provider file APIs in Tally source.
 
 ## Product Principle
 
-Mutable filesystems exist only during a leaf invocation. Everything that crosses a Dawn boundary is an immutable contracted value.
+Mutable filesystems exist only during a leaf invocation. Everything that crosses a Tally boundary is an immutable contracted value.
 
-This gives Dawn one universal dataflow model for structured results, source trees, PDFs, images, generated reports, skill libraries, and arbitrary collections of files. A raw model may receive a file as an attachment while a tool agent receives the same value at a stable workspace path; that delivery difference belongs below the language boundary.
+This gives Tally one universal dataflow model for structured results, source trees, PDFs, images, generated reports, skill libraries, and arbitrary collections of files. A raw model may receive a file as an attachment while a tool agent receives the same value at a stable workspace path; that delivery difference belongs below the language boundary.
 
 PDFs, images, office documents, archives, source repositories, and Docker are not workflow node kinds. They are data or tools used by `llm`, `agent`, and `script` leaves.
 
@@ -22,11 +22,11 @@ PDFs, images, office documents, archives, source repositories, and Docker are no
 - `file` and `tree` are immutable value types.
 - A filesystem-capable leaf receives exactly one private writable workspace.
 - The workspace starts empty or from exactly one immutable base tree.
-- All other file/tree inputs are staged under fixed Dawn-owned input slots.
-- Declared file/tree outputs use fixed Dawn-owned output slots.
+- All other file/tree inputs are staged under fixed Tally-owned input slots.
+- Declared file/tree outputs use fixed Tally-owned output slots.
 - Authors never choose staging destinations or arbitrary capture paths.
 - Full-workspace publication is explicit and produces an immutable tree.
-- Parallel branches never share writable workspaces and Dawn never merges their trees.
+- Parallel branches never share writable workspaces and Tally never merges their trees.
 - Files and trees compose recursively inside objects, lists, and maps.
 - Bindings validate but never coerce, project, parse, or convert values.
 - File media type is semantic metadata; filename extension is not type authority.
@@ -43,7 +43,7 @@ Structured values, files, and trees cross boundaries immutably. Each filesystem 
 
 ### 2. Workspace-centric flow
 
-Almost all state could live in workspace snapshots. This resembles current Dawn and Prestige's long-lived AWF container, but small outputs repeatedly copy large trees, raw LLM calls need file extraction, and parallel branches create unavoidable merge ambiguity.
+Almost all state could live in workspace snapshots. This resembles current Tally and Prestige's long-lived AWF container, but small outputs repeatedly copy large trees, raw LLM calls need file extraction, and parallel branches create unavoidable merge ambiguity.
 
 ### 3. Path-oriented artifacts
 
@@ -88,7 +88,7 @@ No structured field, file, tree, or workspace snapshot becomes visible before st
 
 ## Contract Algebra
 
-Dawn uses a small recursive type algebra:
+Tally uses a small recursive type algebra:
 
 ```text
 Type = string
@@ -119,7 +119,7 @@ Type = string
 
 There are initially no arbitrary unions, tuples, intersections, regular-expression constraints, conditional schemas, embedded JSON Schema documents, or implicit nullable forms.
 
-Dawn validates this canonical contract itself at every boundary. An adapter may translate the structured portion into the provider's supported JSON Schema subset to improve generation, but provider enforcement is only assistance: it can never replace or weaken Dawn's final validation.
+Tally validates this canonical contract itself at every boundary. An adapter may translate the structured portion into the provider's supported JSON Schema subset to improve generation, but provider enforcement is only assistance: it can never replace or weaken Tally's final validation.
 
 ### Recursive files and trees
 
@@ -145,7 +145,7 @@ The runtime stores structured data canonically and represents nested files and t
 
 Content storage may deduplicate identical bytes. The later durable-identity design must still account for metadata that changes execution behavior, including media type, logical filename, and the position of a file within a contracted value.
 
-Host paths exist only while ingesting run inputs or materializing run outputs. Before the root graph starts, Dawn snapshots every supplied file and tree. Later host edits cannot change the run's input values.
+Host paths exist only while ingesting run inputs or materializing run outputs. Before the root graph starts, Tally snapshots every supplied file and tree. Later host edits cannot change the run's input values.
 
 ## File Values
 
@@ -160,7 +160,7 @@ A logical filename is one name, not a destination path. The runtime never treats
 
 ### Media type
 
-At ingestion Dawn chooses media type in this order:
+At ingestion Tally chooses media type in this order:
 
 1. an explicitly supplied media type;
 2. deterministic content sniffing; or
@@ -170,9 +170,9 @@ Every stored file media value is one canonical concrete type/subtype. Bare token
 
 Filename extensions are hints for humans and tools, not media-type authority. A file contract may restrict accepted media using exact types or patterns such as `application/pdf` and `image/*`.
 
-Filesystem output capture is deliberately different from input sniffing: `Outputs.File` requires the file's logical name and concrete media, while `Outputs.Tree` captures a tree with no file metadata. Those arguments are inherent facts of the result, not author-selected host paths or policy knobs. Consequently, a JSON output can remain exactly `application/json` even when its current bytes would sniff differently, and the Dawn-owned physical child named `value` is never reused as its semantic filename.
+Filesystem output capture is deliberately different from input sniffing: `Outputs.File` requires the file's logical name and concrete media, while `Outputs.Tree` captures a tree with no file metadata. Those arguments are inherent facts of the result, not author-selected host paths or policy knobs. Consequently, a JSON output can remain exactly `application/json` even when its current bytes would sniff differently, and the Tally-owned physical child named `value` is never reused as its semantic filename.
 
-Media constraints are validated at ingestion, input binding, adapter preflight, and output capture as applicable. Dawn does not silently rename, convert, render, OCR, extract, or parse a file to make it satisfy a contract.
+Media constraints are validated at ingestion, input binding, adapter preflight, and output capture as applicable. Tally does not silently rename, convert, render, OCR, extract, or parse a file to make it satisfy a contract.
 
 ## Tree Values
 
@@ -213,7 +213,7 @@ A filesystem-capable `agent` or `script` has one workspace role:
 
 Whole-workspace capture is never automatic. A filesystem leaf may explicitly declare one output sourced from its workspace. That output is a `tree` value.
 
-A leaf may publish both named outputs and its workspace. Dawn-managed input and output roots are excluded from workspace capture so named inputs and outputs are not duplicated into the tree.
+A leaf may publish both named outputs and its workspace. Tally-managed input and output roots are excluded from workspace capture so named inputs and outputs are not duplicated into the tree.
 
 If no workspace publication is declared, caches, temporary downloads, intermediate files, credentials, and other working state are discarded with the invocation environment.
 
@@ -227,7 +227,7 @@ A filesystem invocation exposes three logical roots:
 
 The exact native path and environment spelling belongs to the script and adapter contracts. The semantic rules are fixed here: locations are runtime-owned, deterministic, and not author-configurable.
 
-Dawn supplies a manifest containing, for every materialized value path:
+Tally supplies a manifest containing, for every materialized value path:
 
 - contract port and nested field/item path;
 - kind (`file` or `tree`);
@@ -303,7 +303,7 @@ A fan-in consumer may:
 - choose `WB` as its one writable base; and
 - receive the other tree and all named results as immutable side inputs.
 
-It may not select both `WA` and `WB` as writable bases. Dawn never chooses a winner, overlays directories, applies diffs, resolves path conflicts, or creates merge commits.
+It may not select both `WA` and `WB` as writable bases. Tally never chooses a winner, overlays directories, applies diffs, resolves path conflicts, or creates merge commits.
 
 When a real merge is required, an explicit `script` or `agent` receives one base plus the other tree as a named input, performs domain-appropriate reconciliation, and publishes a new tree `WC`. Because all side inputs live in port-derived namespaces, identical filenames from different branches cannot collide during staging.
 
@@ -323,19 +323,19 @@ Fidelity is a consumption requirement, not file metadata. The adapter must prefl
 
 A text-only conversion cannot satisfy a visual requirement. Unsupported media or insufficient fidelity fails before invocation rather than silently changing what the model sees.
 
-If a raw provider returns declared file outputs, the adapter must retrieve their bytes and metadata into Dawn storage before the node commits. An opaque provider file ID alone is not a durable Dawn result.
+If a raw provider returns declared file outputs, the adapter must retrieve their bytes and metadata into Tally storage before the node commits. An opaque provider file ID alone is not a durable Tally result.
 
 ### Tool agent
 
 An `agent` receives file/tree values through the invocation roots and manifest. The adapter tells the agent the stable paths or injects the manifest into its instructions. Skills may use the same mechanism as ordinary file/tree inputs, or an adapter may provide native skill support.
 
-A local or remote agent must return all declared outputs to Dawn before commit. Remote container or session state is never a substitute for captured values.
+A local or remote agent must return all declared outputs to Tally before commit. Remote container or session state is never a substitute for captured values.
 
 ### Native script
 
 A `script` receives the same workspace, inputs, outputs, and manifest contract. Exact environment variable names, standard streams, exit handling, timeouts, and process cancellation belong to the native script execution ticket.
 
-Scripts may invoke Docker, converters, OCR tools, compilers, or any other host tool. Dawn does not manage those tools or add their concepts to the value language.
+Scripts may invoke Docker, converters, OCR tools, compilers, or any other host tool. Tally does not manage those tools or add their concepts to the value language.
 
 ## Secrets Boundary
 
@@ -354,7 +354,7 @@ Secret bytes are never:
 
 Prestige's Adyen and provider credentials therefore become execution configuration for the leaves that need them, while repository URLs, findings, reports, and files remain normal dataflow values.
 
-Dawn does not initially support a leaf producing a durable secret value for another leaf. If demonstrated workflows require that capability, it needs a separately designed opaque secret-reference and secret-store contract rather than relaxing ordinary values.
+Tally does not initially support a leaf producing a durable secret value for another leaf. If demonstrated workflows require that capability, it needs a separately designed opaque secret-reference and secret-store contract rather than relaxing ordinary values.
 
 ## Validation and Failure Semantics
 
@@ -421,7 +421,7 @@ There are no author knobs for staging destination, capture source path, workspac
 
 ## Prestige Translation Proof
 
-The current Prestige AWF workflows rely heavily on a long-lived container and shared `/tmp/prestige-codex` paths. Dawn vNext makes those dependencies explicit:
+The current Prestige AWF workflows rely heavily on a long-lived container and shared `/tmp/prestige-codex` paths. Tally vNext makes those dependencies explicit:
 
 1. The clone/recon phase publishes the repository as a source tree and reconnaissance as structured output.
 2. Static analysis and dynamic setup receive private source-tree workspaces. They do not share a live directory.
@@ -430,11 +430,11 @@ The current Prestige AWF workflows rely heavily on a long-lived container and sh
 5. Validation receives findings and target data through contracted ports.
 6. Scoring and remediation run in parallel, publishing independently named result files and any intentionally continued source trees.
 7. The report node receives scored findings, validation statistics, and remediation results through isolated named ports. It needs no `/tmp` destination mapping.
-8. Cleanup uses the later `finally` semantics and structured service identifiers; Dawn does not manage Docker lifecycle itself.
+8. Cleanup uses the later `finally` semantics and structured service identifiers; Tally does not manage Docker lifecycle itself.
 
 The pipeline's existing `scored-findings.json`, `validation-stats.json`, `remediation.json`, and final report naturally become named file values. Validator and skill directories become named tree inputs. The repository follows explicit base-tree selection and publication rather than ambient shared-container state.
 
-At the main fan-in, identical filenames from different branches remain isolated by their port paths. If remediation and another branch both modify source trees, a deliberate merge leaf chooses the reconciliation rule. Dawn supplies no hidden filesystem winner.
+At the main fan-in, identical filenames from different branches remain isolated by their port paths. If remediation and another branch both modify source trees, a deliberate merge leaf chooses the reconciliation rule. Tally supplies no hidden filesystem winner.
 
 ## Ownership Boundary
 
@@ -472,7 +472,7 @@ The tests are semantic and independent of YAML spelling.
 - Prove neither branch mutates the committed source tree.
 - Derive collision-free paths for nested objects, lists, maps, and adversarial names.
 - Reject missing, extra, wrong-kind, and colliding outputs.
-- Exclude Dawn input/output roots from workspace publication.
+- Exclude Tally input/output roots from workspace publication.
 - Discard private workspace state when publication is absent.
 - Fan in two branches with one base tree and the other branch's results as named inputs.
 - Require an explicit leaf to merge two produced trees.
@@ -515,9 +515,9 @@ Later designs may choose syntax and implementation but may not add a second arti
 
 ## Explicit Non-Goals
 
-- Backward compatibility with current Dawn `workspace` field behavior.
+- Backward compatibility with current Tally `workspace` field behavior.
 - AWF-compatible `input_files` destination maps or `output_files` capture paths.
-- Full JSON Schema as Dawn's type language.
+- Full JSON Schema as Tally's type language.
 - A document-specific node catalog.
 - Automatic OCR, parsing, rendering, archiving, extraction, or conversion.
 - Persisting raw provider file IDs as durable results.
@@ -532,11 +532,11 @@ This design uses:
 
 - the Prestige/AWF workflow files under the supplied `pipeline/` directory;
 - AWF's named `input_files`/`output_files` artifact channel and cross-container resume tests;
-- current Dawn's content-addressed workspace materialization/capture behavior;
-- `docs/research/dawn-adapter-capability-contract.md`; and
-- `docs/research/dawn-native-workspace-isolation.md`.
+- current Tally's content-addressed workspace materialization/capture behavior;
+- `docs/research/tally-adapter-capability-contract.md`; and
+- `docs/research/tally-native-workspace-isolation.md`.
 
-AWF demonstrates the need for durable named file handoff and capture-before-commit. Its author-selected destination paths and shared long-lived containers are deliberately not copied. Current Dawn demonstrates immutable tree branching but not independent named files, portable empty directories, or safe absolute-symlink handling.
+AWF demonstrates the need for durable named file handoff and capture-before-commit. Its author-selected destination paths and shared long-lived containers are deliberately not copied. Current Tally demonstrates immutable tree branching but not independent named files, portable empty directories, or safe absolute-symlink handling.
 
 ## Issue #6 Acceptance Mapping
 
@@ -583,7 +583,7 @@ The syntax-independent Prestige-shaped tracer's first execution was already gree
 
 ```text
 go test ./workspace -run 'TestPrestigeValueFlow|TestProductInvariant' -count=1
-ok   github.com/valbaudo/dawn/workspace 1.107s
+ok   github.com/valbaudo/tally/workspace 1.107s
 ```
 
 Verification commands:
@@ -594,7 +594,7 @@ go test -race ./content ./value ./workflow ./workspace -count=1
 go test ./... -count=1
 go vet ./...
 git diff --check
-if rg -n 'github\.com/valbaudo/dawn/(store|plan|gate|backend|proc)|dawn\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
+if rg -n 'github\.com/valbaudo/tally/(store|plan|gate|backend|proc)|tally\.(Ref|Backend|Invocation|Result)' content value workflow workspace; then exit 1; fi
 if rg -n 'KindWorkspace|artifact(s)?\s+map|input_files|output_files|capture_path|destination_path|merge_policy|provider_file_id|workspace_dir|mounts:' content value workflow workspace; then exit 1; fi
 ```
 
